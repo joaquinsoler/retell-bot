@@ -12,10 +12,10 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-RETELL_API_KEY = "key_ec7376eaa103bebc81b1de6555e5"   # ← Render leerá esto desde variables
+RETELL_API_KEY = "key_ec7376eaa103bebc81b1de6555e5"
 
 def create_bot_for_client(client_name, custom_prompt, voice_id, language, model="gpt-4.1-mini"):
-    print(f"🚀 Creando bot para: {client_name}")
+    print(f"🚀 Creando bot para: {client_name} | Voz: {voice_id} | Idioma: {language}")
 
     def retell_request(method, endpoint, json_data=None):
         url = f"https://api.retellai.com{endpoint}"
@@ -69,17 +69,18 @@ def create_bot_for_client(client_name, custom_prompt, voice_id, language, model=
 @app.get("/create-bot")
 @app.post("/create-bot")
 async def create_bot(
-    client_name: str = Query(...),
-    voice_id: str = Query(...),
-    language: str = Query(...),
+    client_name: str = Query(None),
+    voice_id: str = Query(None),
+    language: str = Query(None),
     custom_prompt: str = Query(None),
     model: str = Query("gpt-4.1-mini")
 ):
+    if not client_name or not voice_id or not language:
+        raise HTTPException(status_code=422, detail="Faltan parámetros obligatorios")
+    
     try:
         return create_bot_for_client(client_name, custom_prompt, voice_id, language, model)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+print("Servidor listo")

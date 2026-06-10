@@ -68,20 +68,29 @@ def create_bot_for_client(client_name, custom_prompt, voice_id, language, model=
 
 @app.post("/create-bot")
 async def create_bot(request: Request):
+    print("📥 Recibida petición desde Wix")
+    
     try:
-        data = await request.json()          # ← Wix envía JSON en el body
+        data = await request.json()
+        print("Datos recibidos:", data)
     except:
-        data = dict(await request.form())    # fallback por si envía form
+        data = {}
+        print("No se pudo leer JSON")
 
+    # Extraer exactamente como los envía Wix
     client_name = data.get("client_name")
     voice_id = data.get("voice_id")
     language = data.get("language")
     custom_prompt = data.get("custom_prompt")
-    model = data.get("model", "gpt-4.1-mini")
+
+    print(f"Parámetros extraídos → client_name: {client_name}, voice_id: {voice_id}, language: {language}")
 
     if not client_name or not voice_id or not language:
         raise HTTPException(status_code=422, detail=f"Faltan parámetros. Recibido: {data}")
 
-    return create_bot_for_client(client_name, custom_prompt, voice_id, language, model)
+    try:
+        return create_bot_for_client(client_name, custom_prompt, voice_id, language)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
-print("Servidor listo para recibir datos desde Wix")
+print("✅ Servidor listo para Wix Automations")

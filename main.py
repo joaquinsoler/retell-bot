@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 import requests
 
@@ -66,21 +66,22 @@ def create_bot_for_client(client_name, custom_prompt, voice_id, language, model=
 
     return {"success": True, "phone_number": free_number, "agent_id": agent_id}
 
-@app.get("/create-bot")
 @app.post("/create-bot")
-async def create_bot(
-    client_name: str = Query(None),
-    voice_id: str = Query(None),
-    language: str = Query(None),
-    custom_prompt: str = Query(None),
-    model: str = Query("gpt-4.1-mini")
-):
-    if not client_name or not voice_id or not language:
-        raise HTTPException(status_code=422, detail="Faltan parámetros obligatorios")
-    
+async def create_bot(request: Request):
     try:
-        return create_bot_for_client(client_name, custom_prompt, voice_id, language, model)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        data = await request.json()          # ← Wix envía JSON en el body
+    except:
+        data = dict(await request.form())    # fallback por si envía form
 
-print("Servidor listo")
+    client_name = data.get("client_name")
+    voice_id = data.get("voice_id")
+    language = data.get("language")
+    custom_prompt = data.get("custom_prompt")
+    model = data.get("model", "gpt-4.1-mini")
+
+    if not client_name or not voice_id or not language:
+        raise HTTPException(status_code=422, detail=f"Faltan parámetros. Recibido: {data}")
+
+    return create_bot_for_client(client_name, custom_prompt, voice_id, language, model)
+
+print("Servidor listo para recibir datos desde Wix")

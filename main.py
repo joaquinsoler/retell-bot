@@ -27,7 +27,6 @@ def create_bot_for_client(client_name, custom_prompt, voice_id, language, model=
         except:
             return None
 
-    # Crear LLM
     llm = retell_request("POST", "/create-retell-llm", {
         "model": model,
         "general_prompt": custom_prompt or f"Eres el contestador automático de {client_name}. Sé profesional y amable.",
@@ -37,7 +36,6 @@ def create_bot_for_client(client_name, custom_prompt, voice_id, language, model=
     if not llm_id:
         raise Exception("Error creando LLM")
 
-    # Crear Agent
     agent = retell_request("POST", "/create-agent", {
         "agent_name": f"{client_name} Bot",
         "response_engine": {"type": "retell-llm", "llm_id": llm_id},
@@ -48,7 +46,6 @@ def create_bot_for_client(client_name, custom_prompt, voice_id, language, model=
     if not agent_id:
         raise Exception("Error creando Agent")
 
-    # Buscar número libre
     numbers = retell_request("GET", "/v2/list-phone-numbers")
     free_number = None
     for p in numbers.get("items", []) if numbers else []:
@@ -59,7 +56,6 @@ def create_bot_for_client(client_name, custom_prompt, voice_id, language, model=
     if not free_number:
         raise Exception("No hay números libres")
 
-    # Asignar
     retell_request("PATCH", f"/update-phone-number/{free_number}", {
         "inbound_agents": [{"agent_id": agent_id, "weight": 1.0}]
     })
@@ -71,19 +67,22 @@ async def create_bot(request: Request):
     print("📥 Recibida petición desde Wix")
     
     try:
-        data = await request.json()
-        print("Datos recibidos:", data)
+        payload = await request.json()
+        print("Payload completo:", payload)
+        
+        # Wix envuelve los datos dentro de "data"
+        data = payload.get("data", payload)   # por si a veces viene directo
+        
     except:
         data = {}
         print("No se pudo leer JSON")
 
-    # Extraer exactamente como los envía Wix
     client_name = data.get("client_name")
     voice_id = data.get("voice_id")
     language = data.get("language")
     custom_prompt = data.get("custom_prompt")
 
-    print(f"Parámetros extraídos → client_name: {client_name}, voice_id: {voice_id}, language: {language}")
+    print(f"📋 Parámetros extraídos → client_name: {client_name}, voice_id: {voice_id}, language: {language}")
 
     if not client_name or not voice_id or not language:
         raise HTTPException(status_code=422, detail=f"Faltan parámetros. Recibido: {data}")
@@ -93,4 +92,4 @@ async def create_bot(request: Request):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-print("✅ Servidor listo para Wix Automations")
+print("✅ Servidor listo para Wix (versión corregida)")

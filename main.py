@@ -85,7 +85,7 @@ def create_bot_for_client(nombre_negocio, sector, servicios, horario, zona, voic
         "agent_name": f"Bot {nombre_negocio}",
         "response_engine": {"type": "retell-llm", "llm_id": llm_id},
         "voice_id": voice_id,
-        "language": "es-ES"  # Forzamos idioma a español por defecto
+        "language": "es-ES"  # Forzamos idioma a español
     })
     
     if not agent_res or "agent_id" not in agent_res:
@@ -115,13 +115,14 @@ def create_bot_for_client(nombre_negocio, sector, servicios, horario, zona, voic
     return {"status": "success", "agent_id": agent_id, "phone_number": free_number}
 
 
-@app.post("/webhook-wix")
+# RUTA CORREGIDA: Ahora coincide perfectamente con lo que busca Wix
+@app.post("/create-retell-bot")
 async def wix_webhook(request: Request):
-    print("📩 Recibida petición desde Wix")
+    print("📩 Recibida petición desde Wix en /create-retell-bot")
     
     try:
         payload = await request.json()
-        print("Payload completo:", payload)
+        print("Payload completo recibido:", payload)
         # Wix suele envolver las variables dentro de un objeto "data"
         data = payload.get("data", payload)
     except Exception:
@@ -139,11 +140,11 @@ async def wix_webhook(request: Request):
     if not all([asistente_nombre, nombre_negocio, sector, servicios, horario, zona]):
         raise HTTPException(
             status_code=422, 
-            detail=f"Faltan parámetros obligatorios. Recibido: {data}"
+            detail=f"Faltan parámetros obligatorios en el formulario. Recibido: {data}"
         )
         
     # Mapear el nombre seleccionado al Voice ID correspondiente de Retell
-    voice_id = VOICE_MAPPING.get(asistente_nombre, "openai-Alloy") # "openai-Alloy" actúa como backup
+    voice_id = VOICE_MAPPING.get(asistente_nombre, "openai-Alloy") # "openai-Alloy" actúa como backup si falla
     
     try:
         # Ejecutar el flujo de creación de Retell
@@ -161,4 +162,4 @@ async def wix_webhook(request: Request):
         print(f"❌ Error en el proceso: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
-print("🚀 Servidor listo para Wix Automations (Versión Multi-campo)")
+print("🚀 Servidor listo para Wix Automations (Versión Multi-campo con Ruta Corregida)")

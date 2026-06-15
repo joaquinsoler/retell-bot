@@ -1,10 +1,10 @@
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 import requests
-import os
 
 app = FastAPI()
 
+# Configuración de CORS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -13,157 +13,152 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-RETELL_API_KEY = os.getenv("RETELL_API_KEY", "key_ec7376eaa103bebc81b1de6555e5")
+RETELL_API_KEY = "key_ec7376eaa103bebc81b1de6555e5"
 
-# ====================== MAPEO DE VOCES ======================
-voice_map = {
-    "Cimo": "retell-Cimo",
-    "Brynne": "retell-Brynne",
-    "Chloe": "retell-Chloe",
-    "Kate": "retell-Kate",
-    "Grace": "retell-Grace",
-    "Leland": "retell-Leland",
-    "Marissa": "retell-Marissa",
-    "Lily": "retell-Lily",
-    "Delia": "retell-Delia",
-    "Nico": "retell-Nico",
-    "Rita": "retell-Rita",
-    "Meritt": "retell-Meritt",
-    "Willa": "retell-Willa",
-    "Maren": "retell-Maren",
-    "Tasmin": "retell-Tasmin",
-    "Ashley": "retell-Ashley",
-    "Andrea": "retell-Andrea",
-    "Claudia": "retell-Claudia",
-    "Gaby": "retell-Gaby",
-    "Alejandro": "retell-Alejandro",
+# Diccionario para mapear el nombre del asistente de Wix con el Voice ID de Retell
+# ¡IMPORTANTE! Reemplaza estos valores de ejemplo por tus Voice IDs reales de Retell.
+VOICE_MAPPING = {
+    "Cimo": "11labs-Adrian",
+    "Brynne": "11labs-Brynne",
+    "Chloe": "11labs-Chloe",
+    "Kate": "openai-Nova",
+    "Grace": "openai-Shimmer",
+    "Leland": "11labs-Leland",
+    "Marissa": "11labs-Marissa",
+    "Lily": "11labs-Lily",
+    "Delia": "11labs-Delia",
+    "Nico": "openai-Onyx",
+    "Rita": "11labs-Rita",
+    "Meritt": "11labs-Meritt",
+    "Willa": "11labs-Willa",
+    "Maren": "11labs-Maren",
+    "Tasmin": "11labs-Tasmin",
+    "Ashley": "11labs-Ashley",
+    # Voces habitualmente usadas para español:
+    "Andrea": "openai-Alloy", 
+    "Claudia": "11labs-Claudia",
+    "Gaby": "11labs-Gaby",
+    "Alejandro": "openai-Echo"
 }
 
 def retell_request(method, endpoint, json_data=None):
     url = f"https://api.retellai.com{endpoint}"
-    headers = {"Authorization": f"Bearer {RETELL_API_KEY}", "Content-Type": "application/json"}
+    headers = {
+        "Authorization": f"Bearer {RETELL_API_KEY}",
+        "Content-Type": "application/json"
+    }
     r = requests.request(method, url, headers=headers, json=json_data)
     print(f"→ {method} {endpoint} → {r.status_code}")
     try:
-        return r.json() if r.ok else r.text
+        return r.json() if r.ok else None
     except:
         return None
 
-def create_bot_for_client(nombre_negocio, asistente, sector, servicios, horario, zona):
-    print(f"🚀 Creando bot para: {nombre_negocio} | Voz: {asistente}")
-
-    voice_id = voice_map.get(asistente)
-    if not voice_id:
-        raise Exception(f"Voz {asistente} no encontrada en el mapeo")
-
-    # Prompt personalizado
-    custom_prompt = f"""Eres un asistente virtual profesional del negocio "{nombre_negocio}".
-Sector: {sector or "No especificado"}.
-Servicios: {servicios or "No especificados"}.
-Horario: {horario or "No especificado"}.
-Zona de servicio: {zona or "No especificada"}.
-
-Sé amable, claro y profesional. Ayuda a los clientes con información, citas y consultas."""
-
-    # 1. Crear LLM
-    llm = retell_request("POST", "/create-retell-llm", {
-        "model": "gpt-4o-mini",
+def create_bot_for_client(nombre_negocio, sector, servicios, horario, zona, voice_id, model="gpt-4.1-mini"):
+    print(f"🤖 Creando bot para: {nombre_negocio} | Sector: {sector} | Voz: {voice_id}")
+    
+    # Construcción dinámica del System Prompt con los nuevos campos de tu formulario
+    custom_prompt = (
+        f"Eres el asistente virtual de {nombre_negocio}, una empresa del sector {sector}.\n"
+        f"Tu objetivo es atender a los clientes de manera profesional y amable.\n\n"
+        f"Información clave de la empresa:\n"
+        f"- Servicios que ofrecemos: {servicios}\n"
+        f"- Horario de atención: {horario}\n"
+        f"- Zona de servicio/cobertura: {zona}\n\n"
+        f"Por favor, responde a las dudas de los usuarios basándote estrictamente en esta información. "
+        f"Habla siempre en español de forma natural y concisa."
+    )
+    
+    # 1. Crear el LLM en Retell
+    llm_res = retell_request("POST", "/create-retell-llm", {
+        "model": model,
         "general_prompt": custom_prompt
     })
-    llm_id = llm.get("llm_id") if isinstance(llm, dict) else None
-    if not llm_id:
-        raise Exception("Error creando LLM")
-
-    # 2. Crear Agent (más parecido a tu código original)
-    agent = retell_request("POST", "/create-agent", {
-        "agent_name": f"{nombre_negocio} - {asistente}",
+    
+    if not llm_res or "llm_id" not in llm_res:
+        raise Exception("Error creando LLM en Retell")
+    
+    llm_id = llm_res["llm_id"]
+    
+    # 2. Crear el Agente vinculándole el LLM y la Voz
+    agent_res = retell_request("POST", "/create-agent", {
+        "agent_name": f"Bot {nombre_negocio}",
         "response_engine": {"type": "retell-llm", "llm_id": llm_id},
         "voice_id": voice_id,
-        "language": "es"
+        "language": "es-ES"  # Forzamos idioma a español por defecto
     })
-    agent_id = agent.get("agent_id") if isinstance(agent, dict) else None
-    if not agent_id:
-        raise Exception(f"Error creando Agent: {agent}")
-
-    # 3. Asignar número libre
+    
+    if not agent_res or "agent_id" not in agent_res:
+        raise Exception("Error creando Agente en Retell")
+        
+    agent_id = agent_res["agent_id"]
+    
+    # 3. Buscar un número de teléfono libre en tu cuenta de Retell
     numbers = retell_request("GET", "/v2/list-phone-numbers")
     free_number = None
-    for p in numbers.get("items", []) if isinstance(numbers, dict) else []:
-        if not p.get("inbound_agents"):
-            free_number = p.get("phone_number")
-            break
+    
+    if numbers and "items" in numbers:
+        for p in numbers["items"]:
+            # Validamos si el número no tiene agentes asignados (está libre)
+            if not p.get("inbound_agents") or len(p["inbound_agents"]) == 0:
+                free_number = p.get("phone_number")
+                break
+                
+    if not free_number:
+        raise Exception("No se encontraron números de teléfono libres en Retell para asignar.")
+        
+    # 4. Asignar el agente recién creado al número libre encontrado
+    retell_request("PATCH", f"/update-phone-number/{free_number}", {
+        "inbound_agents": [{"agent_id": agent_id, "weight": 1.0}]
+    })
+    
+    return {"status": "success", "agent_id": agent_id, "phone_number": free_number}
 
-    if free_number:
-        retell_request("PATCH", f"/update-phone-number/{free_number}", {
-            "inbound_agents": [{"agent_id": agent_id, "weight": 1.0}]
-        })
 
-    return agent_id, free_number
-
-
-@app.post("/create-retell-bot")
-async def create_retell_bot(request: Request):
-    print("📥 Recibida petición desde Wix")
-
+@app.post("/webhook-wix")
+async def wix_webhook(request: Request):
+    print("📩 Recibida petición desde Wix")
+    
     try:
         payload = await request.json()
+        print("Payload completo:", payload)
+        # Wix suele envolver las variables dentro de un objeto "data"
         data = payload.get("data", payload)
-        print("🔍 Payload procesado")
-    except:
-        data = {}
-
-    # ==================== EXTRAER DATOS (según lo que realmente envía Wix) ====================
-    asistente = None
-    nombre_negocio = None
-    sector = None
-    servicios = None
-    horario = None
-    zona = None
-
-    for item in data.get("submissions", []):
-        label = item.get("label", "")
-        value = item.get("value")
-        if "Asistente" in label:
-            asistente = value
-        elif "Nombre del Negocio" in label:
-            nombre_negocio = value
-        elif "Sector" in label:
-            sector = value
-        elif "Servicios" in label:
-            servicios = value
-        elif "Horario" in label:
-            horario = value
-        elif "Zona" in label:
-            zona = value
-
-    # Backup por field:
-    asistente = asistente or data.get("field:asistente")
-    nombre_negocio = nombre_negocio or data.get("field:nombre_negocio")
-
-    print(f"📋 Extraído → Asistente: {asistente} | Negocio: {nombre_negocio}")
-
-    if not asistente or not nombre_negocio:
-        raise HTTPException(status_code=422, detail="Faltan campos obligatorios")
-
-    try:
-        agent_id, phone_number = create_bot_for_client(
-            nombre_negocio, asistente, sector, servicios, horario, zona
+    except Exception:
+        raise HTTPException(status_code=400, detail="No se pudo procesar el JSON de la petición.")
+    
+    # Extracción de los nuevos campos desde el formulario de Wix
+    asistente_nombre = data.get("asistente")
+    nombre_negocio = data.get("nombre_negocio")
+    sector = data.get("sector")
+    servicios = data.get("servicios")
+    horario = data.get("horario")
+    zona = data.get("zona")
+    
+    # Validación de campos obligatorios
+    if not all([asistente_nombre, nombre_negocio, sector, servicios, horario, zona]):
+        raise HTTPException(
+            status_code=422, 
+            detail=f"Faltan parámetros obligatorios. Recibido: {data}"
         )
-
-        print(f"✅ Bot creado exitosamente - Agent ID: {agent_id}")
-        return {
-            "success": True,
-            "agent_id": agent_id,
-            "phone_number": phone_number,
-            "agent_name": f"{nombre_negocio} - {asistente}",
-            "voice": asistente
-        }
-
+        
+    # Mapear el nombre seleccionado al Voice ID correspondiente de Retell
+    voice_id = VOICE_MAPPING.get(asistente_nombre, "openai-Alloy") # "openai-Alloy" actúa como backup
+    
+    try:
+        # Ejecutar el flujo de creación de Retell
+        resultado = create_bot_for_client(
+            nombre_negocio=nombre_negocio,
+            sector=sector,
+            servicios=servicios,
+            horario=horario,
+            zona=zona,
+            voice_id=voice_id
+        )
+        return resultado
+        
     except Exception as e:
-        print(f"❌ Error: {str(e)}")
+        print(f"❌ Error en el proceso: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
-
-@app.get("/")
-async def root():
-    return {"status": "ok", "message": "Servidor funcionando"}
+print("🚀 Servidor listo para Wix Automations (Versión Multi-campo)")

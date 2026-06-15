@@ -16,7 +16,6 @@ app.add_middleware(
 RETELL_API_KEY = "key_ec7376eaa103bebc81b1de6555e5"
 
 # Diccionario para mapear el nombre del asistente de Wix con el Voice ID de Retell
-# ¡IMPORTANTE! Reemplaza estos valores de ejemplo por tus Voice IDs reales de Retell.
 VOICE_MAPPING = {
     "Cimo": "11labs-Adrian",
     "Brynne": "11labs-Brynne",
@@ -34,7 +33,6 @@ VOICE_MAPPING = {
     "Maren": "11labs-Maren",
     "Tasmin": "11labs-Tasmin",
     "Ashley": "11labs-Ashley",
-    # Voces habitualmente usadas para español:
     "Andrea": "openai-Alloy", 
     "Claudia": "11labs-Claudia",
     "Gaby": "11labs-Gaby",
@@ -57,7 +55,7 @@ def retell_request(method, endpoint, json_data=None):
 def create_bot_for_client(nombre_negocio, sector, servicios, horario, zona, voice_id, model="gpt-4.1-mini"):
     print(f"🤖 Creando bot para: {nombre_negocio} | Sector: {sector} | Voz: {voice_id}")
     
-    # Construcción dinámica del System Prompt con los nuevos campos de tu formulario
+    # Construcción dinámica del System Prompt
     custom_prompt = (
         f"Eres el asistente virtual de {nombre_negocio}, una empresa del sector {sector}.\n"
         f"Tu objetivo es atender a los clientes de manera profesional y amable.\n\n"
@@ -85,7 +83,7 @@ def create_bot_for_client(nombre_negocio, sector, servicios, horario, zona, voic
         "agent_name": f"Bot {nombre_negocio}",
         "response_engine": {"type": "retell-llm", "llm_id": llm_id},
         "voice_id": voice_id,
-        "language": "es-ES"  # Forzamos idioma a español
+        "language": "es-ES"
     })
     
     if not agent_res or "agent_id" not in agent_res:
@@ -93,13 +91,12 @@ def create_bot_for_client(nombre_negocio, sector, servicios, horario, zona, voic
         
     agent_id = agent_res["agent_id"]
     
-    # 3. Buscar un número de teléfono libre en tu cuenta de Retell
+    # 3. Buscar un número de teléfono libre
     numbers = retell_request("GET", "/v2/list-phone-numbers")
     free_number = None
     
     if numbers and "items" in numbers:
         for p in numbers["items"]:
-            # Validamos si el número no tiene agentes asignados (está libre)
             if not p.get("inbound_agents") or len(p["inbound_agents"]) == 0:
                 free_number = p.get("phone_number")
                 break
@@ -107,7 +104,7 @@ def create_bot_for_client(nombre_negocio, sector, servicios, horario, zona, voic
     if not free_number:
         raise Exception("No se encontraron números de teléfono libres en Retell para asignar.")
         
-    # 4. Asignar el agente recién creado al número libre encontrado
+    # 4. Asignar el agente al número libre
     retell_request("PATCH", f"/update-phone-number/{free_number}", {
         "inbound_agents": [{"agent_id": agent_id, "weight": 1.0}]
     })
@@ -115,39 +112,40 @@ def create_bot_for_client(nombre_negocio, sector, servicios, horario, zona, voic
     return {"status": "success", "agent_id": agent_id, "phone_number": free_number}
 
 
-# RUTA CORREGIDA: Ahora coincide perfectamente con lo que busca Wix
 @app.post("/create-retell-bot")
 async def wix_webhook(request: Request):
     print("📩 Recibida petición desde Wix en /create-retell-bot")
     
     try:
         payload = await request.json()
-        print("Payload completo recibido:", payload)
-        # Wix suele envolver las variables dentro de un objeto "data"
         data = payload.get("data", payload)
     except Exception:
         raise HTTPException(status_code=400, detail="No se pudo procesar el JSON de la petición.")
     
-    # Extracción de los nuevos campos desde el formulario de Wix
-    asistente_nombre = data.get("asistente")
-    nombre_negocio = data.get("nombre_negocio")
-    sector = data.get("sector")
-    servicios = data.get("servicios")
-    horario = data.get("horario")
-    zona = data.get("zona")
+    # CORRECCIÓN AQUÍ: Intentar extraer con prefijo 'field:' y si no existe usar la clave limpia
+    asistente_nombre = data.get("field:asistente") or data.get("asistente")
+    nombre_negocio = data.get("field:nombre_negocio") or data.get("nombre_negocio")
+    sector = data.get("field:sector") or data.get("sector")
+    servicios = data.get("field:servicios") or data.get("servicios")
+    horario = data.get("field:horario") or data.get("horario")
+    zona = data.get("field:zona") or data.get("zona")
+    
+    # Log de depuración para ver qué se ha extraído en tu consola de Render
+    print(f"Campos extraídos -> Asistente: {asistente_nombre}, Negocio: {nombre_negocio}, Sector: {sector}")
     
     # Validación de campos obligatorios
     if not all([asistente_nombre, nombre_negocio, sector, servicios, horario, zona]):
         raise HTTPException(
             status_code=422, 
-            detail=f"Faltan parámetros obligatorios en el formulario. Recibido: {data}"
+            detail=f"Faltan parámetros obligatorios en el formulario. Datos procesados: "
+                   f"asistente={asistente_nombre}, negocio={nombre_negocio}, sector={sector}, "
+                   f"servicios={servicios}, horario={horario}, zona={zona}"
         )
         
     # Mapear el nombre seleccionado al Voice ID correspondiente de Retell
-    voice_id = VOICE_MAPPING.get(asistente_nombre, "openai-Alloy") # "openai-Alloy" actúa como backup si falla
+    voice_id = VOICE_MAPPING.get(asistente_nombre, "openai-Alloy")
     
     try:
-        # Ejecutar el flujo de creación de Retell
         resultado = create_bot_for_client(
             nombre_negocio=nombre_negocio,
             sector=sector,
@@ -162,4 +160,4 @@ async def wix_webhook(request: Request):
         print(f"❌ Error en el proceso: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
-print("🚀 Servidor listo para Wix Automations (Versión Multi-campo con Ruta Corregida)")
+print("🚀 Servidor listo para Wix Automations (Soporte prefijos Wix)")

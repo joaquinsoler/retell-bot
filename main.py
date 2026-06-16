@@ -4,7 +4,7 @@ import requests
 
 app = FastAPI()
 
-# Configuración de CORS
+# Configuración de CORS total para evitar bloqueos del iFrame de Wix
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -46,11 +46,12 @@ def retell_request(method, endpoint, json_data=None):
         "Authorization": f"Bearer {RETELL_API_KEY}",
         "Content-Type": "application/json"
     }
-    r = requests.request(method, url, headers=headers, json=json_data)
-    print(f"→ {method} {endpoint} → {r.status_code}")
     try:
+        r = requests.request(method, url, headers=headers, json=json_data)
+        print(f"→ {method} {endpoint} → {r.status_code}")
         return r.json() if r.ok else None
-    except:
+    except Exception as e:
+        print(f"❌ Error en la llamada a Retell: {str(e)}")
         return None
 
 def create_bot_for_client(nombre_negocio, sector, servicios, horario, zona, voice_id, model="gpt-4.1-mini"):
@@ -109,14 +110,14 @@ def create_bot_for_client(nombre_negocio, sector, servicios, horario, zona, voic
 
 @app.post("/create-retell-bot")
 async def wix_webhook(request: Request):
-    print("📩 Recibida petición desde el HTML de Wix en /create-retell-bot")
+    print("📩 Recibida petición en /create-retell-bot")
     try:
         payload = await request.json()
+        # Capacidad de leer si viene envuelto en 'data' o directo en la raíz
         data = payload.get("data", payload)
     except Exception:
         raise HTTPException(status_code=400, detail="No se pudo procesar el JSON.")
     
-    # Extracción de campos con el prefijo "field:" enviado por tu iFrame HTML
     asistente_nombre = data.get("field:asistente") or data.get("asistente")
     nombre_negocio = data.get("field:nombre_negocio") or data.get("nombre_negocio")
     sector = data.get("field:sector") or data.get("sector")
@@ -127,7 +128,7 @@ async def wix_webhook(request: Request):
     print(f"Campos procesados -> Asistente: {asistente_nombre} | Negocio: {nombre_negocio}")
     
     if not all([asistente_nombre, nombre_negocio, sector, servicios, horario, zona]):
-        raise HTTPException(status_code=422, detail="Faltan parámetros obligatorios en el JSON recibido.")
+        raise HTTPException(status_code=422, detail="Faltan parámetros obligatorios.")
         
     voice_id = VOICE_MAPPING.get(asistente_nombre, "openai-Alloy")
     
@@ -142,7 +143,5 @@ async def wix_webhook(request: Request):
         )
         return resultado
     except Exception as e:
-        print(f"❌ Error en el proceso interno: {str(e)}")
+        print(f"❌ Error interno en Render: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
-
-print("🚀 Servidor listo para peticiones del iFrame HTML de Wix")

@@ -70,7 +70,7 @@ def retell_request(method, endpoint, json_data=None):
         return None
 
 # =====================================================================
-# PASO 1: WEBHOOK DE REGISTRO COMERCIAL Y ALTA DE BOT CON METADATOS
+# PASO 1: WEBHOOK DE REGISTRO COMERCIAL Y ALTA DE BOT CON LLM PERSISTENTE
 # =====================================================================
 @app.post("/create-retell-bot")
 async def wix_webhook(request: Request):
@@ -111,12 +111,13 @@ async def wix_webhook(request: Request):
     tool_res = retell_request("POST", "/create-tool", tool_definition)
     tool_name = tool_res.get("tool_name") if tool_res else None
 
-    # 2. Configurar el Prompt y el LLM
+    # 2. Configurar el Prompt guardando el ID del calendario al final de forma oculta
     custom_prompt = (
         f"Eres el asistente virtual telefónico de {nombre_negocio}, especializado en el sector {sector}.\n"
         f"Servicios disponibles: {servicios}\nHorario de atención: {horario}\nUbicación: {zona}\n\n"
         f"Tu único objetivo es gestionar citas usando la herramienta de calendario asignada. "
-        f"Antes de confirmar cualquier reserva, comprueba si el hueco está libre. Responde de forma muy natural, corta y siempre en español."
+        f"Antes de confirmar cualquier reserva, comprueba si el hueco está libre. Responde de forma muy natural, corta y siempre en español.\n"
+        f"--- METADATA_INTERNAL_DO_NOT_DELETE: {calendar_id} ---"
     )
     llm_payload = {"model": "gpt-4o-mini", "general_prompt": custom_prompt}
     if tool_name: llm_payload["tools"] = [tool_name]
@@ -126,14 +127,12 @@ async def wix_webhook(request: Request):
         raise HTTPException(status_code=500, detail="Fallo al registrar el motor LLM en Retell.")
     llm_id = llm_res["llm_id"]
 
-    # 3. Crear el Agente vinculando el ID de calendario en sus metadatos internos
+    # 3. Crear el Agente vinculando el llm_id de manera limpia y estricta
     agent_res = retell_request("POST", "/create-agent", {
         "agent_name": f"Bot {nombre_negocio}",
         "response_engine": {"type": "retell-llm", "llm_id": llm_id},
         "voice_id": voice_id,
-        "language": "es-ES",
-        # Inyección persistente de metadatos para evitar pérdidas por reinicio de Render
-        "metadata": {"linked_calendar_id": calendar_id}
+        "language": "es-ES"
     })
     
     if not agent_res or "agent_id" not in agent_res:
@@ -193,17 +192,25 @@ async def retell_interaction(request: Request):
         fecha_hora_str = args.get("fecha_hora")
         nombre_paciente = args.get("nombre_paciente", "Paciente Anónimo")
 
-        # 🧠 EXTRACCIÓN PERSISTENTE NATIVA: Si la memoria del servidor se borró, le pedimos los metadatos directos a Retell
+        # 🧠 RECUPERACIÓN INDESTRUCTIBLE: Consultamos el perfil del Agente para llegar a su LLM y extraer el Calendar ID
         calendar_id = None
         print(f"📞 Interacción telefónica entrante del agente: {agent_id}")
         
         agent_profile = retell_request("GET", f"/get-agent/{agent_id}")
-        if agent_profile and "metadata" in agent_profile:
-            calendar_id = agent_profile["metadata"].get("linked_calendar_id")
+        if agent_profile and "response_engine" in agent_profile:
+            llm_id = agent_profile["response_engine"].get("llm_id")
+            if llm_id:
+                # Consultamos el motor LLM asociado al bot
+                llm_profile = retell_request("GET", f"/get-retell-llm/{llm_id}")
+                if llm_profile and "general_prompt" in llm_profile:
+                    prompt = llm_profile["general_prompt"]
+                    # Extraer el ID cortando la cadena de texto oculta
+                    if "METADATA_INTERNAL_DO_NOT_DELETE:" in prompt:
+                        calendar_id = prompt.split("METADATA_INTERNAL_DO_NOT_DELETE:")[1].split("---")[0].strip()
             
         if not calendar_id:
-            print("❌ No se ha podido localizar el metadato 'linked_calendar_id' en Retell.")
-            return {"status": "error", "mensaje": "Este agente no tiene metadatos de agenda configurados."}
+            print("❌ No se ha podido extraer el ID del calendario desde las directrices del LLM.")
+            return {"status": "error", "mensaje": "ID de agenda no localizado en la estructura persistente."}
 
         service = get_calendar_service()
 
@@ -233,6 +240,13 @@ async def retell_interaction(request: Request):
                 'start': {'dateTime': time_min, 'timeZone': 'Europe/Madrid'},
                 'end': {'dateTime': time_max, 'timeZone': 'Europe/Madrid'},
             }
+            service.events().insert(calendarId=calendar_id, body=event_body).execute()
+            print(f"📅 ¡Cita guardada con éxito en la agenda: {calendar_id}!")
+            return {"status": "reservado", "mensaje": "Cita registrada con éxito."}
+            
+    except Exception as e:
+        print(f"❌ Error crítico procesando la herramienta de agenda: {str(e)}")
+        return {"status": "error", "mensaje": str(e)}
             service.events().insert(calendarId=calendar_id, body=event_body).execute()
             print(f"📅 ¡Cita guardada con éxito en la agenda: {calendar_id}!")
             return {"status": "reservado", "mensaje": "Cita registrada con éxito."}

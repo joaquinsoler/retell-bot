@@ -1,10 +1,12 @@
-import subprocess, sys, os, time, json, requests
-from fastapi import FastAPI, HTTPException, Request
+import os
+import json
+import requests
+import uvicorn
+from fastapi import FastAPI, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from datetime import datetime, timedelta
-import uvicorn
 
 app = FastAPI()
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
@@ -15,54 +17,50 @@ RENDER_SERVER_URL = os.getenv("RENDER_SERVER_URL")
 GOOGLE_SERVICE_ACCOUNT_JSON = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON")
 
 def get_calendar_service():
-    # Carga segura del JSON de credenciales
+    if not GOOGLE_SERVICE_ACCOUNT_JSON: raise Exception("Falta credencial JSON")
     info = json.loads(GOOGLE_SERVICE_ACCOUNT_JSON) if GOOGLE_SERVICE_ACCOUNT_JSON.startswith("{") else json.load(open(GOOGLE_SERVICE_ACCOUNT_JSON))
     creds = service_account.Credentials.from_service_account_info(info, scopes=['https://www.googleapis.com/auth/calendar'])
     return build('calendar', 'v3', credentials=creds)
 
-def retell_request(method, endpoint, json_data=None):
+def retell_request(method, endpoint, data=None):
     url = f"https://api.retellai.com{endpoint}"
     headers = {"Authorization": f"Bearer {RETELL_API_KEY}", "Content-Type": "application/json"}
-    response = requests.request(method, url, headers=headers, json=json_data)
-    if not response.ok: print(f"ERROR RETELL {endpoint}: {response.text}")
-    return response.json() if response.ok else None
+    r = requests.request(method, url, headers=headers, json=data)
+    return r.json() if r.ok else None
 
 @app.post("/create-retell-bot")
 async def create_bot(request: Request):
     data = (await request.json()).get("data", await request.json())
     calendar_id = data.get("calendar_id")
     
-    # Tool Definition estricta
-    tool_definition = {
-        "tool_name": "gestor_citas",
-        "tool_type": "custom",
+    # 1. Definir herramienta
+    tool = {
+        "tool_name": "gestor_citas", "tool_type": "custom",
         "url": f"{RENDER_SERVER_URL}/retell-check-and-book",
         "method": "POST",
-        "description": "Si quieres reservar una cita, PIDE NOMBRE, MOTIVO Y TELÉFONO. Luego usa esta herramienta.",
+        "description": "Reserva citas. Pide: Nombre, Motivo, Teléfono.",
         "parameters": {
             "type": "object",
             "properties": {
                 "accion": {"type": "string", "enum": ["comprobar", "reservar"]},
-                "fecha_hora": {"type": "string", "description": "YYYY-MM-DDTHH:MM:SS"},
-                "nombre": {"type": "string"}, "motivo": {"type": "string"}, "telefono": {"type": "string"}
+                "fecha_hora": {"type": "string"}, "nombre": {"type": "string"},
+                "motivo": {"type": "string"}, "telefono": {"type": "string"}
             },
             "required": ["accion", "fecha_hora"]
         }
     }
-    retell_request("POST", "/create-tool", tool_definition)
+    retell_request("POST", "/create-tool", tool)
 
-    # Prompt con Metadata oculta para persistencia
-    prompt = (f"Eres el asistente de {data.get('nombre_negocio', 'tu empresa')}. "
-              f"Tu prioridad es agendar citas. OBLIGATORIO: Pide Nombre, Motivo y Teléfono antes de reservar. "
-              f"--- METADATA: {calendar_id} ---")
-    
+    # 2. Crear LLM con metadato persistente
+    prompt = f"Eres el asistente. OBLIGATORIO pedir: Nombre, Motivo, Teléfono antes de reservar. --- CALENDAR_ID: {calendar_id} ---"
     llm = retell_request("POST", "/create-retell-llm", {"model": "gpt-4o-mini", "general_prompt": prompt, "tools": ["gestor_citas"]})
+    
+    # 3. Crear Agente
     agent = retell_request("POST", "/create-agent", {
         "agent_name": f"Bot {data.get('nombre_negocio')}",
         "response_engine": {"type": "retell-llm", "llm_id": llm["llm_id"]},
         "voice_id": "openai-Alloy"
     })
-    
     return {"status": "success", "agent_id": agent["agent_id"]}
 
 @app.post("/retell-check-and-book")
@@ -71,30 +69,28 @@ async def handle_interaction(request: Request):
     args = payload.get("args", {})
     agent_id = payload.get("agent_id")
     
-    # 1. Recuperar ID del calendario desde el prompt del LLM
+    # Recuperar calendar_id
     agent = retell_request("GET", f"/get-agent/{agent_id}")
     llm = retell_request("GET", f"/get-retell-llm/{agent['response_engine']['llm_id']}")
-    calendar_id = llm['general_prompt'].split("METADATA:")[1].split("---")[0].strip()
+    cal_id = llm['general_prompt'].split("CALENDAR_ID:")[1].split("---")[0].strip()
     
-    service = get_calendar_service()
-    start_dt = datetime.fromisoformat(args["fecha_hora"].replace("Z", ""))
+    start = datetime.fromisoformat(args["fecha_hora"].replace("Z", ""))
     
     if args["accion"] == "reservar":
-        # 2. Inserción con validación de datos recibidos
+        if not (args.get("nombre") and args.get("motivo") and args.get("telefono")):
+            return {"status": "error", "mensaje": "Faltan datos."}
+        
         event = {
-            'summary': f"Cita: {args.get('nombre', 'Cliente')}",
-            'description': f"Motivo: {args.get('motivo', 'N/A')}\nTel: {args.get('telefono', 'N/A')}",
-            'start': {'dateTime': start_dt.isoformat()},
-            'end': {'dateTime': (start_dt + timedelta(minutes=30)).isoformat()}
+            'summary': f"Cita: {args['nombre']}",
+            'description': f"Motivo: {args['motivo']}\nTel: {args['telefono']}",
+            'start': {'dateTime': start.isoformat()},
+            'end': {'dateTime': (start + timedelta(minutes=30)).isoformat()}
         }
-        try:
-            service.events().insert(calendarId=calendar_id, body=event).execute()
-            return {"status": "reservado"}
-        except Exception as e:
-            return {"status": "error", "mensaje": str(e)}
-            
+        get_calendar_service().events().insert(calendarId=cal_id, body=event).execute()
+        return {"status": "reservado"}
     return {"status": "comprobado"}
 
 if __name__ == "__main__":
-    # Render asigna el puerto mediante PORT
-    uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 8000)))
+    # Puerto dinámico obligatorio para Render
+    port = int(os.environ.get("PORT", 10000))
+    uvicorn.run("main:app", host="0.0.0.0", port=port, reload=False)

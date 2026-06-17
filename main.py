@@ -34,9 +34,6 @@ RETELL_API_KEY = os.getenv("RETELL_API_KEY")
 RENDER_SERVER_URL = os.getenv("RENDER_SERVER_URL")
 GOOGLE_SERVICE_ACCOUNT_JSON = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON")
 
-# Mapeo persistente en memoria (Agent ID -> Calendar ID del cliente)
-CALENDAR_MAPPING = {}
-
 VOICE_MAPPING = {
     "Cimo": "11labs-Adrian", "Brynne": "11labs-Brynne", "Chloe": "11labs-Chloe",
     "Kate": "openai-Nova", "Grace": "openai-Shimmer", "Leland": "11labs-Leland",
@@ -73,7 +70,7 @@ def retell_request(method, endpoint, json_data=None):
         return None
 
 # =====================================================================
-# PASO 1: WEBHOOK PARA REGISTRAR LOS DATOS Y CREAR EL BOT EN RETELL
+# PASO 1: WEBHOOK DE REGISTRO COMERCIAL Y ALTA DE BOT CON METADATOS
 # =====================================================================
 @app.post("/create-retell-bot")
 async def wix_webhook(request: Request):
@@ -94,19 +91,19 @@ async def wix_webhook(request: Request):
     zona = data.get("zona", "España")
     voice_id = VOICE_MAPPING.get(data.get("asistente"), "openai-Alloy")
 
-    # 1. Registrar Herramienta Personalizada en Retell
+    # 1. Registrar Custom Tool en Retell
     tool_definition = {
         "tool_name": f"agenda_{nombre_negocio.lower().replace(' ', '_')}",
         "tool_type": "custom",
         "url": f"{RENDER_SERVER_URL}/retell-check-and-book",
         "method": "POST",
-        "description": "Comprueba la disponibilidad o guarda reservas en la agenda de Google Calendar del cliente.",
+        "description": "Comprueba la disponibilidad de citas o guarda reservas en la agenda de Google Calendar de la empresa.",
         "parameters": {
             "type": "object",
             "properties": {
                 "accion": {"type": "string", "description": "Acción a realizar: 'comprobar' o 'reservar'."},
                 "fecha_hora": {"type": "string", "description": "Formato ISO 8601 (YYYY-MM-DDTHH:MM:SS)."},
-                "nombre_paciente": {"type": "string", "description": "Nombre del paciente (obligatorio solo para reservar)."}
+                "nombre_paciente": {"type": "string", "description": "Nombre completo del cliente (obligatorio solo para reservar)."}
             },
             "required": ["accion", "fecha_hora"]
         }
@@ -118,8 +115,8 @@ async def wix_webhook(request: Request):
     custom_prompt = (
         f"Eres el asistente virtual telefónico de {nombre_negocio}, especializado en el sector {sector}.\n"
         f"Servicios disponibles: {servicios}\nHorario de atención: {horario}\nUbicación: {zona}\n\n"
-        f"Tu objetivo principal es gestionar citas usando la herramienta de calendario asignada. "
-        f"Antes de confirmar cualquier reserva, comprueba si el hueco está libre. Habla de forma natural, concisa y en español."
+        f"Tu único objetivo es gestionar citas usando la herramienta de calendario asignada. "
+        f"Antes de confirmar cualquier reserva, comprueba si el hueco está libre. Responde de forma muy natural, corta y siempre en español."
     )
     llm_payload = {"model": "gpt-4o-mini", "general_prompt": custom_prompt}
     if tool_name: llm_payload["tools"] = [tool_name]
@@ -129,21 +126,21 @@ async def wix_webhook(request: Request):
         raise HTTPException(status_code=500, detail="Fallo al registrar el motor LLM en Retell.")
     llm_id = llm_res["llm_id"]
 
-    # 3. Crear el Agente en Retell
+    # 3. Crear el Agente vinculando el ID de calendario en sus metadatos internos
     agent_res = retell_request("POST", "/create-agent", {
         "agent_name": f"Bot {nombre_negocio}",
         "response_engine": {"type": "retell-llm", "llm_id": llm_id},
         "voice_id": voice_id,
-        "language": "es-ES"
+        "language": "es-ES",
+        # Inyección persistente de metadatos para evitar pérdidas por reinicio de Render
+        "metadata": {"linked_calendar_id": calendar_id}
     })
+    
     if not agent_res or "agent_id" not in agent_res:
         raise HTTPException(status_code=500, detail="Fallo al registrar el agente en Retell.")
     agent_id = agent_res["agent_id"]
 
-    # Guardar la relación en memoria indexada por su nuevo Agent ID
-    CALENDAR_MAPPING[agent_id] = calendar_id
-
-    # 4. Asignar número telefónico libre de Retell
+    # 4. Asignar número telefónico libre
     numbers = retell_request("GET", "/v2/list-phone-numbers")
     free_number = "+34 (Asignando número...)"
     if numbers and "items" in numbers:
@@ -166,33 +163,24 @@ async def wix_webhook(request: Request):
 
 
 # =====================================================================
-# PASO 2: NUEVO ENDPOINT DE VERIFICACIÓN DE PERMISOS EN TIEMPO REAL
+# VERIFICACIÓN DE PERMISOS DE GOOGLE CALENDAR
 # =====================================================================
 @app.post("/verify-calendar-access")
 async def verify_calendar_access(request: Request):
     try:
         payload = await request.json()
         calendar_id = payload.get("calendar_id")
+        if not calendar_id: raise HTTPException(status_code=400, detail="Falta el campo 'calendar_id'.")
         
-        if not calendar_id:
-            raise HTTPException(status_code=400, detail="Falta el campo 'calendar_id' para verificar.")
-
-        # Intentar conectar con la API usando las credenciales privadas del bot
         service = get_calendar_service()
-        
-        # Una llamada de prueba ligera que evalúa si tenemos permisos de lectura/escritura
-        acl_status = service.calendars().get(calendarId=calendar_id).execute()
-        
+        service.calendars().get(calendarId=calendar_id).execute()
         return {"status": "authorized", "message": "Acceso verificado con éxito."}
     except Exception:
-        raise HTTPException(
-            status_code=403, 
-            detail="Acceso denegado. Asegúrate de haber guardado el correo del bot dentro de Google Calendar con permisos de edición."
-        )
+        raise HTTPException(status_code=403, detail="Acceso denegado por Google Calendar.")
 
 
 # =====================================================================
-# INTERACCIÓN EN TIEMPO REAL DURANTE LA LLAMADA TELEFÓNICA
+# INTERACCIÓN PERSISTENTE EN TIEMPO REAL DURANTE LA LLAMADA TELEFÓNICA
 # =====================================================================
 @app.post("/retell-check-and-book")
 async def retell_interaction(request: Request):
@@ -205,9 +193,17 @@ async def retell_interaction(request: Request):
         fecha_hora_str = args.get("fecha_hora")
         nombre_paciente = args.get("nombre_paciente", "Paciente Anónimo")
 
-        calendar_id = CALENDAR_MAPPING.get(agent_id)
+        # 🧠 EXTRACCIÓN PERSISTENTE NATIVA: Si la memoria del servidor se borró, le pedimos los metadatos directos a Retell
+        calendar_id = None
+        print(f"📞 Interacción telefónica entrante del agente: {agent_id}")
+        
+        agent_profile = retell_request("GET", f"/get-agent/{agent_id}")
+        if agent_profile and "metadata" in agent_profile:
+            calendar_id = agent_profile["metadata"].get("linked_calendar_id")
+            
         if not calendar_id:
-            return {"status": "error", "mensaje": "Este agente no tiene asignado un ID de agenda activo."}
+            print("❌ No se ha podido localizar el metadato 'linked_calendar_id' en Retell.")
+            return {"status": "error", "mensaje": "Este agente no tiene metadatos de agenda configurados."}
 
         service = get_calendar_service()
 
@@ -218,6 +214,7 @@ async def retell_interaction(request: Request):
         time_min = start_time.strftime("%Y-%m-%dT%H:%M:%S+02:00")
         time_max = end_time.strftime("%Y-%m-%dT%H:%M:%S+02:00")
 
+        # Consultar huecos libres en Google Calendar
         events_result = service.events().list(
             calendarId=calendar_id, timeMin=time_min, timeMax=time_max, singleEvents=True
         ).execute()
@@ -237,7 +234,9 @@ async def retell_interaction(request: Request):
                 'end': {'dateTime': time_max, 'timeZone': 'Europe/Madrid'},
             }
             service.events().insert(calendarId=calendar_id, body=event_body).execute()
+            print(f"📅 ¡Cita guardada con éxito en la agenda: {calendar_id}!")
             return {"status": "reservado", "mensaje": "Cita registrada con éxito."}
             
     except Exception as e:
+        print(f"❌ Error crítico procesando la herramienta de agenda: {str(e)}")
         return {"status": "error", "mensaje": str(e)}

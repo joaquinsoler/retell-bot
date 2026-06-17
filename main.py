@@ -1,11 +1,10 @@
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 import requests
-import os  # Necesario para leer de forma segura las variables de entorno
+import os
 
 app = FastAPI()
 
-# Configuración de CORS total para evitar bloqueos del iFrame de Wix
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -14,77 +13,43 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Cargamos las credenciales desde el entorno de Render de forma segura
+# CARGA DE CREDENCIALES DESDE ENTORNO
 RETELL_API_KEY = os.getenv("RETELL_API_KEY")
-CAL_API_KEY = os.getenv("CAL_API_KEY")
+CAL_API_KEY = os.getenv("CAL_API_KEY")  # Tu clave cal_live_...
+X_CAL_CLIENT_ID = os.getenv("X_CAL_CLIENT_ID")  # El Client ID de tu OAuth PKCE
 
-# Diccionario mapeado con los 21 nombres del carrusel HTML
 VOICE_MAPPING = {
-    "Cimo": "11labs-Adrian",
-    "Brynne": "11labs-Brynne",
-    "Chloe": "11labs-Chloe",
-    "Kate": "openai-Nova",
-    "Grace": "openai-Shimmer",
-    "Leland": "11labs-Leland",
-    "Marissa": "11labs-Marissa",
-    "Lily": "11labs-Lily",
-    "Della": "11labs-Delia",
-    "Nico": "openai-Onyx",
-    "Rita": "11labs-Rita",
-    "Meritt": "11labs-Meritt",
-    "Willa": "11labs-Willa",
-    "Maren": "11labs-Maren",
-    "Tasmin": "11labs-Tasmin",
-    "Ashley": "11labs-Ashley",
-    "Andrea": "openai-Alloy",
-    "Claudia": "11labs-Claudia",
-    "Gaby": "11labs-Gaby",
-    "Alejandro": "openai-Echo",
-    "Sloane": "11labs-Sloane"
+    "Cimo": "11labs-Adrian", "Brynne": "11labs-Brynne", "Chloe": "11labs-Chloe",
+    "Kate": "openai-Nova", "Grace": "openai-Shimmer", "Leland": "11labs-Leland",
+    "Marissa": "11labs-Marissa", "Lily": "11labs-Lily", "Della": "11labs-Delia",
+    "Nico": "openai-Onyx", "Rita": "11labs-Rita", "Meritt": "11labs-Meritt",
+    "Willa": "11labs-Willa", "Maren": "11labs-Maren", "Tasmin": "11labs-Tasmin",
+    "Ashley": "11labs-Ashley", "Andrea": "openai-Alloy", "Claudia": "11labs-Claudia",
+    "Gaby": "11labs-Gaby", "Alejandro": "openai-Echo", "Sloane": "11labs-Sloane"
 }
 
 def retell_request(method, endpoint, json_data=None):
     if not RETELL_API_KEY:
-        print("❌ Error de configuración: Falta la variable RETELL_API_KEY.")
         return None
-
     url = f"https://api.retellai.com{endpoint}"
-    headers = {
-        "Authorization": f"Bearer {RETELL_API_KEY}",
-        "Content-Type": "application/json"
-    }
+    headers = {"Authorization": f"Bearer {RETELL_API_KEY}", "Content-Type": "application/json"}
     try:
         r = requests.request(method, url, headers=headers, json=json_data)
-        print(f"→ {method} {endpoint} → {r.status_code}")
         return r.json() if r.ok else None
-    except Exception as e:
-        print(f"❌ Error en la llamada a Retell: {str(e)}")
+    except Exception:
         return None
 
-def create_bot_for_client(nombre_negocio, sector, servicios, horario, zona, voice_id, model="gpt-4.1-mini"):
-    print(f"🤖 Creando bot para: {nombre_negocio} | Sector: {sector} | Voz: {voice_id}")
-    
+def create_bot_for_client(nombre_negocio, sector, servicios, horario, zona, voice_id):
     custom_prompt = (
         f"Eres el asistente virtual de {nombre_negocio}, una empresa del sector {sector}.\n"
-        f"Tu objetivo es atender a los clientes de manera profesional y amable.\n\n"
-        f"Información clave de la empresa:\n"
-        f"- Servicios que ofrecemos: {servicios}\n"
-        f"- Horario de atención: {horario}\n"
-        f"- Zona de servicio/cobertura: {zona}\n\n"
-        f"Por favor, responde a las dudas de los usuarios basándote estrictamente en esta información. "
-        f"Habla siempre en español de forma natural y concisa."
+        f"Servicios: {servicios}\nHorario: {horario}\nZona: {zona}\n"
+        f"Responde en español de forma natural, concisa y profesional."
     )
-    
-    # 1. Crear el LLM en Retell
-    llm_res = retell_request("POST", "/create-retell-llm", {
-        "model": model,
-        "general_prompt": custom_prompt
-    })
+    llm_res = retell_request("POST", "/create-retell-llm", {"model": "gpt-4.1-mini", "general_prompt": custom_prompt})
     if not llm_res or "llm_id" not in llm_res:
-        raise Exception("Error creando LLM en Retell")
+        raise Exception("Error creando LLM")
     llm_id = llm_res["llm_id"]
     
-    # 2. Crear el Agente vinculándole el LLM y la Voz
     agent_res = retell_request("POST", "/create-agent", {
         "agent_name": f"Bot {nombre_negocio}",
         "response_engine": {"type": "retell-llm", "llm_id": llm_id},
@@ -92,10 +57,9 @@ def create_bot_for_client(nombre_negocio, sector, servicios, horario, zona, voic
         "language": "es-ES"
     })
     if not agent_res or "agent_id" not in agent_res:
-        raise Exception("Error creando Agente en Retell")
+        raise Exception("Error creando Agente")
     agent_id = agent_res["agent_id"]
     
-    # 3. Buscar número de teléfono libre
     numbers = retell_request("GET", "/v2/list-phone-numbers")
     free_number = None
     if numbers and "items" in numbers:
@@ -105,28 +69,24 @@ def create_bot_for_client(nombre_negocio, sector, servicios, horario, zona, voic
                 break
                 
     if not free_number:
-        raise Exception("No se encontraron números de teléfono libres en Retell.")
+        raise Exception("No hay números libres")
         
-    # 4. Asignar agente al número libre obtenido
     retell_request("PATCH", f"/update-phone-number/{free_number}", {
         "inbound_agents": [{"agent_id": agent_id, "weight": 1.0}]
     })
     
     return {"status": "success", "agent_id": agent_id, "phone_number": free_number}
 
-
 @app.post("/create-retell-bot")
 async def wix_webhook(request: Request):
-    print("📩 Recibida petición en /create-retell-bot")
-    
-    if not RETELL_API_KEY or not CAL_API_KEY:
-        raise HTTPException(status_code=500, detail="Error de configuración interna del servidor.")
+    if not RETELL_API_KEY or not CAL_API_KEY or not X_CAL_CLIENT_ID:
+        raise HTTPException(status_code=500, detail="Faltan credenciales de entorno en Render.")
 
     try:
         payload = await request.json()
         data = payload.get("data", payload)
     except Exception:
-        raise HTTPException(status_code=400, detail="No se pudo procesar el JSON.")
+        raise HTTPException(status_code=400, detail="JSON inválido.")
     
     asistente_nombre = data.get("field:asistente") or data.get("asistente")
     nombre_negocio = data.get("field:nombre_negocio") or data.get("nombre_negocio")
@@ -142,51 +102,43 @@ async def wix_webhook(request: Request):
     voice_id = VOICE_MAPPING.get(asistente_nombre, "openai-Alloy")
     
     try:
-        # 1. Crear el bot en Retell
-        resultado = create_bot_for_client(
-            nombre_negocio=nombre_negocio, 
-            sector=sector,
-            servicios=servicios,
-            horario=horario,
-            zona=zona,
-            voice_id=voice_id
-        )
+        # 1. Crear bot en Retell
+        resultado = create_bot_for_client(nombre_negocio, sector, servicios, horario, zona, voice_id)
         
-        # 2. Crear el sub-usuario de la clínica en Cal.com Teams
-        calendar_url = None
+        # 2. Configurar cabeceras v2 unificadas para el cliente PKCE
         cal_headers = {
             "Authorization": f"Bearer {CAL_API_KEY}",
+            "x-cal-client-id": X_CAL_CLIENT_ID,
             "Content-Type": "application/json"
         }
         
-        username_slug = nombre_negocio.lower().replace(" ", "-").replace("ñ", "n")
+        # Payload para registrar el Managed User
         cal_user_payload = {
             "email": email_usuario,
-            "username": username_slug,
             "name": nombre_negocio,
-            "role": "MEMBER"
+            "timeZone": "Europe/Madrid"
         }
         
-        response_user = requests.post("https://api.cal.com/v1/users", json=cal_user_payload, headers=cal_headers)
+        calendar_url = None
+        # Petición v2 de creación de usuario gestionado
+        response_user = requests.post("https://api.cal.com/v2/platform/managed-users", json=cal_user_payload, headers=cal_headers)
         
         if response_user.status_code in [200, 201]:
             user_info = response_user.json()
-            cal_user_id = user_info["user"]["id"]
+            cal_user_data = user_info.get("data", {})
+            cal_user_id = cal_user_data.get("id")
             
-            # 3. Solicitar el enlace de onboarding para Google Calendar
-            link_payload = { "userId": cal_user_id }
-            response_link = requests.post("https://api.cal.com/v1/destination-calendars/link", json=link_payload, headers=cal_headers)
-            
-            if response_link.ok:
-                calendar_url = response_link.json().get("url")
+            if cal_user_id:
+                # 3. Solicitar el enlace de onboarding de Google Calendar v2 para este cliente
+                response_link = requests.post(
+                    f"https://api.cal.com/v2/platform/managed-users/{cal_user_id}/google-calendar-onboarding", 
+                    headers=cal_headers
+                )
+                if response_link.ok:
+                    calendar_url = response_link.json().get("data", {}).get("url")
 
-        # Aseguramos que la URL viaje limpia en la raíz del objeto devuelto
         resultado["calendar_url"] = calendar_url
         return resultado
 
     except Exception as e:
-        print(f"❌ Error interno en Render: {str(e)}")
-        raise HTTPException(
-            status_code=500, 
-            detail="Ha ocurrido un error inesperado al generar el asistente. Por favor, inténtelo de nuevo en unos minutos."
-        )
+        raise HTTPException(status_code=500, detail="Ha ocurrido un error inesperado al generar el asistente.")

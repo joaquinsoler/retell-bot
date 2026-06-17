@@ -1,3 +1,29 @@
+import subprocess
+import sys
+
+# Lista de librerías obligatorias para el SaaS
+REQUIRED_PACKAGES = [
+    "fastapi",
+    "uvicorn",
+    "requests",
+    "google-auth",
+    "google-api-python-client"
+]
+
+# Autoinstalador dinámico de dependencias
+for package in REQUIRED_PACKAGES:
+    try:
+        if package == "google-api-python-client":
+            import googleapiclient
+        elif package == "google-auth":
+            import google.oauth2
+        else:
+            __import__(package)
+    except ImportError:
+        print(f"📦 Instalando dependencia faltante de forma automática: {package}...")
+        subprocess.check_call([sys.executable, "-m", "pip", "install", package])
+
+# --- A partir de aquí arranca la aplicación con todas las garantías ---
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from google.oauth2 import service_account
@@ -9,6 +35,7 @@ import os
 
 app = FastAPI()
 
+# Configuración de CORS para evitar bloqueos con tu HTML de Wix
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -17,11 +44,12 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Variables de entorno
 RETELL_API_KEY = os.getenv("RETELL_API_KEY")
 GOOGLE_JSON_STR = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON")
 RENDER_SERVER_URL = os.getenv("RENDER_SERVER_URL")
 
-# Base de datos en memoria para asociar agentes con sus calendarios sin depender de la IA
+# Mapeo persistente en memoria para asociar el Agente con su Calendario
 CALENDAR_MAPPING = {}
 
 VOICE_MAPPING = {
@@ -35,6 +63,8 @@ VOICE_MAPPING = {
 }
 
 def get_calendar_service():
+    if not GOOGLE_JSON_STR:
+        raise ValueError("Error: GOOGLE_SERVICE_ACCOUNT_JSON no está configurada en Render.")
     scopes = ['https://www.googleapis.com/auth/calendar']
     service_account_info = json.loads(GOOGLE_JSON_STR)
     credentials = service_account.Credentials.from_service_account_info(service_account_info, scopes=scopes)
@@ -49,11 +79,11 @@ def retell_request(method, endpoint, json_data=None):
         r = requests.request(method, url, headers=headers, json=json_data)
         return r.json() if r.ok else None
     except Exception as e:
-        print(f"⚠️ Error Retell API ({endpoint}): {str(e)}")
+        print(f"⚠️ Error en API de Retell ({endpoint}): {str(e)}")
         return None
 
 def create_bot_automanaged(nombre_negocio, sector, servicios, horario, zona, voice_id, calendar_id):
-    # 1. Crear Custom Tool en Retell de forma automática
+    # 1. Crear Custom Tool automática en Retell
     tool_definition = {
         "tool_name": f"agenda_{nombre_negocio.lower().replace(' ', '_')}",
         "tool_type": "custom",
@@ -63,9 +93,9 @@ def create_bot_automanaged(nombre_negocio, sector, servicios, horario, zona, voi
         "parameters": {
             "type": "object",
             "properties": {
-                "accion": {"type": "string", "description": "Determina la acción: 'comprobar' para mirar huecos o 'reservar' para agendar."},
-                "fecha_hora": {"type": "string", "description": "Fecha y hora deseada en formato ISO 8601 (YYYY-MM-DDTHH:MM:SS)."},
-                "nombre_paciente": {"type": "string", "description": "Nombre completo del cliente (Obligatorio solo para reservar)."}
+                "accion": {"type": "string", "description": "Acción a realizar: 'comprobar' o 'reservar'."},
+                "fecha_hora": {"type": "string", "description": "Fecha y hora en formato ISO 8601 (YYYY-MM-DDTHH:MM:SS)."},
+                "nombre_paciente": {"type": "string", "description": "Nombre completo del cliente (obligatorio para reservar)."}
             },
             "required": ["accion", "fecha_hora"]
         }
@@ -74,12 +104,12 @@ def create_bot_automanaged(nombre_negocio, sector, servicios, horario, zona, voi
     tool_res = retell_request("POST", "/create-tool", tool_definition)
     tool_name = tool_res.get("tool_name") if tool_res else None
 
-    # 2. Configurar el prompt maestro del LLM
+    # 2. Configurar el LLM e instrucciones de comportamiento de la IA
     custom_prompt = (
         f"Eres el asistente virtual de {nombre_negocio}, una empresa del sector {sector}.\n"
         f"Servicios: {servicios}\nHorario: {horario}\nZona: {zona}\n\n"
         f"INSTRUCCIONES DE AGENDA:\n"
-        f"- Para gestionar citas debes usar la herramienta asignada de forma obligatoria.\n"
+        f"- Gestiona citas usando exclusivamente la herramienta asignada.\n"
         f"Responde siempre en español de forma muy natural, concisa y profesional."
     )
     
@@ -89,10 +119,10 @@ def create_bot_automanaged(nombre_negocio, sector, servicios, horario, zona, voi
         
     llm_res = retell_request("POST", "/create-retell-llm", llm_payload)
     if not llm_res or "llm_id" not in llm_res:
-        raise Exception("Error al inicializar el motor LLM.")
+        raise Exception("Error al registrar el LLM.")
     llm_id = llm_res["llm_id"]
     
-    # 3. Crear el agente de voz
+    # 3. Crear el Agente de Voz vinculado
     agent_res = retell_request("POST", "/create-agent", {
         "agent_name": f"Bot {nombre_negocio}",
         "response_engine": {"type": "retell-llm", "llm_id": llm_id},
@@ -100,13 +130,13 @@ def create_bot_automanaged(nombre_negocio, sector, servicios, horario, zona, voi
         "language": "es-ES"
     })
     if not agent_res or "agent_id" not in agent_res:
-        raise Exception("Error al inicializar el Agente de Voz.")
+        raise Exception("Error al crear el Agente.")
     agent_id = agent_res["agent_id"]
     
-    # Mapear el ID de agente con el calendario correspondiente para evitar pérdidas de datos en las llamadas
+    # Mapear el ID del agente con la agenda creada en memoria local
     CALENDAR_MAPPING[agent_id] = calendar_id
     
-    # 4. Encontrar un número libre en la cuenta
+    # 4. Localizar número libre en Retell para asignarlo
     numbers = retell_request("GET", "/v2/list-phone-numbers")
     free_number = None
     if numbers and "items" in numbers:
@@ -116,8 +146,7 @@ def create_bot_automanaged(nombre_negocio, sector, servicios, horario, zona, voi
                 break
                 
     if not free_number:
-        # Salvaguarda: si no hay número, devolvemos un ID simulado para no romper el flujo visual de Wix
-        free_number = "+34 (Sin número asignado en Retell)"
+        free_number = "+34 (Sin número libre en Retell)"
     else:
         retell_request("PATCH", f"/update-phone-number/{free_number}", {
             "inbound_agents": [{"agent_id": agent_id, "weight": 1.0}]
@@ -129,13 +158,13 @@ def create_bot_automanaged(nombre_negocio, sector, servicios, horario, zona, voi
 @app.post("/create-retell-bot")
 async def wix_webhook(request: Request):
     if not RETELL_API_KEY or not GOOGLE_JSON_STR or not RENDER_SERVER_URL:
-        raise HTTPException(status_code=500, detail="Faltan credenciales de entorno en Render.")
+        raise HTTPException(status_code=500, detail="Faltan variables de configuración en Render.")
 
     try:
         payload = await request.json()
         data = payload.get("data", payload)
     except Exception:
-        raise HTTPException(status_code=400, detail="JSON corrupto.")
+        raise HTTPException(status_code=400, detail="Estructura de datos corrupta.")
     
     asistente_nombre = data.get("asistente")
     nombre_negocio = data.get("nombre_negocio")
@@ -146,7 +175,7 @@ async def wix_webhook(request: Request):
     email_usuario = data.get("email_usuario")
     
     if not all([asistente_nombre, nombre_negocio, sector, servicios, horario, zona, email_usuario]):
-        raise HTTPException(status_code=422, detail="Todos los campos son obligatorios.")
+        raise HTTPException(status_code=422, detail="Faltan campos obligatorios en el payload.")
         
     voice_id = VOICE_MAPPING.get(asistente_nombre, "openai-Alloy")
     
@@ -179,19 +208,15 @@ async def retell_interaction(request: Request):
         
         action = args.get("accion")
         fecha_hora_str = args.get("fecha_hora") 
-        nombre_paciente = args.get("nombre_paciente", "Paciente")
+        nombre_paciente = args.get("nombre_paciente", "Paciente Anónimo")
         
-        # Recuperar de forma limpia el calendario vinculado a este agente de voz
         calendar_id = CALENDAR_MAPPING.get(agent_id)
         if not calendar_id:
-            # Salvaguarda: Si el servidor se reinició, intentamos leer cualquier ID de respaldo
-            calendar_id = args.get("calendar_id") or os.getenv("DEFAULT_CALENDAR_ID")
-            if not calendar_id:
-                return {"status": "error", "mensaje": "Agenda no mapeada."}
+            return {"status": "error", "mensaje": "Calendario no enlazado a este agente."}
 
         calendar_service = get_calendar_service()
         
-        # Formateo ultra-seguro de fechas para evitar errores 400 en Google API
+        # Formateo estricto contra errores 400
         base_time = fecha_hora_str.replace("Z", "").split(".")[0]
         start_time = datetime.fromisoformat(base_time)
         end_time = start_time + timedelta(minutes=30)
@@ -209,7 +234,7 @@ async def retell_interaction(request: Request):
 
         elif action == "reservar":
             if is_occupied:
-                return {"status": "error", "mensaje": "El hueco se acaba de ocupar."}
+                return {"status": "error", "mensaje": "El hueco se ha ocupado."}
             
             event_body = {
                 'summary': f"Cita: {nombre_paciente}",
@@ -221,5 +246,5 @@ async def retell_interaction(request: Request):
             return {"status": "reservado", "mensaje": "Cita confirmada."}
 
     except Exception as e:
-        print(f"⚠️ Error en interacción en vivo: {str(e)}")
-        return {"status": "error", "mensaje": "Fallo en el sistema de agenda."}
+        print(f"❌ Error interno en interacción: {str(e)}")
+        return {"status": "error", "mensaje": "Error de sincronización con Google Calendar."}

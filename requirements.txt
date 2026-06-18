@@ -2,6 +2,5 @@ fastapi
 uvicorn[standard]
 requests
 google-auth
-google-auth-httplib2
 google-api-python-client
-python-dotenv   # opcional pero útil
+google-auth-httplib2

@@ -8,12 +8,12 @@ from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
-app = FastAPI()   # ← Este nombre "app" es obligatorio para uvicorn main:app
+app = FastAPI()
 
 # ==================== VARIABLES DE ENTORNO ====================
 RETELL_API_KEY = os.getenv("RETELL_API_KEY")
 if not RETELL_API_KEY:
-    raise Exception("RETELL_API_KEY no encontrada")
+    raise Exception("RETELL_API_KEY no encontrada en variables de entorno")
 
 # ==================== CORS ====================
 app.add_middleware(
@@ -33,15 +33,21 @@ def get_calendar_service():
     return build('calendar', 'v3', credentials=credentials)
 
 def create_google_event(calendar_id: str, summary: str, start_time: str, end_time: str, description: str = ""):
-    service = get_calendar_service()
-    event = {
-        'summary': summary,
-        'description': description,
-        'start': {'dateTime': start_time, 'timeZone': 'Europe/Madrid'},
-        'end': {'dateTime': end_time, 'timeZone': 'Europe/Madrid'},
-        'reminders': {'useDefault': True}
-    }
-    return service.events().insert(calendarId=calendar_id, body=event, sendUpdates='all').execute()
+    try:
+        service = get_calendar_service()
+        event = {
+            'summary': summary,
+            'description': description or "Cita agendada por asistente Dansu",
+            'start': {'dateTime': start_time, 'timeZone': 'Europe/Madrid'},
+            'end': {'dateTime': end_time, 'timeZone': 'Europe/Madrid'},
+            'reminders': {'useDefault': True}
+        }
+        created = service.events().insert(calendarId=calendar_id, body=event, sendUpdates='all').execute()
+        print(f"✅ EVENTO CREADO: {created.get('htmlLink')}")
+        return created
+    except Exception as e:
+        print(f"❌ Error Google Calendar: {e}")
+        raise
 
 # ==================== VOICE MAPPING ====================
 VOICE_MAPPING = {
@@ -65,7 +71,7 @@ def retell_request(method, endpoint, json_data=None):
         print(f"❌ Retell error: {e}")
         return None
 
-# ==================== CREAR BOT (con fecha dinámica + personalidad) ====================
+# ==================== CREAR BOT ====================
 def create_bot_for_client(nombre_negocio, sector, servicios, horario, zona, voice_id, calendar_email):
     ahora = datetime.now()
     fecha_actual = ahora.strftime("%A, %d de %B de %Y")
@@ -80,17 +86,16 @@ Información de la empresa:
 - Horario: {horario}
 - Zona: {zona}
 
-**Tu forma de ser:**
-- Eres amable, cercano, agradable y profesional.
-- Hablas con calidez y cercanía, como un gran recepcionista que realmente quiere ayudar.
-- Usas un tono positivo, servicial y natural.
+**Tu personalidad:** Eres amable, cercano, agradable y profesional. Hablas con calidez y empatía.
 
-**Cómo agendar citas:**
-- Muéstrate proactivo y servicial cuando el cliente quiera reservar.
-- Pregunta día, hora aproximada, motivo y número de teléfono.
-- Confirma los datos antes de agendar.
-- Usa la herramienta `book_appointment` cuando todo esté confirmado."""
+**Cómo agendar citas (importante):**
+- Ve paso a paso de forma natural.
+- Primero confirma que quiere agendar.
+- Pregunta una cosa cada vez: día y hora, motivo, teléfono.
+- Confirma todo antes de agendar.
+- Solo cuando el cliente confirme, usa la herramienta `book_appointment`."""
 
+    # Crear LLM
     llm_res = retell_request("POST", "/create-retell-llm", {
         "model": "gpt-4.1-mini",
         "general_prompt": custom_prompt
@@ -98,6 +103,7 @@ Información de la empresa:
     if not llm_res or "llm_id" not in llm_res:
         raise Exception("Error creando LLM")
 
+    # Crear Agent con Tool
     agent_res = retell_request("POST", "/create-agent", {
         "agent_name": f"Bot {nombre_negocio}",
         "response_engine": {"type": "retell-llm", "llm_id": llm_res["llm_id"]},
@@ -106,7 +112,7 @@ Información de la empresa:
         "tools": [{
             "type": "custom",
             "name": "book_appointment",
-            "description": "Agenda una cita en el calendario de Google",
+            "description": "Agenda una cita en el calendario de Google del negocio",
             "url": "https://retell-bot.onrender.com/book-appointment",
             "method": "POST",
             "parameters": {
@@ -165,7 +171,7 @@ async def wix_webhook(request: Request):
         calendar_email = data.get("google_calendar_email")
 
         if not all([asistente, nombre_negocio, sector, servicios, horario, zona, calendar_email]):
-            raise HTTPException(status_code=422, detail="Faltan campos")
+            raise HTTPException(status_code=422, detail="Faltan campos obligatorios")
 
         voice_id = VOICE_MAPPING.get(asistente, "openai-Alloy")
 
@@ -174,49 +180,37 @@ async def wix_webhook(request: Request):
         return resultado
 
     except Exception as e:
-        print(f"❌ Error: {e}")
+        print(f"❌ Error create-bot: {e}")
         raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.post("/verify-calendar-access")
-async def verify_calendar_access(request: Request):
-    # (Mantengo la versión anterior que funcionaba)
-    try:
-        data = await request.json()
-        calendar_email = data.get("calendar_email")
-        calendar_name = data.get("calendar_name", "").strip() or "primary"
-
-        service = get_calendar_service()
-        calendars = service.calendarList().list().execute()
-        calendar_id = "primary"
-
-        for cal in calendars.get('items', []):
-            if calendar_name.lower() in cal.get('summary', '').lower():
-                calendar_id = cal['id']
-                break
-
-        event = create_google_event(calendar_id, "🧪 Prueba Dansu", "2026-07-01T10:00:00+02:00", "2026-07-01T10:30:00+02:00")
-        return {"status": "success"}
-    except Exception as e:
-        raise HTTPException(status_code=403, detail="Error al verificar calendario")
 
 
 @app.post("/book-appointment")
 async def book_appointment(request: Request):
     try:
         data = await request.json()
+        print("📩 DATOS RECIBIDOS DE RETELL:")
+        print(json.dumps(data, indent=2, ensure_ascii=False))
+
         calendar_email = data.get("calendar_email")
         summary = data.get("summary")
         start_time = data.get("start_time")
         end_time = data.get("end_time")
         description = data.get("description", "")
 
+        if not calendar_email:
+            print("❌ No llegó calendar_email")
+            raise HTTPException(status_code=400, detail="Falta calendar_email")
+
+        print(f"📅 Creando evento en calendario: {calendar_email}")
         event = create_google_event(calendar_email, summary, start_time, end_time, description)
+
         return {"status": "success", "message": "Cita agendada correctamente"}
+
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        print(f"❌ Error en book-appointment: {e}")
+        raise HTTPException(status_code=500, detail="Error al agendar la cita")
 
 
 @app.get("/")
 async def root():
-    return {"status": "Dansu Backend funcionando correctamente"}
+    return {"status": "Dansu Backend v4 - Listo para agendar"}

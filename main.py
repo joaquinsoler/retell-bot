@@ -74,8 +74,15 @@ def retell_request(method, endpoint, json_data=None):
 # ==================== CREAR BOT ====================
 def create_bot_for_client(nombre_negocio, sector, servicios, horario, zona, voice_id, calendar_email):
     
-    # Hemos quitado la fecha/hora congeladas estáticas. Dejamos que el LLM maneje el tiempo de forma fluida.
+    # Inyección precisa del contexto temporal actual en Madrid
+    ahora = datetime.now()
+    fecha_base = ahora.strftime("%A, %d de %B de %Y")
+
     custom_prompt = f"""Eres el asistente virtual de {nombre_negocio}, una empresa del sector {sector}.
+
+**Contexto Temporal Crítico:**
+- Fecha actual del sistema: {fecha_base}. Estamos en el año 2026.
+- Determina siempre el día relativo de la cita basándote estrictamente en esta fecha actual (por ejemplo, si hoy es jueves, mañana es viernes).
 
 Información de la empresa:
 - Servicios: {servicios}
@@ -85,21 +92,30 @@ Información de la empresa:
 **Tu personalidad:** Amable, cercano, agradable y profesional. Hablas con calidez y buena actitud.
 
 **Reglas para agendar citas:**
-- Ve paso a paso de forma natural.
-- Pregunta una cosa cada vez (día/hora, motivo de la cita, nombre y teléfono).
+- Ve paso a paso de forma natural. Pregunta una cosa cada vez (día/hora, motivo de la cita, nombre y teléfono).
 - Confirma la fecha y hora exacta con el usuario antes de registrarla.
+- Tienes acceso implícito al correo del calendario del negocio a través de tu configuración interna. No se lo pidas al usuario.
+- Cuando utilices la herramienta `book_appointment`, asegúrate de enviar las fechas en formato ISO 8601 completo incluyendo la zona horaria de Madrid (ej. +02:00 o +01:00 según corresponda).
 - Solo usa la herramienta `book_appointment` cuando todo esté explícitamente confirmado por el usuario.
 - No le pidas nunca la dirección de correo electrónico al usuario."""
 
+    # Se usa 'custom_variables' para transferir el email dinámico sin romper la URL de la Tool
     llm_res = retell_request("POST", "/create-retell-llm", {
         "model": "gpt-4o-mini",
-        "general_prompt": custom_prompt
+        "general_prompt": custom_prompt,
+        "custom_variables": [
+            {
+                "name": "calendar_email",
+                "type": "string",
+                "value": calendar_email
+            }
+        ]
     })
     if not llm_res or "llm_id" not in llm_res:
         raise Exception("Error creando LLM")
 
-    # SOLUCIÓN CLAVE: Pasamos el email del calendario en la misma URL que va a consumir la Custom Tool de Retell
-    book_appointment_url = f"https://retell-bot.onrender.com/book-appointment?calendar_email={calendar_email}"
+    # URL limpia y estática para evitar fallos de precondición regional en Retell
+    book_appointment_url = "https://retell-bot.onrender.com/book-appointment"
 
     agent_res = retell_request("POST", "/create-agent", {
         "agent_name": f"Bot {nombre_negocio}",
@@ -115,12 +131,13 @@ Información de la empresa:
             "parameters": {
                 "type": "object",
                 "properties": {
+                    "calendar_email": {"type": "string", "description": "Email del calendario del negocio provisto por el sistema"},
                     "summary": {"type": "string", "description": "Nombre del cliente y motivo de la cita (Ej: Juan Pérez - Corte de pelo)"},
-                    "start_time": {"type": "string", "description": "Fecha y hora de inicio en formato ISO 8601 (Ej: 2026-07-01T10:00:00+02:00)"},
-                    "end_time": {"type": "string", "description": "Fecha y hora de fin en formato ISO 8601, típicamente de 30 a 60 min después del inicio"},
+                    "start_time": {"type": "string", "description": "Fecha y hora de inicio en formato ISO 8601 completo con zona horaria (Ej: 2026-07-01T10:00:00+02:00)"},
+                    "end_time": {"type": "string", "description": "Fecha y hora de fin en formato ISO 8601 completo con zona horaria (Ej: 2026-07-01T11:00:00+02:00)"},
                     "description": {"type": "string", "description": "Detalles adicionales aportados en la llamada como el teléfono de contacto"}
                 },
-                "required": ["summary", "start_time", "end_time"]
+                "required": ["calendar_email", "summary", "start_time", "end_time"]
             }
         }]
     })
@@ -204,30 +221,34 @@ async def verify_calendar_access(request: Request):
 
 
 @app.post("/book-appointment")
-async def book_appointment(request: Request, calendar_email: str = None):
+async def book_appointment(request: Request):
     try:
-        # FastAPI captura automáticamente 'calendar_email' desde los query parameters de la URL
         data = await request.json()
-        print("📩 DATOS RECIBIDOS DE RETELL:", json.dumps(data, indent=2, ensure_ascii=False))
+        print("📩 DATOS REALES RECIBIDOS DESDE RETELL:", json.dumps(data, indent=2, ensure_ascii=False))
 
-        if not calendar_email:
-            calendar_email = data.get("calendar_email")
-            
+        calendar_email = data.get("calendar_email")
         summary = data.get("summary")
         start_time = data.get("start_time")
         end_time = data.get("end_time")
         description = data.get("description", "")
 
         if not calendar_email:
-            raise HTTPException(status_code=400, detail="Falta calendar_email")
+            raise HTTPException(status_code=400, detail="Falta calendar_email en el cuerpo del JSON")
 
         event = create_google_event(calendar_email, summary, start_time, end_time, description)
 
-        return {"status": "success", "message": "Cita agendada correctamente"}
+        return {
+            "code": "SUCCESS",
+            "message": "Cita agendada correctamente",
+            "event_id": event.get("id")
+        }
 
     except Exception as e:
         print(f"❌ Error book-appointment: {e}")
-        raise HTTPException(status_code=500, detail="Error al agendar la cita")
+        return {
+            "code": "ERROR",
+            "message": f"Error de servidor: {str(e)}"
+        }
 
 
 @app.get("/")

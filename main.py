@@ -73,13 +73,9 @@ def retell_request(method, endpoint, json_data=None):
 
 # ==================== CREAR BOT ====================
 def create_bot_for_client(nombre_negocio, sector, servicios, horario, zona, voice_id, calendar_email):
-    ahora = datetime.now()
-    fecha_actual = ahora.strftime("%A, %d de %B de %Y")
-    hora_actual = ahora.strftime("%H:%M")
-
+    
+    # Hemos quitado la fecha/hora congeladas estáticas. Dejamos que el LLM maneje el tiempo de forma fluida.
     custom_prompt = f"""Eres el asistente virtual de {nombre_negocio}, una empresa del sector {sector}.
-
-**Fecha y hora actual:** Hoy es {fecha_actual} y son las {hora_actual}.
 
 Información de la empresa:
 - Servicios: {servicios}
@@ -90,16 +86,20 @@ Información de la empresa:
 
 **Reglas para agendar citas:**
 - Ve paso a paso de forma natural.
-- Pregunta una cosa cada vez (día/hora, motivo, teléfono).
-- Confirma los datos antes de agendar.
-- Solo usa la herramienta `book_appointment` cuando todo esté confirmado."""
+- Pregunta una cosa cada vez (día/hora, motivo de la cita, nombre y teléfono).
+- Confirma la fecha y hora exacta con el usuario antes de registrarla.
+- Solo usa la herramienta `book_appointment` cuando todo esté explícitamente confirmado por el usuario.
+- No le pidas nunca la dirección de correo electrónico al usuario."""
 
     llm_res = retell_request("POST", "/create-retell-llm", {
-        "model": "gpt-4.1-mini",
+        "model": "gpt-4o-mini",
         "general_prompt": custom_prompt
     })
     if not llm_res or "llm_id" not in llm_res:
         raise Exception("Error creando LLM")
+
+    # SOLUCIÓN CLAVE: Pasamos el email del calendario en la misma URL que va a consumir la Custom Tool de Retell
+    book_appointment_url = f"https://retell-bot.onrender.com/book-appointment?calendar_email={calendar_email}"
 
     agent_res = retell_request("POST", "/create-agent", {
         "agent_name": f"Bot {nombre_negocio}",
@@ -109,19 +109,18 @@ Información de la empresa:
         "tools": [{
             "type": "custom",
             "name": "book_appointment",
-            "description": "Agenda una cita en el calendario de Google del negocio",
-            "url": "https://retell-bot.onrender.com/book-appointment",
+            "description": "Agenda la cita confirmada en el calendario de Google del negocio.",
+            "url": book_appointment_url,
             "method": "POST",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "calendar_email": {"type": "string"},
-                    "summary": {"type": "string"},
-                    "start_time": {"type": "string"},
-                    "end_time": {"type": "string"},
-                    "description": {"type": "string"}
+                    "summary": {"type": "string", "description": "Nombre del cliente y motivo de la cita (Ej: Juan Pérez - Corte de pelo)"},
+                    "start_time": {"type": "string", "description": "Fecha y hora de inicio en formato ISO 8601 (Ej: 2026-07-01T10:00:00+02:00)"},
+                    "end_time": {"type": "string", "description": "Fecha y hora de fin en formato ISO 8601, típicamente de 30 a 60 min después del inicio"},
+                    "description": {"type": "string", "description": "Detalles adicionales aportados en la llamada como el teléfono de contacto"}
                 },
-                "required": ["calendar_email", "summary", "start_time", "end_time"]
+                "required": ["summary", "start_time", "end_time"]
             }
         }]
     })
@@ -131,7 +130,7 @@ Información de la empresa:
 
     agent_id = agent_res["agent_id"]
 
-    # Asignar número
+    # Asignar número libre de Retell
     numbers = retell_request("GET", "/v2/list-phone-numbers")
     free_number = None
     if numbers and "items" in numbers:
@@ -154,7 +153,7 @@ Información de la empresa:
 # ==================== ENDPOINTS ====================
 
 @app.post("/create-retell-bot")
-async def wix_webhook(request: Request):
+async def create_retell_bot_endpoint(request: Request):
     try:
         payload = await request.json()
         data = payload.get("data", payload)
@@ -190,7 +189,6 @@ async def verify_calendar_access(request: Request):
         if not calendar_email:
             raise HTTPException(status_code=400, detail="Falta calendar_email")
 
-        # Usamos directamente el email (calendario principal)
         event = create_google_event(
             calendar_id=calendar_email,
             summary="🧪 Prueba de conexión - Dansu",
@@ -206,12 +204,15 @@ async def verify_calendar_access(request: Request):
 
 
 @app.post("/book-appointment")
-async def book_appointment(request: Request):
+async def book_appointment(request: Request, calendar_email: str = None):
     try:
+        # FastAPI captura automáticamente 'calendar_email' desde los query parameters de la URL
         data = await request.json()
         print("📩 DATOS RECIBIDOS DE RETELL:", json.dumps(data, indent=2, ensure_ascii=False))
 
-        calendar_email = data.get("calendar_email")
+        if not calendar_email:
+            calendar_email = data.get("calendar_email")
+            
         summary = data.get("summary")
         start_time = data.get("start_time")
         end_time = data.get("end_time")

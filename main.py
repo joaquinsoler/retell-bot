@@ -33,22 +33,14 @@ def create_google_event(calendar_id: str, summary: str, start_time: str, end_tim
             'end': {'dateTime': end_time, 'timeZone': 'Europe/Madrid'},
         }
         created = service.events().insert(calendarId=calendar_id, body=event, sendUpdates='all').execute()
-        print(f"✅ CITA CREADA EN GOOGLE: {created.get('htmlLink')}")
+        print(f"✅ CITA CREADA: {created.get('htmlLink')}")
         return created
     except Exception as e:
-        print(f"❌ Error Google: {e}")
+        print(f"❌ Error Google Calendar: {e}")
         raise
 
-# ==================== VOICE MAPPING ====================
-VOICE_MAPPING = {
-    "Cimo": "11labs-Adrian", "Brynne": "11labs-Brynne", "Chloe": "11labs-Chloe",
-    "Kate": "openai-Nova", "Grace": "openai-Shimmer", "Leland": "11labs-Leland",
-    "Marissa": "11labs-Marissa", "Lily": "11labs-Lily", "Della": "11labs-Delia",
-    "Nico": "openai-Onyx", "Rita": "11labs-Rita", "Meritt": "11labs-Meritt",
-    "Willa": "11labs-Willa", "Maren": "11labs-Maren", "Tasmin": "11labs-Tasmin",
-    "Ashley": "11labs-Ashley", "Andrea": "openai-Alloy", "Claudia": "11labs-Claudia",
-    "Gaby": "11labs-Gaby", "Alejandro": "openai-Echo", "Sloane": "11labs-Sloane"
-}
+# ==================== VOICE MAPPING (mantén el tuyo) ====================
+VOICE_MAPPING = { ... }  # pega tu diccionario completo aquí
 
 def retell_request(method, endpoint, json_data=None):
     url = f"https://api.retellai.com{endpoint}"
@@ -72,13 +64,11 @@ def create_bot_for_client(nombre_negocio, sector, servicios, horario, zona, voic
 
 Eres amable, cercano y profesional.
 
-Cuando el cliente quiera agendar una cita:
+Cuando el cliente quiera agendar:
 - Ve paso a paso.
-- Pregunta día y hora, luego motivo, luego teléfono.
-- Resume y confirma todo.
-- **Solo cuando el cliente confirme**, llama a la herramienta `book_appointment`.
-
-No cambies de tema hasta que la cita esté agendada."""
+- Pregunta día/hora, motivo, teléfono.
+- Confirma todo.
+- Solo entonces usa `book_appointment`."""
 
     llm_res = retell_request("POST", "/create-retell-llm", {
         "model": "gpt-4.1-mini",
@@ -95,7 +85,7 @@ No cambies de tema hasta que la cita esté agendada."""
         "tools": [{
             "type": "custom",
             "name": "book_appointment",
-            "description": "Agenda la cita en Google Calendar",
+            "description": "Agenda la cita",
             "url": "https://retell-bot.onrender.com/book-appointment",
             "method": "POST",
             "parameters": {
@@ -166,28 +156,28 @@ async def wix_webhook(request: Request):
 async def book_appointment(request: Request):
     try:
         data = await request.json()
-        print("📨 RECIBIDO DE RETELL:", json.dumps(data, indent=2))
+        print("📨 RECIBIDO:", json.dumps(data, indent=2))
 
         calendar_email = data.get("calendar_email")
         if not calendar_email:
-            raise HTTPException(status_code=400, detail="No llegó calendar_email")
+            raise HTTPException(status_code=400, detail="Falta calendar_email")
 
         event = create_google_event(
-            calendar_id=calendar_email,
-            summary=data.get("summary", "Cita"),
-            start_time=data.get("start_time"),
-            end_time=data.get("end_time"),
-            description=data.get("description", "")
+            calendar_email,
+            data.get("summary", "Cita"),
+            data.get("start_time"),
+            data.get("end_time"),
+            data.get("description", "")
         )
 
-        print("✅ CITA CREADA EN GOOGLE CALENDAR")
-        return {"status": "success", "message": "Cita agendada"}
+        print("✅ CITA CREADA EN GOOGLE")
+        return {"status": "success"}
 
     except Exception as e:
-        print(f"❌ Error book-appointment: {e}")
+        print(f"❌ Error agendando: {e}")
         raise HTTPException(status_code=500, detail="Error al agendar")
 
 
 @app.get("/")
 async def root():
-    return {"status": "Dansu listo"}
+    return {"status": "OK"}

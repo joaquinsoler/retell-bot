@@ -86,16 +86,14 @@ Información de la empresa:
 - Horario: {horario}
 - Zona: {zona}
 
-**Tu personalidad:** Eres amable, cercano, agradable y profesional. Hablas con calidez y empatía.
+**Tu personalidad:** Amable, cercano, agradable y profesional. Hablas con calidez y buena actitud.
 
-**Cómo agendar citas (importante):**
+**Reglas para agendar citas:**
 - Ve paso a paso de forma natural.
-- Primero confirma que quiere agendar.
-- Pregunta una cosa cada vez: día y hora, motivo, teléfono.
-- Confirma todo antes de agendar.
-- Solo cuando el cliente confirme, usa la herramienta `book_appointment`."""
+- Pregunta una cosa cada vez (día/hora, motivo, teléfono).
+- Confirma los datos antes de agendar.
+- Solo usa la herramienta `book_appointment` cuando todo esté confirmado."""
 
-    # Crear LLM
     llm_res = retell_request("POST", "/create-retell-llm", {
         "model": "gpt-4.1-mini",
         "general_prompt": custom_prompt
@@ -103,7 +101,6 @@ Información de la empresa:
     if not llm_res or "llm_id" not in llm_res:
         raise Exception("Error creando LLM")
 
-    # Crear Agent con Tool
     agent_res = retell_request("POST", "/create-agent", {
         "agent_name": f"Bot {nombre_negocio}",
         "response_engine": {"type": "retell-llm", "llm_id": llm_res["llm_id"]},
@@ -184,12 +181,35 @@ async def wix_webhook(request: Request):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.post("/verify-calendar-access")
+async def verify_calendar_access(request: Request):
+    try:
+        data = await request.json()
+        calendar_email = data.get("calendar_email")
+
+        if not calendar_email:
+            raise HTTPException(status_code=400, detail="Falta calendar_email")
+
+        # Usamos directamente el email (calendario principal)
+        event = create_google_event(
+            calendar_id=calendar_email,
+            summary="🧪 Prueba de conexión - Dansu",
+            start_time="2026-07-01T10:00:00+02:00",
+            end_time="2026-07-01T10:30:00+02:00"
+        )
+
+        return {"status": "success", "message": "Acceso verificado correctamente"}
+
+    except Exception as e:
+        print(f"❌ Verify error: {e}")
+        raise HTTPException(status_code=403, detail="No se pudo acceder al calendario. Revisa los permisos.")
+
+
 @app.post("/book-appointment")
 async def book_appointment(request: Request):
     try:
         data = await request.json()
-        print("📩 DATOS RECIBIDOS DE RETELL:")
-        print(json.dumps(data, indent=2, ensure_ascii=False))
+        print("📩 DATOS RECIBIDOS DE RETELL:", json.dumps(data, indent=2, ensure_ascii=False))
 
         calendar_email = data.get("calendar_email")
         summary = data.get("summary")
@@ -198,19 +218,17 @@ async def book_appointment(request: Request):
         description = data.get("description", "")
 
         if not calendar_email:
-            print("❌ No llegó calendar_email")
             raise HTTPException(status_code=400, detail="Falta calendar_email")
 
-        print(f"📅 Creando evento en calendario: {calendar_email}")
         event = create_google_event(calendar_email, summary, start_time, end_time, description)
 
         return {"status": "success", "message": "Cita agendada correctamente"}
 
     except Exception as e:
-        print(f"❌ Error en book-appointment: {e}")
+        print(f"❌ Error book-appointment: {e}")
         raise HTTPException(status_code=500, detail="Error al agendar la cita")
 
 
 @app.get("/")
 async def root():
-    return {"status": "Dansu Backend v4 - Listo para agendar"}
+    return {"status": "Dansu Backend funcionando"}

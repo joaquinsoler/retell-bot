@@ -43,10 +43,10 @@ def create_google_event(calendar_id: str, summary: str, start_time: str, end_tim
             'reminders': {'useDefault': True}
         }
         created = service.events().insert(calendarId=calendar_id, body=event, sendUpdates='all').execute()
-        print(f"✅ EVENTO CREADO EXITOSAMENTE: {created.get('htmlLink')}")
+        print(f"✅ EVENTO CREADO EN GOOGLE CALENDAR: {created.get('htmlLink')}")
         return created
     except Exception as e:
-        print(f"❌ Error crítico en Google Calendar: {e}")
+        print(f"❌ Error crítico al insertar evento en Google Calendar: {e}")
         raise
 
 # ==================== VOICE MAPPING ====================
@@ -68,35 +68,36 @@ def retell_request(method, endpoint, json_data=None):
         print(f"→ Retell API {method} {endpoint} → Status: {r.status_code}")
         return r.json() if r.ok else None
     except Exception as e:
-        print(f"❌ Error de conexión con Retell: {e}")
+        print(f"❌ Error de comunicación saliente hacia Retell AI: {e}")
         return None
 
-# ==================== CREAR BOT ====================
+# ==================== LÓGICA CREACIÓN DE BOT ====================
 def create_bot_for_client(nombre_negocio, sector, servicios, horario, zona, voice_id, calendar_email):
     
+    # Contexto de tiempo dinámico real
     ahora = datetime.now()
     fecha_base = ahora.strftime("%A, %d de %B de %Y")
 
     custom_prompt = f"""Eres el asistente virtual de {nombre_negocio}, una empresa del sector {sector}.
 
 **Contexto Temporal Crítico:**
-- Fecha actual: {fecha_base}. Año 2026.
-- Calcula los días basándote estrictamente en esta fecha.
+- Fecha de hoy en el sistema: {fecha_base}. Estamos en el año 2026.
+- Determina siempre el día de la cita basándote estrictamente en esta fecha actual.
 
 Información de la empresa:
 - Servicios: {servicios}
 - Horario: {horario}
 - Zona: {zona}
 
-**Tu personalidad:** Amable y profesional.
+**Tu personalidad:** Amable, cercano y profesional.
 
 **Reglas para agendar citas:**
-- Pregunta una cosa cada vez.
-- Confirma los datos antes de agendar.
-- Utiliza la herramienta `book_appointment` enviando las fechas en formato ISO 8601 con zona horaria de Madrid (+02:00).
-- Tienes el email del calendario guardado internamente en tu parámetro `calendar_email`."""
+- Ve paso a paso. Pregunta una cosa cada vez (día/hora, motivo de la cita, nombre y teléfono).
+- Confirma la fecha y hora exacta de forma explícita antes de usar la herramienta.
+- Tienes el email del calendario guardado internamente, no se lo pidas al usuario.
+- Llama a `book_appointment` enviando las fechas en formato ISO 8601 con zona horaria de Madrid (+02:00)."""
 
-    # Creamos el LLM con la variable persistente
+    # Registro seguro del LLM con custom_variables
     llm_res = retell_request("POST", "/create-retell-llm", {
         "model": "gpt-4o-mini",
         "general_prompt": custom_prompt,
@@ -109,11 +110,10 @@ Información de la empresa:
         ]
     })
     if not llm_res or "llm_id" not in llm_res:
-        raise Exception("Error creando LLM en Retell")
+        raise Exception("Error creando LLM en Retell AI")
 
-    # CAMBIO IMPORTANTE: Añadimos la barra inclinada al final '/' para evitar 
-    # redirecciones 301/302 de Render que disparan el bloqueo de red de Retell.
-    book_appointment_url = "https://retell-bot.onrender.com/book-appointment/"
+    # URL limpia y estática
+    book_appointment_url = "https://retell-bot.onrender.com/book-appointment"
 
     agent_res = retell_request("POST", "/create-agent", {
         "agent_name": f"Bot {nombre_negocio}",
@@ -131,9 +131,9 @@ Información de la empresa:
                 "properties": {
                     "calendar_email": {"type": "string", "description": "Email del calendario"},
                     "summary": {"type": "string", "description": "Nombre y motivo"},
-                    "start_time": {"type": "string", "description": "ISO 8601 con zona horaria de Madrid (ej: +02:00)"},
-                    "end_time": {"type": "string", "description": "ISO 8601 con zona horaria de Madrid (ej: +02:00)"},
-                    "description": {"type": "string", "description": "Teléfono y notas extra"}
+                    "start_time": {"type": "string", "description": "Formato ISO 8601"},
+                    "end_time": {"type": "string", "description": "Formato ISO 8601"},
+                    "description": {"type": "string", "description": "Telefono o notas"}
                 },
                 "required": ["calendar_email", "summary", "start_time", "end_time"]
             }
@@ -141,10 +141,11 @@ Información de la empresa:
     })
 
     if not agent_res or "agent_id" not in agent_res:
-        raise Exception("Error creando Agent en Retell")
+        raise Exception("Error creando Agente en Retell AI")
 
     agent_id = agent_res["agent_id"]
 
+    # Asignación de número telefónico
     numbers = retell_request("GET", "/v2/list-phone-numbers")
     free_number = None
     if numbers and "items" in numbers:
@@ -164,16 +165,15 @@ Información de la empresa:
         "phone_number": free_number
     }
 
-# ==================== ENDPOINTS CON SOPORTE DE RUTA DOBLE ====================
+# ==================== ENDPOINTS (RUTAS TOLERANTES A / ) ====================
 
-# Soportamos tanto con barra como sin barra al final para evitar fallos de precondición HTTP
 @app.post("/book-appointment")
 @app.post("/book-appointment/")
 async def book_appointment(request: Request):
-    print("🚨 ¡EL ENDPOINT /book-appointment HA SIDO TOCADO POR RETELL!")
+    print("🚨 [LOG] ¡EL ENDPOINT /book-appointment HA SIDO TOCADO POR RETELL!")
     try:
         data = await request.json()
-        print("📩 JSON RECIBIDO:", json.dumps(data, indent=2, ensure_ascii=False))
+        print("📩 JSON RECIBIDO EN BACKEND:", json.dumps(data, indent=2, ensure_ascii=False))
 
         calendar_email = data.get("calendar_email")
         summary = data.get("summary")
@@ -182,7 +182,7 @@ async def book_appointment(request: Request):
         description = data.get("description", "")
 
         if not calendar_email:
-            raise HTTPException(status_code=400, detail="Falta calendar_email")
+            raise HTTPException(status_code=400, detail="Falta calendar_email en los datos")
 
         event = create_google_event(calendar_email, summary, start_time, end_time, description)
 
@@ -193,10 +193,10 @@ async def book_appointment(request: Request):
         }
 
     except Exception as e:
-        print(f"❌ Error procesando cita en backend: {e}")
+        print(f"❌ Error procesando el endpoint book-appointment: {e}")
         return {
             "code": "ERROR",
-            "message": f"Error interno: {str(e)}"
+            "message": f"Error de servidor interno: {str(e)}"
         }
 
 @app.post("/create-retell-bot")

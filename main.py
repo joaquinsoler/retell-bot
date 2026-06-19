@@ -44,7 +44,6 @@ def get_calendar_service():
 
 
 def ensure_calendar_access(calendar_id: str):
-    """Suscribe la Service Account al calendario (fix para 404 en reservas)"""
     try:
         service = get_calendar_service()
         service.calendarList().insert(body={'id': calendar_id}).execute()
@@ -53,12 +52,14 @@ def ensure_calendar_access(calendar_id: str):
         if e.status_code == 409:
             print(f"ℹ️ Calendario ya suscrito: {calendar_id}")
         else:
-            print(f"⚠️ Error al suscribir {calendar_id}: {e}")
+            print(f"⚠️ Error suscripción {e.status_code}: {e}")
+    except Exception as e:
+        print(f"⚠️ Error inesperado en ensure: {e}")
 
 
 def create_google_event(calendar_id: str, summary: str, start_time: str, end_time: str, description: str = ""):
     try:
-        ensure_calendar_access(calendar_id)   # ← Esta línea arregla las reservas
+        ensure_calendar_access(calendar_id)
         service = get_calendar_service()
 
         event = {
@@ -75,14 +76,25 @@ def create_google_event(calendar_id: str, summary: str, start_time: str, end_tim
             sendUpdates='none'
         ).execute()
 
-        print(f"✅ EVENTO CREADO: {created.get('htmlLink')}")
+        print(f"✅ EVENTO CREADO CORRECTAMENTE: {created.get('htmlLink')}")
         return created
+
+    except HttpError as e:
+        print(f"❌ GOOGLE HTTP ERROR {e.status_code}")
+        print(f"   Reason: {e.reason}")
+        print(f"   Message: {e}")
+        print(f"   Details: {e.error_details if hasattr(e, 'error_details') else 'No details'}")
+        raise
     except Exception as e:
-        print(f"❌ Error Google Calendar: {e}")
+        print(f"❌ ERROR GENERAL EN create_google_event: {type(e).__name__}")
+        print(f"   Mensaje: {e}")
+        import traceback
+        print("   Traceback:")
+        print(traceback.format_exc())
         raise
 
 
-# ==================== VOICE MAPPING ====================
+# ==================== VOICE MAPPING (sin cambios) ====================
 VOICE_MAPPING = {
     "Cimo": "11labs-Adrian", "Brynne": "11labs-Brynne", "Chloe": "11labs-Chloe",
     "Kate": "openai-Nova", "Grace": "openai-Shimmer", "Leland": "11labs-Leland",
@@ -106,7 +118,7 @@ def retell_request(method: str, endpoint: str, json_data=None):
         return None
 
 
-# ==================== CREACIÓN DEL BOT ====================
+# ==================== CREACIÓN DEL BOT (sin cambios) ====================
 def create_bot_for_client(nombre_negocio, sector, servicios, horario, zona, voice_id, calendar_email):
     ahora = datetime.now()
     fecha_base = ahora.strftime("%A, %d de %B de %Y")
@@ -167,56 +179,65 @@ def create_bot_for_client(nombre_negocio, sector, servicios, horario, zona, voic
     return {"status": "success", "agent_id": agent_id, "phone_number": free_number}
 
 
-# ==================== ENDPOINTS ====================
+# ==================== BOOK-APPOINTMENT (LOGGING MÁXIMO) ====================
 @app.post("/book-appointment")
 @app.post("/book-appointment/")
 async def book_appointment(request: Request):
-    print("=" * 100)
-    print("🚨 RETELL LLAMÓ A /book-appointment")
-    print("=" * 100)
+    print("=" * 120)
+    print("🚨 RETELL AI HA LLAMADO A /book-appointment")
+    print("=" * 120)
+
     try:
         raw = (await request.body()).decode("utf-8")
-        print("RAW BODY:\n", raw)
+        print("📥 RAW BODY RECIBIDO:\n", raw)
+        print("-" * 80)
 
         data = await request.json()
         args = data.get("args", data)
 
-        print("ARGUMENTOS:\n", json.dumps(args, indent=2, ensure_ascii=False))
+        print("🔑 ARGUMENTOS EXTRAÍDOS:\n", json.dumps(args, indent=2, ensure_ascii=False))
+        print("-" * 80)
 
-        event = create_google_event(
-            args.get("calendar_email"),
-            args.get("summary"),
-            args.get("start_time"),
-            args.get("end_time"),
-            args.get("description", "")
-        )
+        calendar_email = args.get("calendar_email")
+        summary = args.get("summary")
+        start_time = args.get("start_time")
+        end_time = args.get("end_time")
 
+        print(f"📅 Intentando crear evento para: {calendar_email}")
+        print(f"   Resumen: {summary}")
+        print(f"   Inicio: {start_time}")
+        print(f"   Fin: {end_time}")
+
+        event = create_google_event(calendar_email, summary, start_time, end_time, args.get("description", ""))
+
+        print("🎉 EVENTO CREADO CON ÉXITO")
+        print("=" * 120)
         return {"code": "SUCCESS", "message": "Cita agendada correctamente"}
+
     except Exception as e:
-        print(f"❌ ERROR EN BOOK-APPOINTMENT: {e}")
+        print(f"❌ ERROR FINAL EN /book-appointment: {type(e).__name__}")
+        print(f"   Mensaje completo: {e}")
+        import traceback
+        print("   Traceback completo:")
+        print(traceback.format_exc())
+        print("=" * 120)
         return {"code": "ERROR", "message": str(e)}
 
 
+# ==================== VERIFY Y CREATE BOT (sin cambios) ====================
 @app.post("/verify-calendar-access")
 @app.post("/verify-calendar-access/")
 async def verify_calendar_access(request: Request):
-    print("=" * 80)
-    print("🔍 VERIFICANDO ACCESO A GOOGLE CALENDAR")
-    print("=" * 80)
     try:
         data = await request.json()
-        calendar_email = data.get("calendar_email")
-        print(f"Email del calendario: {calendar_email}")
-
         create_google_event(
-            calendar_email,
+            data.get("calendar_email"),
             "🧪 Prueba de conexión - Dansu",
             "2026-07-01T10:00:00+02:00",
             "2026-07-01T10:30:00+02:00"
         )
         return {"status": "success", "message": "Acceso verificado correctamente"}
     except Exception as e:
-        print(f"❌ Error en verify: {e}")
         raise HTTPException(status_code=400, detail=str(e))
 
 

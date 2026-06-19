@@ -11,7 +11,7 @@ from googleapiclient.errors import HttpError
 
 app = FastAPI(title="Dansu Backend")
 
-# ==================== VARIABLES ====================
+# ==================== VARIABLES DE ENTORNO ====================
 RETELL_API_KEY = os.getenv("RETELL_API_KEY")
 GOOGLE_CREDENTIALS_JSON = os.getenv("GOOGLE_CREDENTIALS")
 
@@ -27,13 +27,19 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ==================== GOOGLE CALENDAR ====================
+# ==================== GOOGLE CALENDAR (versión estable que funcionaba antes) ====================
 SCOPES = ['https://www.googleapis.com/auth/calendar']
 
 def get_calendar_service():
     credentials_info = json.loads(GOOGLE_CREDENTIALS_JSON)
-    credentials = service_account.Credentials.from_service_account_info(credentials_info, scopes=SCOPES)
+    credentials = service_account.Credentials.from_service_account_info(
+        credentials_info, scopes=SCOPES
+    )
     credentials = credentials.with_scopes(SCOPES)
+    if hasattr(credentials, 'with_subject'):
+        credentials = credentials.with_subject(None)
+    if hasattr(credentials, '_regional_access_boundary'):
+        credentials._regional_access_boundary = None
     return build('calendar', 'v3', credentials=credentials, cache_discovery=False)
 
 
@@ -46,47 +52,44 @@ def ensure_calendar_access(calendar_id: str):
         if e.status_code == 409:
             print(f"ℹ️ Ya suscrito: {calendar_id}")
         else:
-            print(f"⚠️ Error suscripción: {e}")
+            print(f"⚠️ Error suscripción {e.status_code}: {e}")
 
 
 def create_google_event(calendar_id: str, summary: str, start_time: str, end_time: str, description: str = ""):
-    ensure_calendar_access(calendar_id)
-    service = get_calendar_service()
-    event = {
-        'summary': summary[:100],
-        'description': (description or "Cita agendada por Dansu AI"),
-        'start': {'dateTime': start_time, 'timeZone': 'Europe/Madrid'},
-        'end': {'dateTime': end_time, 'timeZone': 'Europe/Madrid'},
-        'reminders': {'useDefault': True}
-    }
-    created = service.events().insert(calendarId=calendar_id, body=event, sendUpdates='none').execute()
-    print(f"✅ EVENTO CREADO: {created.get('htmlLink')}")
-    return created
+    try:
+        ensure_calendar_access(calendar_id)
+        service = get_calendar_service()
+
+        event = {
+            'summary': summary[:100],
+            'description': (description or "Cita agendada por Dansu AI"),
+            'start': {'dateTime': start_time, 'timeZone': 'Europe/Madrid'},
+            'end': {'dateTime': end_time, 'timeZone': 'Europe/Madrid'},
+            'reminders': {'useDefault': True}
+        }
+
+        created = service.events().insert(
+            calendarId=calendar_id,
+            body=event,
+            sendUpdates='none'
+        ).execute()
+
+        print(f"✅ EVENTO CREADO: {created.get('htmlLink')}")
+        return created
+    except Exception as e:
+        print(f"❌ Error Google Calendar: {e}")
+        raise
 
 
-# ==================== VOICE MAPPING (COMPLETO) ====================
+# ==================== VOICE MAPPING ====================
 VOICE_MAPPING = {
-    "Cimo": "11labs-Adrian",
-    "Brynne": "11labs-Brynne",
-    "Chloe": "11labs-Chloe",
-    "Kate": "openai-Nova",
-    "Grace": "openai-Shimmer",
-    "Leland": "11labs-Leland",
-    "Marissa": "11labs-Marissa",
-    "Lily": "11labs-Lily",
-    "Della": "11labs-Delia",
-    "Nico": "openai-Onyx",
-    "Rita": "11labs-Rita",
-    "Meritt": "11labs-Meritt",
-    "Willa": "11labs-Willa",
-    "Maren": "11labs-Maren",
-    "Tasmin": "11labs-Tasmin",
-    "Ashley": "11labs-Ashley",
-    "Andrea": "openai-Alloy",
-    "Claudia": "11labs-Claudia",
-    "Gaby": "11labs-Gaby",
-    "Alejandro": "openai-Echo",
-    "Sloane": "11labs-Sloane"
+    "Cimo": "11labs-Adrian", "Brynne": "11labs-Brynne", "Chloe": "11labs-Chloe",
+    "Kate": "openai-Nova", "Grace": "openai-Shimmer", "Leland": "11labs-Leland",
+    "Marissa": "11labs-Marissa", "Lily": "11labs-Lily", "Della": "11labs-Delia",
+    "Nico": "openai-Onyx", "Rita": "11labs-Rita", "Meritt": "11labs-Meritt",
+    "Willa": "11labs-Willa", "Maren": "11labs-Maren", "Tasmin": "11labs-Tasmin",
+    "Ashley": "11labs-Ashley", "Andrea": "openai-Alloy", "Claudia": "11labs-Claudia",
+    "Gaby": "11labs-Gaby", "Alejandro": "openai-Echo", "Sloane": "11labs-Sloane"
 }
 
 
@@ -109,17 +112,17 @@ def create_bot_for_client(nombre_negocio, sector, servicios, horario, zona, voic
 
     custom_prompt = f"""Eres el asistente virtual de {nombre_negocio} ({sector}).
 
-**INFORMACIÓN FIJA QUE NUNCA DEBES OLVIDAR:**
+**INFORMACIÓN CRÍTICA QUE NUNCA DEBES OLVIDAR NI INVENTAR:**
 - El email del Google Calendar del negocio es exactamente: {calendar_email}
-- Cuando agendes una cita, usa SIEMPRE este email en la herramienta: {calendar_email}
+- Cuando uses la herramienta `book_appointment`, pon SIEMPRE este email en `calendar_email`: {calendar_email}
 - Nunca inventes otro email.
 
-**Flujo para agendar (pregunta uno por uno):**
+**Flujo para agendar cita (pregunta uno por uno):**
 1. Confirma día y hora con el usuario.
 2. Pregunta: "¿Me puedes decir tu nombre completo?"
 3. Pregunta: "¿Cuál es tu número de teléfono?"
 4. Pregunta: "¿Cuál es el motivo de la cita?"
-5. Solo entonces llama a la herramienta book_appointment."""
+5. Solo después de tener los tres datos, llama a la herramienta `book_appointment`."""
 
     llm_res = retell_request("POST", "/create-retell-llm", {
         "model": "gpt-4o-mini",
@@ -159,7 +162,6 @@ def create_bot_for_client(nombre_negocio, sector, servicios, horario, zona, voic
 
     agent_id = agent_res["agent_id"]
 
-    # Asignar número
     numbers = retell_request("GET", "/v2/list-phone-numbers")
     free_number = None
     if numbers and "items" in numbers:
@@ -206,22 +208,38 @@ async def book_appointment(request: Request):
         return {"code": "ERROR", "message": str(e)}
 
 
+@app.post("/verify-calendar-access")
+@app.post("/verify-calendar-access/")
+async def verify_calendar_access(request: Request):
+    print("=" * 80)
+    print("🔍 VERIFICANDO ACCESO A GOOGLE CALENDAR")
+    print("=" * 80)
+    try:
+        data = await request.json()
+        calendar_email = data.get("calendar_email")
+        print(f"Email recibido: {calendar_email}")
+
+        create_google_event(
+            calendar_email,
+            "🧪 Prueba de conexión - Dansu",
+            "2026-07-01T10:00:00+02:00",
+            "2026-07-01T10:30:00+02:00"
+        )
+        return {"status": "success", "message": "Acceso verificado correctamente"}
+    except Exception as e:
+        print(f"❌ Error en verify-calendar-access: {e}")
+        raise HTTPException(status_code=400, detail=str(e))
+
+
 @app.post("/create-retell-bot")
 async def create_retell_bot_endpoint(request: Request):
     try:
         payload = await request.json()
         data = payload if isinstance(payload, dict) else payload.get("data", payload)
-        
         voice_id = VOICE_MAPPING.get(data.get("asistente"), "openai-Alloy")
-        
         return create_bot_for_client(
-            data.get("nombre_negocio"), 
-            data.get("sector"), 
-            data.get("servicios"),
-            data.get("horario"), 
-            data.get("zona"), 
-            voice_id, 
-            data.get("google_calendar_email")
+            data.get("nombre_negocio"), data.get("sector"), data.get("servicios"),
+            data.get("horario"), data.get("zona"), voice_id, data.get("google_calendar_email")
         )
     except Exception as e:
         print(f"❌ Error en create-retell-bot: {e}")

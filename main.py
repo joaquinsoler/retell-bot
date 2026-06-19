@@ -16,7 +16,7 @@ RETELL_API_KEY = os.getenv("RETELL_API_KEY")
 GOOGLE_CREDENTIALS_JSON = os.getenv("GOOGLE_CREDENTIALS")
 
 if not RETELL_API_KEY or not GOOGLE_CREDENTIALS_JSON:
-    raise Exception("Faltan variables de entorno RETELL_API_KEY o GOOGLE_CREDENTIALS")
+    raise Exception("Faltan variables de entorno")
 
 # ==================== CORS ====================
 app.add_middleware(
@@ -40,53 +40,45 @@ def get_calendar_service():
         credentials = credentials.with_subject(None)
     if hasattr(credentials, '_regional_access_boundary'):
         credentials._regional_access_boundary = None
-
     return build('calendar', 'v3', credentials=credentials, cache_discovery=False)
 
 
 def ensure_calendar_access(calendar_id: str):
-    """Suscribe la Service Account al calendario del cliente (SOLUCIÓN AL 404)"""
+    """Suscribe la Service Account al calendario (fix para 404 en reservas)"""
     try:
         service = get_calendar_service()
         service.calendarList().insert(body={'id': calendar_id}).execute()
-        print(f"✅ Calendario {calendar_id} suscrito correctamente a la Service Account")
+        print(f"✅ Calendario suscrito: {calendar_id}")
     except HttpError as e:
-        if e.status_code == 409:  # Already exists
-            print(f"ℹ️ Calendario {calendar_id} ya estaba suscrito")
+        if e.status_code == 409:
+            print(f"ℹ️ Calendario ya suscrito: {calendar_id}")
         else:
-            print(f"⚠️ No se pudo suscribir automáticamente (código {e.status_code}): {e}")
-    except Exception as e:
-        print(f"⚠️ Error en ensure_calendar_access: {e}")
+            print(f"⚠️ Error al suscribir {calendar_id}: {e}")
 
 
 def create_google_event(calendar_id: str, summary: str, start_time: str, end_time: str, description: str = ""):
     try:
-        # ←←← PASO CRÍTICO: Suscribir la Service Account
-        ensure_calendar_access(calendar_id)
-
+        ensure_calendar_access(calendar_id)   # ← Esta línea arregla las reservas
         service = get_calendar_service()
-        
+
         event = {
             'summary': summary[:100],
-            'description': (description or "Cita agendada por Dansu AI") + f"\n\nAgendado vía Dansu - {calendar_id}",
+            'description': (description or "Cita agendada por Dansu AI"),
             'start': {'dateTime': start_time, 'timeZone': 'Europe/Madrid'},
             'end': {'dateTime': end_time, 'timeZone': 'Europe/Madrid'},
             'reminders': {'useDefault': True}
         }
-        
+
         created = service.events().insert(
             calendarId=calendar_id,
             body=event,
             sendUpdates='none'
         ).execute()
-        
-        print(f"✅ EVENTO CREADO CORRECTAMENTE: {created.get('htmlLink')}")
+
+        print(f"✅ EVENTO CREADO: {created.get('htmlLink')}")
         return created
-    except HttpError as e:
-        print(f"❌ Google HttpError {e.status_code}: {e.reason}")
-        raise
     except Exception as e:
-        print(f"❌ Error creando evento: {e}")
+        print(f"❌ Error Google Calendar: {e}")
         raise
 
 
@@ -119,12 +111,7 @@ def create_bot_for_client(nombre_negocio, sector, servicios, horario, zona, voic
     ahora = datetime.now()
     fecha_base = ahora.strftime("%A, %d de %B de %Y")
 
-    custom_prompt = f"""Eres el asistente virtual de {nombre_negocio} ({sector}).
-
-**REGLAS OBLIGATORIAS:**
-- Usa SIEMPRE la herramienta `book_appointment` para agendar citas.
-- Confirma fecha y hora exacta con el usuario antes de llamarla.
-- Nunca digas que la cita está agendada sin recibir "SUCCESS"."""
+    custom_prompt = f"""Eres el asistente de {nombre_negocio}. Usa SIEMPRE la herramienta book_appointment después de confirmar fecha y hora."""
 
     llm_res = retell_request("POST", "/create-retell-llm", {
         "model": "gpt-4o-mini",
@@ -164,7 +151,6 @@ def create_bot_for_client(nombre_negocio, sector, servicios, horario, zona, voic
 
     agent_id = agent_res["agent_id"]
 
-    # Asignar número
     numbers = retell_request("GET", "/v2/list-phone-numbers")
     free_number = None
     if numbers and "items" in numbers:
@@ -181,24 +167,21 @@ def create_bot_for_client(nombre_negocio, sector, servicios, horario, zona, voic
     return {"status": "success", "agent_id": agent_id, "phone_number": free_number}
 
 
-# ==================== BOOK APPOINTMENT (con logging completo) ====================
+# ==================== ENDPOINTS ====================
 @app.post("/book-appointment")
 @app.post("/book-appointment/")
 async def book_appointment(request: Request):
     print("=" * 100)
-    print("🚨 RETELL AI HA LLAMADO A /book-appointment")
+    print("🚨 RETELL LLAMÓ A /book-appointment")
     print("=" * 100)
-
     try:
         raw = (await request.body()).decode("utf-8")
-        print("📥 RAW BODY:\n", raw)
-        print("-" * 80)
+        print("RAW BODY:\n", raw)
 
         data = await request.json()
         args = data.get("args", data)
 
-        print("🔑 ARGUMENTOS RECIBIDOS:\n", json.dumps(args, indent=2, ensure_ascii=False))
-        print("-" * 80)
+        print("ARGUMENTOS:\n", json.dumps(args, indent=2, ensure_ascii=False))
 
         event = create_google_event(
             args.get("calendar_email"),
@@ -208,18 +191,35 @@ async def book_appointment(request: Request):
             args.get("description", "")
         )
 
-        print("🎉 EVENTO CREADO CON ÉXITO")
-        print("=" * 100)
-
         return {"code": "SUCCESS", "message": "Cita agendada correctamente"}
-
     except Exception as e:
         print(f"❌ ERROR EN BOOK-APPOINTMENT: {e}")
-        print("=" * 100)
         return {"code": "ERROR", "message": str(e)}
 
 
-# ==================== ENDPOINTS ====================
+@app.post("/verify-calendar-access")
+@app.post("/verify-calendar-access/")
+async def verify_calendar_access(request: Request):
+    print("=" * 80)
+    print("🔍 VERIFICANDO ACCESO A GOOGLE CALENDAR")
+    print("=" * 80)
+    try:
+        data = await request.json()
+        calendar_email = data.get("calendar_email")
+        print(f"Email del calendario: {calendar_email}")
+
+        create_google_event(
+            calendar_email,
+            "🧪 Prueba de conexión - Dansu",
+            "2026-07-01T10:00:00+02:00",
+            "2026-07-01T10:30:00+02:00"
+        )
+        return {"status": "success", "message": "Acceso verificado correctamente"}
+    except Exception as e:
+        print(f"❌ Error en verify: {e}")
+        raise HTTPException(status_code=400, detail=str(e))
+
+
 @app.post("/create-retell-bot")
 async def create_retell_bot_endpoint(request: Request):
     try:

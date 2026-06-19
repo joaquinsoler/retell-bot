@@ -57,14 +57,15 @@ def ensure_calendar_access(calendar_id: str):
 
 
 def is_time_slot_available(calendar_id: str, start_time: str, duration_minutes: int = 60):
-    """Comprueba disponibilidad con buffer de 1 hora antes"""
+    """Comprueba disponibilidad con buffer de 1 hora - Versión corregida según docs de Google"""
     try:
         print(f"🔍 Comprobando disponibilidad para {start_time} (buffer 60 min)")
         service = get_calendar_service()
-        
+
+        # Formato RFC3339 correcto (obligatorio)
         start_dt = datetime.fromisoformat(start_time.replace("Z", "+00:00"))
-        buffer_start = (start_dt - timedelta(minutes=60)).isoformat()
-        end_dt = (start_dt + timedelta(minutes=duration_minutes)).isoformat()
+        buffer_start = (start_dt - timedelta(minutes=60)).isoformat(timespec='seconds') + 'Z'
+        end_dt = (start_dt + timedelta(minutes=duration_minutes)).isoformat(timespec='seconds') + 'Z'
 
         body = {
             "timeMin": buffer_start,
@@ -72,26 +73,33 @@ def is_time_slot_available(calendar_id: str, start_time: str, duration_minutes: 
             "items": [{"id": calendar_id}]
         }
 
+        print(f"📤 Body enviado a freeBusy: {json.dumps(body, ensure_ascii=False)}")
+
         freebusy = service.freebusy().query(body=body).execute()
         busy_slots = freebusy.get("calendars", {}).get(calendar_id, {}).get("busy", [])
 
         if busy_slots:
             print(f"❌ HORARIO NO DISPONIBLE - Slots ocupados: {busy_slots}")
             return False
-        
+
         print("✅ Horario disponible")
         return True
-    except Exception as e:
-        print(f"⚠️ Error comprobando disponibilidad: {e}")
+
+    except HttpError as e:
+        print(f"❌ HttpError en freeBusy {e.status_code}: {e.reason}")
+        print(f"   Detalles: {e}")
         print(traceback.format_exc())
-        return True  # Si falla la comprobación, permitimos (seguridad)
+        return True  # Permitimos si falla la comprobación
+    except Exception as e:
+        print(f"⚠️ Error general en is_time_slot_available: {e}")
+        print(traceback.format_exc())
+        return True
 
 
 def create_google_event(calendar_id: str, summary: str, start_time: str, end_time: str, description: str = "", check_availability=True):
     try:
         ensure_calendar_access(calendar_id)
 
-        # Solo comprobar disponibilidad en citas reales (no en pruebas)
         if check_availability and not is_time_slot_available(calendar_id, start_time):
             raise Exception("Horario no disponible (buffer de 1 hora)")
 
@@ -237,7 +245,7 @@ async def book_appointment(request: Request):
             args.get("start_time"),
             args.get("end_time"),
             args.get("description", ""),
-            check_availability=True   # ← Comprobación activada para citas reales
+            check_availability=True
         )
 
         return {"code": "SUCCESS", "message": "Cita agendada correctamente"}
@@ -258,13 +266,12 @@ async def verify_calendar_access(request: Request):
         calendar_email = data.get("calendar_email")
         print(f"Email recibido: {calendar_email}")
 
-        # Para la prueba NO comprobamos disponibilidad
         create_google_event(
             calendar_email,
             "🧪 Prueba de conexión - Dansu",
             "2026-07-01T10:00:00+02:00",
             "2026-07-01T10:30:00+02:00",
-            check_availability=False
+            check_availability=False   # No comprobar en la prueba
         )
         return {"status": "success", "message": "Acceso verificado correctamente"}
     except Exception as e:
@@ -289,7 +296,7 @@ async def create_retell_bot_endpoint(request: Request):
 
 @app.get("/")
 async def root():
-    return {"status": "Dansu Backend OK - Buffer 1 hora activado"}
+    return {"status": "Dansu Backend OK - freeBusy corregido"}
 
 
 if __name__ == "__main__":

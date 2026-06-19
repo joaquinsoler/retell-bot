@@ -12,7 +12,7 @@ from googleapiclient.errors import HttpError
 
 app = FastAPI(title="Dansu Backend")
 
-# ==================== VARIABLES ====================
+# ==================== VARIABLES DE ENTORNO ====================
 RETELL_API_KEY = os.getenv("RETELL_API_KEY")
 GOOGLE_CREDENTIALS_JSON = os.getenv("GOOGLE_CREDENTIALS")
 
@@ -33,15 +33,35 @@ SCOPES = ['https://www.googleapis.com/auth/calendar']
 
 def get_calendar_service():
     credentials_info = json.loads(GOOGLE_CREDENTIALS_JSON)
-    credentials = service_account.Credentials.from_service_account_info(credentials_info, scopes=SCOPES)
+    credentials = service_account.Credentials.from_service_account_info(
+        credentials_info, scopes=SCOPES
+    )
     credentials = credentials.with_scopes(SCOPES)
+    if hasattr(credentials, 'with_subject'):
+        credentials = credentials.with_subject(None)
+    if hasattr(credentials, '_regional_access_boundary'):
+        credentials._regional_access_boundary = None
     return build('calendar', 'v3', credentials=credentials, cache_discovery=False)
 
 
-def is_time_slot_available(calendar_id: str, start_time: str, duration_minutes: int = 60):
+def ensure_calendar_access(calendar_id: str):
     try:
-        print(f"🔍 Comprobando disponibilidad para {start_time}")
         service = get_calendar_service()
+        service.calendarList().insert(body={'id': calendar_id}).execute()
+        print(f"✅ Calendario suscrito: {calendar_id}")
+    except HttpError as e:
+        if e.status_code == 409:
+            print(f"ℹ️ Ya suscrito: {calendar_id}")
+        else:
+            print(f"⚠️ Error suscripción {e.status_code}: {e}")
+
+
+def is_time_slot_available(calendar_id: str, start_time: str, duration_minutes: int = 60):
+    """Comprueba disponibilidad con buffer de 1 hora antes"""
+    try:
+        print(f"🔍 Comprobando disponibilidad para {start_time} (buffer 60 min)")
+        service = get_calendar_service()
+        
         start_dt = datetime.fromisoformat(start_time.replace("Z", "+00:00"))
         buffer_start = (start_dt - timedelta(minutes=60)).isoformat()
         end_dt = (start_dt + timedelta(minutes=duration_minutes)).isoformat()
@@ -53,22 +73,30 @@ def is_time_slot_available(calendar_id: str, start_time: str, duration_minutes: 
         }
 
         freebusy = service.freebusy().query(body=body).execute()
-        busy = freebusy.get("calendars", {}).get(calendar_id, {}).get("busy", [])
-        if busy:
-            print(f"❌ Horario ocupado: {busy}")
+        busy_slots = freebusy.get("calendars", {}).get(calendar_id, {}).get("busy", [])
+
+        if busy_slots:
+            print(f"❌ HORARIO NO DISPONIBLE - Slots ocupados: {busy_slots}")
             return False
+        
+        print("✅ Horario disponible")
         return True
     except Exception as e:
-        print(f"⚠️ Error en disponibilidad: {e}")
-        return True
+        print(f"⚠️ Error comprobando disponibilidad: {e}")
+        print(traceback.format_exc())
+        return True  # Si falla la comprobación, permitimos (seguridad)
 
 
-def create_google_event(calendar_id: str, summary: str, start_time: str, end_time: str, description: str = ""):
+def create_google_event(calendar_id: str, summary: str, start_time: str, end_time: str, description: str = "", check_availability=True):
     try:
-        if not is_time_slot_available(calendar_id, start_time):
+        ensure_calendar_access(calendar_id)
+
+        # Solo comprobar disponibilidad en citas reales (no en pruebas)
+        if check_availability and not is_time_slot_available(calendar_id, start_time):
             raise Exception("Horario no disponible (buffer de 1 hora)")
 
         service = get_calendar_service()
+
         event = {
             'summary': summary[:100],
             'description': (description or "Cita agendada por Dansu AI"),
@@ -77,11 +105,17 @@ def create_google_event(calendar_id: str, summary: str, start_time: str, end_tim
             'reminders': {'useDefault': True}
         }
 
-        created = service.events().insert(calendarId=calendar_id, body=event, sendUpdates='none').execute()
+        created = service.events().insert(
+            calendarId=calendar_id,
+            body=event,
+            sendUpdates='none'
+        ).execute()
+
         print(f"✅ EVENTO CREADO: {created.get('htmlLink')}")
         return created
     except Exception as e:
-        print(f"❌ Error create_google_event: {e}")
+        print(f"❌ Error en create_google_event: {e}")
+        print(traceback.format_exc())
         raise
 
 
@@ -98,14 +132,14 @@ VOICE_MAPPING = {
 
 
 def retell_request(method: str, endpoint: str, json_data=None):
+    url = f"https://api.retellai.com{endpoint}"
+    headers = {"Authorization": f"Bearer {RETELL_API_KEY}", "Content-Type": "application/json"}
     try:
-        url = f"https://api.retellai.com{endpoint}"
-        headers = {"Authorization": f"Bearer {RETELL_API_KEY}", "Content-Type": "application/json"}
         r = requests.request(method, url, headers=headers, json=json_data, timeout=30)
         print(f"→ Retell {method} {endpoint} → {r.status_code}")
         return r.json() if r.ok else None
     except Exception as e:
-        print(f"❌ Error en retell_request: {e}")
+        print(f"❌ Error Retell: {e}")
         return None
 
 
@@ -116,8 +150,9 @@ def create_bot_for_client(nombre_negocio, sector, servicios, horario, zona, voic
 
     custom_prompt = f"""Eres el asistente virtual de {nombre_negocio} ({sector}).
 
-**INFORMACIÓN FIJA QUE NUNCA DEBES OLVIDAR:**
-- Email del calendario: {calendar_email}
+**INFORMACIÓN CRÍTICA QUE NUNCA DEBES OLVIDAR NI INVENTAR:**
+- El email del Google Calendar del negocio es exactamente: {calendar_email}
+- Cuando uses la herramienta `book_appointment`, pon SIEMPRE este email en `calendar_email`: {calendar_email}
 
 **Flujo para agendar cita (pregunta uno por uno):**
 1. Confirma día y hora con el usuario.
@@ -201,7 +236,8 @@ async def book_appointment(request: Request):
             args.get("summary"),
             args.get("start_time"),
             args.get("end_time"),
-            args.get("description", "")
+            args.get("description", ""),
+            check_availability=True   # ← Comprobación activada para citas reales
         )
 
         return {"code": "SUCCESS", "message": "Cita agendada correctamente"}
@@ -214,17 +250,25 @@ async def book_appointment(request: Request):
 @app.post("/verify-calendar-access")
 @app.post("/verify-calendar-access/")
 async def verify_calendar_access(request: Request):
+    print("=" * 80)
+    print("🔍 VERIFICANDO ACCESO A GOOGLE CALENDAR")
+    print("=" * 80)
     try:
         data = await request.json()
+        calendar_email = data.get("calendar_email")
+        print(f"Email recibido: {calendar_email}")
+
+        # Para la prueba NO comprobamos disponibilidad
         create_google_event(
-            data.get("calendar_email"),
+            calendar_email,
             "🧪 Prueba de conexión - Dansu",
             "2026-07-01T10:00:00+02:00",
-            "2026-07-01T10:30:00+02:00"
+            "2026-07-01T10:30:00+02:00",
+            check_availability=False
         )
         return {"status": "success", "message": "Acceso verificado correctamente"}
     except Exception as e:
-        print(f"❌ Error verify: {e}")
+        print(f"❌ Error en verify-calendar-access: {e}")
         raise HTTPException(status_code=400, detail=str(e))
 
 
@@ -245,7 +289,7 @@ async def create_retell_bot_endpoint(request: Request):
 
 @app.get("/")
 async def root():
-    return {"status": "Dansu Backend OK"}
+    return {"status": "Dansu Backend OK - Buffer 1 hora activado"}
 
 
 if __name__ == "__main__":

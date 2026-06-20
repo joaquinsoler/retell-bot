@@ -335,6 +335,51 @@ async def update_retell_bot_endpoint(request: Request):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.post("/delete-retell-bot")
+async def delete_retell_bot_endpoint(request: Request):
+    """Elimina permanentemente el asistente de Retell, libera el teléfono y borra de PostgreSQL"""
+    try:
+        data = await request.json()
+        agent_id = data.get("agent_id")
+
+        if not agent_id:
+            raise HTTPException(status_code=400, detail="Falta el agent_id")
+
+        print(f"⚙️ Iniciando borrado completo para el agente: {agent_id}")
+
+        # 1. Buscar y liberar el número de teléfono en Retell desvinculando este agent_id
+        numbers = retell_request("GET", "/v2/list-phone-numbers")
+        if numbers and "items" in numbers:
+            for p in numbers["items"]:
+                inbound = p.get("inbound_agents", [])
+                if inbound and inbound[0].get("agent_id") == agent_id:
+                    phone_number = p.get("phone_number")
+                    # Ponemos inbound_agents vacío para liberar el número
+                    retell_request("PATCH", f"/update-phone-number/{phone_number}", {
+                        "inbound_agents": []
+                    })
+                    print(f"📞 Número {phone_number} liberado de Retell.")
+                    break
+
+        # 2. Eliminar físicamente el Agente de Retell AI para limpiar su servidor
+        retell_request("DELETE", f"/delete-agent/{agent_id}")
+        print(f"🤖 Agente {agent_id} eliminado de los servidores de Retell.")
+
+        # 3. Eliminar el registro permanentemente de nuestra tabla de PostgreSQL
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute("DELETE FROM asistentes WHERE agent_id = %s;", (agent_id,))
+        conn.commit()
+        cur.close()
+        conn.close()
+        print(f"🗑️ Registro borrado con éxito de PostgreSQL.")
+
+        return {"status": "success", "message": "Asistente eliminado permanentemente de Retell y del Servidor"}
+    except Exception as e:
+        print(f"❌ Error crítico eliminando bot: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 # ==================== ENDPOINTS DE AGENDAMIENTO Y TEST ====================
 
 @app.post("/book-appointment")

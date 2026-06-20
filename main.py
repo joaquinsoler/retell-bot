@@ -57,19 +57,28 @@ def ensure_calendar_access(calendar_id: str):
 
 
 def is_time_slot_available(calendar_id: str, start_time: str, duration_minutes: int = 60):
-    """Comprueba disponibilidad con buffer de 1 hora - Versión corregida"""
+    """Comprueba disponibilidad con un buffer de 1 hora antes y el tiempo de la cita"""
     try:
         print(f"🔍 Comprobando disponibilidad para {start_time} (buffer 60 min)")
         service = get_calendar_service()
 
-        # Formato RFC3339 correcto
-        start_dt = datetime.fromisoformat(start_time.replace("Z", "+00:00"))
-        buffer_start = (start_dt - timedelta(minutes=60)).isoformat(timespec='seconds') + 'Z'
-        end_dt = (start_dt + timedelta(minutes=duration_minutes)).isoformat(timespec='seconds') + 'Z'
+        # 1. Parsear la fecha de forma segura soportando 'Z' o desfases (+02:00)
+        if start_time.endswith('Z'):
+            start_dt = datetime.fromisoformat(start_time[:-1] + '+00:00')
+        else:
+            start_dt = datetime.fromisoformat(start_time)
+
+        # 2. Calcular rangos restando el buffer correctamente
+        dt_start_with_buffer = start_dt - timedelta(minutes=60)
+        dt_end = start_dt + timedelta(minutes=duration_minutes)
+
+        # 3. Formatear a RFC3339 limpio SIN duplicar indicadores de zona horaria
+        time_min = dt_start_with_buffer.isoformat()
+        time_max = dt_end.isoformat()
 
         body = {
-            "timeMin": buffer_start,
-            "timeMax": end_dt,
+            "timeMin": time_min,
+            "timeMax": time_max,
             "items": [{"id": calendar_id}]
         }
 
@@ -79,7 +88,7 @@ def is_time_slot_available(calendar_id: str, start_time: str, duration_minutes: 
         busy_slots = freebusy.get("calendars", {}).get(calendar_id, {}).get("busy", [])
 
         if busy_slots:
-            print(f"❌ HORARIO NO DISPOLIBLE - Slots ocupados: {busy_slots}")
+            print(f"❌ HORARIO NO DISPONIBLE - Slots ocupados: {busy_slots}")
             return False
 
         print("✅ Horario disponible")
@@ -88,11 +97,11 @@ def is_time_slot_available(calendar_id: str, start_time: str, duration_minutes: 
     except HttpError as e:
         print(f"❌ HttpError en freeBusy {e.status_code}: {e.reason}")
         print(traceback.format_exc())
-        return False  # CAMBIADO: Si falla la API de Google, denegamos por seguridad
+        return False  
     except Exception as e:
         print(f"⚠️ Error general en is_time_slot_available: {e}")
         print(traceback.format_exc())
-        return False  # CAMBIADO: Denegamos si hay un error inesperado
+        return False
 
 
 def create_google_event(calendar_id: str, summary: str, start_time: str, end_time: str, description: str = "", check_availability=True):
@@ -100,7 +109,7 @@ def create_google_event(calendar_id: str, summary: str, start_time: str, end_tim
         ensure_calendar_access(calendar_id)
 
         if check_availability and not is_time_slot_available(calendar_id, start_time):
-            raise Exception("Horario no disponible (buffer de 1 hora)")
+            raise Exception("Horario no disponible (ocupado o dentro del rango del buffer de 1 hora)")
 
         service = get_calendar_service()
 
@@ -160,8 +169,8 @@ def create_bot_for_client(nombre_negocio, sector, servicios, horario, zona, voic
 **Flujo para gestionar la cita (Sigue este orden estrictamente):**
 1. Pregunta al usuario el día y la hora en la que desea agendar su cita.
 2. Inmediatamente después de que te dé un horario, DEBES llamar a la herramienta `check_availability` para ver si está libre.
-3. Si la herramienta responde que NO está disponible, infórmaselo amablemente y ofrécele proponer o buscar otra hora.
-4. Si la herramienta responde que SÍ está disponible, continúa con las siguientes preguntas una por una:
+3. Si la herramienta responde que NO está disponible (porque devuelve un estado BUSY o similar), infórmaselo amablemente y pídele u ofrécele buscar otra hora o día diferente.
+4. Si la herramienta responde que SÍ está disponible (AVAILABLE), continúa con las siguientes preguntas una por una:
    - Pregunta: "¿Me puedes decir tu nombre completo?"
    - Pregunta: "¿Cuál es tu número de teléfono?"
    - Pregunta: "¿Cuál es el motivo de la cita?"
@@ -313,7 +322,7 @@ async def verify_calendar_access(request: Request):
             "🧪 Prueba de conexión - Dansu",
             "2026-07-01T10:00:00+02:00",
             "2026-07-01T10:30:00+02:00",
-            check_availability=False   # No comprobar en la prueba
+            check_availability=False   # No comprobar disponibilidad en la prueba inicial de inserción
         )
         return {"status": "success", "message": "Acceso verificado correctamente"}
     except Exception as e:
@@ -338,7 +347,7 @@ async def create_retell_bot_endpoint(request: Request):
 
 @app.get("/")
 async def root():
-    return {"status": "Dansu Backend OK - freeBusy corregido"}
+    return {"status": "Dansu Backend OK - freeBusy e ISO Dates corregidos"}
 
 
 if __name__ == "__main__":

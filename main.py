@@ -335,6 +335,44 @@ async def update_retell_bot_endpoint(request: Request):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.post("/delete-retell-bot")
+async def delete_retell_bot_endpoint(request: Request):
+    """Elimina permanentemente el asistente de la base de datos PostgreSQL y libera su teléfono"""
+    try:
+        data = await request.json()
+        agent_id = data.get("agent_id")
+
+        if not agent_id:
+            raise HTTPException(status_code=400, detail="Falta el agent_id")
+
+        # 1. Liberamos el número de teléfono en Retell antes de borrar el bot
+        numbers = retell_request("GET", "/v2/list-phone-numbers")
+        if numbers and "items" in numbers:
+            for p in numbers["items"]:
+                inbound = p.get("inbound_agents", [])
+                if inbound and inbound[0].get("agent_id") == agent_id:
+                    phone_number = p.get("phone_number")
+                    retell_request("PATCH", f"/update-phone-number/{phone_number}", {
+                        "inbound_agents": []
+                    })
+                    print(f"📞 Teléfono {phone_number} liberado correctamente de Retell.")
+                    break
+
+        # 2. Eliminamos el registro de nuestra base de datos PostgreSQL
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute("DELETE FROM asistentes WHERE agent_id = %s;", (agent_id,))
+        conn.commit()
+        cur.close()
+        conn.close()
+
+        print(f"🗑️ Bot {agent_id} eliminado permanentemente de PostgreSQL.")
+        return {"status": "success", "message": "Asistente eliminado permanentemente del sistema"}
+    except Exception as e:
+        print(f"❌ Error al eliminar el bot: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 # ==================== ENDPOINTS DE AGENDAMIENTO Y TEST ====================
 
 @app.post("/book-appointment")

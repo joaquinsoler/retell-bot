@@ -57,10 +57,7 @@ def ensure_calendar_access(calendar_id: str):
 
 
 def is_time_slot_available(calendar_id: str, start_time: str, duration_minutes: int = 60):
-    """
-    Verifica si hay alguna cita en la hora anterior o que se solape.
-    Devuelve True solo si está completamente libre.
-    """
+    """Verificación robusta de disponibilidad (1 hora antes)"""
     try:
         print(f"🔍 VERIFICANDO DISPONIBILIDAD para {start_time}")
         service = get_calendar_service()
@@ -69,7 +66,6 @@ def is_time_slot_available(calendar_id: str, start_time: str, duration_minutes: 
         buffer_start = (start_dt - timedelta(minutes=60)).isoformat(timespec='seconds') + 'Z'
         end_dt = (start_dt + timedelta(minutes=duration_minutes)).isoformat(timespec='seconds') + 'Z'
 
-        # Buscamos eventos en la ventana buffer + duración
         events_result = service.events().list(
             calendarId=calendar_id,
             timeMin=buffer_start,
@@ -80,61 +76,53 @@ def is_time_slot_available(calendar_id: str, start_time: str, duration_minutes: 
 
         events = events_result.get('items', [])
 
-        if not events:
-            print("✅ No hay citas en la hora anterior ni en el horario. Disponible.")
-            return True
-
-        # Comprobamos si hay solapamiento real
         for event in events:
-            event_start = event['start'].get('dateTime')
-            event_end = event['end'].get('dateTime')
+            event_start_str = event['start'].get('dateTime')
+            event_end_str = event['end'].get('dateTime')
 
-            if event_start and event_end:
-                event_start_dt = datetime.fromisoformat(event_start.replace("Z", "+00:00"))
-                event_end_dt = datetime.fromisoformat(event_end.replace("Z", "+00:00"))
+            if event_start_str and event_end_str:
+                event_start = datetime.fromisoformat(event_start_str.replace("Z", "+00:00"))
+                event_end = datetime.fromisoformat(event_end_str.replace("Z", "+00:00"))
 
-                # Si hay cualquier evento que se solape con [start-60min, start+duration]
-                if max(start_dt - timedelta(minutes=60), event_start_dt) < min(start_dt + timedelta(minutes=duration_minutes), event_end_dt):
-                    print(f"❌ CONFLICTO DETECTADO con evento: {event.get('summary')} ({event_start} - {event_end})")
+                proposed_start = start_dt
+                proposed_end = start_dt + timedelta(minutes=duration_minutes)
+
+                # Solapamiento real
+                if max(proposed_start - timedelta(minutes=60), event_start) < min(proposed_end, event_end):
+                    print(f"❌ CONFLICTO: Hay cita entre {event_start} y {event_end}")
                     return False
 
-        print("✅ Horario disponible después de verificación.")
+        print("✅ Horario DISPONIBLE")
         return True
 
     except Exception as e:
-        print(f"⚠️ Error en verificación de disponibilidad: {e}")
-        print(traceback.format_exc())
-        return True  # En caso de error, permitimos (no bloqueamos el servicio)
+        print(f"⚠️ Error en verificación: {e}")
+        return True
 
 
-def create_google_event(calendar_id: str, summary: str, start_time: str, end_time: str, description: str = "", check_availability=True):
-    try:
-        ensure_calendar_access(calendar_id)
+def create_google_event(calendar_id: str, summary: str, start_time: str, end_time: str, description: str = ""):
+    ensure_calendar_access(calendar_id)
 
-        if check_availability and not is_time_slot_available(calendar_id, start_time):
-            raise Exception("Horario no disponible (hay cita en la hora anterior)")
+    if not is_time_slot_available(calendar_id, start_time):
+        raise Exception("No se puede agendar: hay una cita en la hora anterior o se solapa")
 
-        service = get_calendar_service()
+    service = get_calendar_service()
+    event = {
+        'summary': summary[:100],
+        'description': (description or "Cita agendada por Dansu AI"),
+        'start': {'dateTime': start_time, 'timeZone': 'Europe/Madrid'},
+        'end': {'dateTime': end_time, 'timeZone': 'Europe/Madrid'},
+        'reminders': {'useDefault': True}
+    }
 
-        event = {
-            'summary': summary[:100],
-            'description': (description or "Cita agendada por Dansu AI"),
-            'start': {'dateTime': start_time, 'timeZone': 'Europe/Madrid'},
-            'end': {'dateTime': end_time, 'timeZone': 'Europe/Madrid'},
-            'reminders': {'useDefault': True}
-        }
+    created = service.events().insert(
+        calendarId=calendar_id,
+        body=event,
+        sendUpdates='none'
+    ).execute()
 
-        created = service.events().insert(
-            calendarId=calendar_id,
-            body=event,
-            sendUpdates='none'
-        ).execute()
-
-        print(f"✅ EVENTO CREADO CORRECTAMENTE: {created.get('htmlLink')}")
-        return created
-    except Exception as e:
-        print(f"❌ Error en create_google_event: {e}")
-        raise
+    print(f"✅ EVENTO CREADO: {created.get('htmlLink')}")
+    return created
 
 
 # ==================== VOICE MAPPING ====================
@@ -163,21 +151,19 @@ def retell_request(method: str, endpoint: str, json_data=None):
 
 # ==================== CREACIÓN DEL BOT ====================
 def create_bot_for_client(nombre_negocio, sector, servicios, horario, zona, voice_id, calendar_email):
-    ahora = datetime.now()
-    fecha_base = ahora.strftime("%A, %d de %B de %Y")
-
     custom_prompt = f"""Eres el asistente virtual de {nombre_negocio} ({sector}).
 
-**REGLA OBLIGATORIA:**
-- Siempre verificas disponibilidad antes de agendar.
-- Email del calendario: {calendar_email}
+**REGLA OBLIGATORIA Y ESTRICTA:**
+- NUNCA llames a `book_appointment` si no estás 100% seguro de que la hora está libre.
+- Siempre verifica mentalmente que no haya cita en la hora anterior.
+- Si hay duda, pregunta al usuario o no agendes.
 
 **Flujo para agendar (uno por uno):**
-1. Confirma día y hora.
+1. Confirma día y hora deseada.
 2. Pregunta nombre completo.
 3. Pregunta teléfono.
 4. Pregunta motivo.
-5. Solo entonces llamas a `book_appointment`."""
+5. Solo entonces llama a `book_appointment`."""
 
     llm_res = retell_request("POST", "/create-retell-llm", {
         "model": "gpt-4o-mini",
@@ -185,7 +171,7 @@ def create_bot_for_client(nombre_negocio, sector, servicios, horario, zona, voic
         "general_tools": [{
             "type": "custom",
             "name": "book_appointment",
-            "description": "Agenda la cita solo si está disponible.",
+            "description": "Agenda la cita SOLO si la hora está completamente libre (sin citas en la hora anterior).",
             "url": "https://retell-bot.onrender.com/book-appointment",
             "method": "POST",
             "parameters": {
@@ -233,7 +219,7 @@ def create_bot_for_client(nombre_negocio, sector, servicios, horario, zona, voic
     return {"status": "success", "agent_id": agent_id, "phone_number": free_number}
 
 
-# ==================== ENDPOINTS ====================
+# ==================== ENDPOINT BOOK-APPOINTMENT (VERIFICACIÓN PRIMERA) ====================
 @app.post("/book-appointment")
 @app.post("/book-appointment/")
 async def book_appointment(request: Request):
@@ -249,16 +235,25 @@ async def book_appointment(request: Request):
 
         print("ARGUMENTOS RECIBIDOS:\n", json.dumps(args, indent=2, ensure_ascii=False))
 
+        # === VERIFICACIÓN ANTES DE AGENDAR ===
+        if not is_time_slot_available(args.get("calendar_email"), args.get("start_time")):
+            print("❌ VERIFICACIÓN FALLIDA - No se agenda la cita")
+            return {
+                "code": "ERROR",
+                "message": "No se puede agendar porque hay una cita en la hora anterior o se solapa."
+            }
+
+        # Solo si pasa la verificación, se crea el evento
         event = create_google_event(
             args.get("calendar_email"),
             args.get("summary"),
             args.get("start_time"),
             args.get("end_time"),
-            args.get("description", ""),
-            check_availability=True
+            args.get("description", "")
         )
 
         return {"code": "SUCCESS", "message": "Cita agendada correctamente"}
+
     except Exception as e:
         print(f"❌ ERROR EN BOOK-APPOINTMENT: {e}")
         print(traceback.format_exc())
@@ -274,8 +269,7 @@ async def verify_calendar_access(request: Request):
             data.get("calendar_email"),
             "🧪 Prueba de conexión - Dansu",
             "2026-07-01T10:00:00+02:00",
-            "2026-07-01T10:30:00+02:00",
-            check_availability=False
+            "2026-07-01T10:30:00+02:00"
         )
         return {"status": "success", "message": "Acceso verificado correctamente"}
     except Exception as e:
@@ -300,7 +294,7 @@ async def create_retell_bot_endpoint(request: Request):
 
 @app.get("/")
 async def root():
-    return {"status": "Dansu Backend OK - Verificación robusta activada"}
+    return {"status": "Dansu Backend OK - Verificación ANTES de agendar"}
 
 
 if __name__ == "__main__":

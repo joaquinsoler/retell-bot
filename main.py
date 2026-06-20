@@ -58,9 +58,8 @@ def ensure_calendar_access(calendar_id: str):
 
 def is_time_slot_available(calendar_id: str, start_time: str, duration_minutes: int = 60):
     try:
-        print(f"🔍 Comprobando disponibilidad para {start_time} (buffer 60 min)")
+        print(f"🔍 Comprobando disponibilidad para {start_time}")
         service = get_calendar_service()
-
         start_dt = datetime.fromisoformat(start_time.replace("Z", "+00:00"))
         buffer_start = (start_dt - timedelta(minutes=60)).isoformat(timespec='seconds') + 'Z'
         end_dt = (start_dt + timedelta(minutes=duration_minutes)).isoformat(timespec='seconds') + 'Z'
@@ -75,26 +74,21 @@ def is_time_slot_available(calendar_id: str, start_time: str, duration_minutes: 
         busy_slots = freebusy.get("calendars", {}).get(calendar_id, {}).get("busy", [])
 
         if busy_slots:
-            print(f"❌ HORARIO NO DISPONIBLE - Slots ocupados: {busy_slots}")
+            print(f"❌ HORARIO NO DISPONIBLE: {busy_slots}")
             return False
-
-        print("✅ Horario disponible")
         return True
-
     except Exception as e:
-        print(f"⚠️ Error en is_time_slot_available: {e}")
+        print(f"⚠️ Error en disponibilidad: {e}")
         return True
 
 
 def create_google_event(calendar_id: str, summary: str, start_time: str, end_time: str, description: str = "", check_availability=True):
     try:
         ensure_calendar_access(calendar_id)
-
         if check_availability and not is_time_slot_available(calendar_id, start_time):
             raise Exception("Horario no disponible (buffer de 1 hora)")
 
         service = get_calendar_service()
-
         event = {
             'summary': summary[:100],
             'description': (description or "Cita agendada por Dansu AI"),
@@ -108,21 +102,18 @@ def create_google_event(calendar_id: str, summary: str, start_time: str, end_tim
             body=event,
             sendUpdates='none'
         ).execute()
-
         print(f"✅ EVENTO CREADO: {created.get('htmlLink')}")
         return created
     except Exception as e:
-        print(f"❌ Error en create_google_event: {e}")
+        print(f"❌ Error create_google_event: {e}")
         raise
 
 
 def cancel_google_event(calendar_id: str, start_time: str, summary: str = None):
-    """Cancela una cita buscando por hora (y opcionalmente por resumen)"""
     try:
         ensure_calendar_access(calendar_id)
         service = get_calendar_service()
 
-        # Buscar eventos en una ventana de ±30 minutos
         start_dt = datetime.fromisoformat(start_time.replace("Z", "+00:00"))
         time_min = (start_dt - timedelta(minutes=30)).isoformat(timespec='seconds') + 'Z'
         time_max = (start_dt + timedelta(minutes=30)).isoformat(timespec='seconds') + 'Z'
@@ -136,30 +127,29 @@ def cancel_google_event(calendar_id: str, start_time: str, summary: str = None):
         ).execute()
 
         events = events_result.get('items', [])
-        
         if not events:
-            print("❌ No se encontró ninguna cita en ese horario")
-            raise Exception("No se encontró ninguna cita para cancelar en ese horario")
+            raise Exception("No se encontró cita para cancelar en ese horario")
 
-        # Si hay varias, intentamos coincidir por summary
-        for event in events:
-            if summary and summary.lower() in event.get('summary', '').lower():
-                service.events().delete(calendarId=calendar_id, eventId=event['id']).execute()
-                print(f"✅ Cita cancelada: {event.get('summary')} - {event.get('start')}")
-                return {"status": "success", "message": "Cita cancelada correctamente"}
-        
-        # Si no coincidió por summary, cancelamos la primera encontrada
-        service.events().delete(calendarId=calendar_id, eventId=events[0]['id']).execute()
-        print(f"✅ Cita cancelada (primera encontrada): {events[0].get('summary')}")
-        return {"status": "success", "message": "Cita cancelada correctamente"}
-
+        # Cancelar la primera coincidencia
+        event_id = events[0]['id']
+        service.events().delete(calendarId=calendar_id, eventId=event_id).execute()
+        print(f"✅ CITA CANCELADA: {events[0].get('summary')}")
+        return {"status": "success"}
     except Exception as e:
-        print(f"❌ Error al cancelar cita: {e}")
+        print(f"❌ Error cancelando cita: {e}")
         raise
 
 
 # ==================== VOICE MAPPING ====================
-VOICE_MAPPING = { ... }  # (tu diccionario completo)
+VOICE_MAPPING = {
+    "Cimo": "11labs-Adrian", "Brynne": "11labs-Brynne", "Chloe": "11labs-Chloe",
+    "Kate": "openai-Nova", "Grace": "openai-Shimmer", "Leland": "11labs-Leland",
+    "Marissa": "11labs-Marissa", "Lily": "11labs-Lily", "Della": "11labs-Delia",
+    "Nico": "openai-Onyx", "Rita": "11labs-Rita", "Meritt": "11labs-Meritt",
+    "Willa": "11labs-Willa", "Maren": "11labs-Maren", "Tasmin": "11labs-Tasmin",
+    "Ashley": "11labs-Ashley", "Andrea": "openai-Alloy", "Claudia": "11labs-Claudia",
+    "Gaby": "11labs-Gaby", "Alejandro": "openai-Echo", "Sloane": "11labs-Sloane"
+}
 
 
 def retell_request(method: str, endpoint: str, json_data=None):
@@ -174,7 +164,7 @@ def retell_request(method: str, endpoint: str, json_data=None):
         return None
 
 
-# ==================== CREACIÓN DEL BOT (con tool de cancelar) ====================
+# ==================== CREACIÓN DEL BOT ====================
 def create_bot_for_client(nombre_negocio, sector, servicios, horario, zona, voice_id, calendar_email):
     ahora = datetime.now()
     fecha_base = ahora.strftime("%A, %d de %B de %Y")
@@ -184,20 +174,12 @@ def create_bot_for_client(nombre_negocio, sector, servicios, horario, zona, voic
 **INFORMACIÓN CRÍTICA:**
 - Email del calendario: {calendar_email}
 
-**Herramientas disponibles:**
-- `book_appointment`: Para agendar nueva cita.
-- `cancel_appointment`: Para cancelar una cita existente.
+**Herramientas:**
+- book_appointment → Agendar cita
+- cancel_appointment → Cancelar cita existente
 
-**Flujo para cancelar:**
-- Confirma con el usuario la fecha y hora de la cita a cancelar.
-- Llama a `cancel_appointment` con los datos correctos.
-
-**Flujo normal para agendar (uno por uno):**
-1. Confirma día y hora.
-2. Pregunta nombre.
-3. Pregunta teléfono.
-4. Pregunta motivo.
-5. Llama a `book_appointment`."""
+**Flujo agendar:** Pregunta uno por uno (nombre, teléfono, motivo) y luego llama a la herramienta.
+**Flujo cancelar:** Confirma fecha y hora y llama a cancel_appointment."""
 
     llm_res = retell_request("POST", "/create-retell-llm", {
         "model": "gpt-4o-mini",
@@ -209,12 +191,22 @@ def create_bot_for_client(nombre_negocio, sector, servicios, horario, zona, voic
                 "description": "Agenda una nueva cita.",
                 "url": "https://retell-bot.onrender.com/book-appointment",
                 "method": "POST",
-                "parameters": { ... }  # igual que antes
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "calendar_email": {"type": "string"},
+                        "summary": {"type": "string"},
+                        "start_time": {"type": "string"},
+                        "end_time": {"type": "string"},
+                        "description": {"type": "string"}
+                    },
+                    "required": ["calendar_email", "summary", "start_time", "end_time"]
+                }
             },
             {
                 "type": "custom",
                 "name": "cancel_appointment",
-                "description": "Cancela una cita existente. Usa solo cuando el usuario lo pida explícitamente.",
+                "description": "Cancela una cita existente. Requiere calendar_email y start_time.",
                 "url": "https://retell-bot.onrender.com/cancel-appointment",
                 "method": "POST",
                 "parameters": {
@@ -230,15 +222,69 @@ def create_bot_for_client(nombre_negocio, sector, servicios, horario, zona, voic
         ]
     })
 
-    # ... (el resto de la función create_bot_for_client se mantiene exactamente igual que en tu código)
-    # (creación de agent, asignación de número, etc.)
+    if not llm_res or "llm_id" not in llm_res:
+        raise Exception("Error creando LLM")
 
-    # (para no hacer el mensaje eterno, el resto es idéntico a tu versión original)
+    agent_res = retell_request("POST", "/create-agent", {
+        "agent_name": f"Bot {nombre_negocio}",
+        "response_engine": {"type": "retell-llm", "llm_id": llm_res["llm_id"]},
+        "voice_id": voice_id,
+        "language": "es-ES"
+    })
+
+    if not agent_res or "agent_id" not in agent_res:
+        raise Exception("Error creando Agent")
+
+    agent_id = agent_res["agent_id"]
+
+    numbers = retell_request("GET", "/v2/list-phone-numbers")
+    free_number = None
+    if numbers and "items" in numbers:
+        for p in numbers["items"]:
+            if not p.get("inbound_agents"):
+                free_number = p.get("phone_number")
+                break
+
+    if free_number:
+        retell_request("PATCH", f"/update-phone-number/{free_number}", {
+            "inbound_agents": [{"agent_id": agent_id, "weight": 1.0}]
+        })
 
     return {"status": "success", "agent_id": agent_id, "phone_number": free_number}
 
 
-# ==================== NUEVO ENDPOINT PARA CANCELAR ====================
+# ==================== ENDPOINTS ====================
+@app.post("/book-appointment")
+@app.post("/book-appointment/")
+async def book_appointment(request: Request):
+    print("=" * 120)
+    print("🚨 RETELL LLAMÓ A /book-appointment")
+    print("=" * 120)
+    try:
+        raw = (await request.body()).decode("utf-8")
+        print("RAW BODY:\n", raw)
+
+        data = await request.json()
+        args = data.get("args", data)
+
+        print("ARGUMENTOS RECIBIDOS:\n", json.dumps(args, indent=2, ensure_ascii=False))
+
+        event = create_google_event(
+            args.get("calendar_email"),
+            args.get("summary"),
+            args.get("start_time"),
+            args.get("end_time"),
+            args.get("description", ""),
+            check_availability=True
+        )
+
+        return {"code": "SUCCESS", "message": "Cita agendada correctamente"}
+    except Exception as e:
+        print(f"❌ ERROR EN BOOK-APPOINTMENT: {e}")
+        print(traceback.format_exc())
+        return {"code": "ERROR", "message": str(e)}
+
+
 @app.post("/cancel-appointment")
 @app.post("/cancel-appointment/")
 async def cancel_appointment(request: Request):
@@ -267,10 +313,49 @@ async def cancel_appointment(request: Request):
         return {"code": "ERROR", "message": str(e)}
 
 
-# ==================== EL RESTO DE ENDPOINTS (sin cambios) ====================
-# (book-appointment, verify-calendar-access, create-retell-bot, root) se mantienen exactamente como en tu código original
+@app.post("/verify-calendar-access")
+@app.post("/verify-calendar-access/")
+async def verify_calendar_access(request: Request):
+    print("=" * 80)
+    print("🔍 VERIFICANDO ACCESO A GOOGLE CALENDAR")
+    print("=" * 80)
+    try:
+        data = await request.json()
+        calendar_email = data.get("calendar_email")
+        print(f"Email recibido: {calendar_email}")
 
-# ... (pega aquí el resto de tus endpoints que ya tenías)
+        create_google_event(
+            calendar_email,
+            "🧪 Prueba de conexión - Dansu",
+            "2026-07-01T10:00:00+02:00",
+            "2026-07-01T10:30:00+02:00",
+            check_availability=False
+        )
+        return {"status": "success", "message": "Acceso verificado correctamente"}
+    except Exception as e:
+        print(f"❌ Error en verify: {e}")
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.post("/create-retell-bot")
+async def create_retell_bot_endpoint(request: Request):
+    try:
+        payload = await request.json()
+        data = payload if isinstance(payload, dict) else payload.get("data", payload)
+        voice_id = VOICE_MAPPING.get(data.get("asistente"), "openai-Alloy")
+        return create_bot_for_client(
+            data.get("nombre_negocio"), data.get("sector"), data.get("servicios"),
+            data.get("horario"), data.get("zona"), voice_id, data.get("google_calendar_email")
+        )
+    except Exception as e:
+        print(f"❌ Error en create-retell-bot: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/")
+async def root():
+    return {"status": "Dansu Backend OK - Cancelación añadida"}
+
 
 if __name__ == "__main__":
     import uvicorn

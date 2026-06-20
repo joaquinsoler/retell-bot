@@ -27,7 +27,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ==================== GOOGLE CALENDAR (versión estable que funcionaba antes) ====================
+# ==================== GOOGLE CALENDAR ====================
 SCOPES = ['https://www.googleapis.com/auth/calendar']
 
 def get_calendar_service():
@@ -55,9 +55,48 @@ def ensure_calendar_access(calendar_id: str):
             print(f"⚠️ Error suscripción {e.status_code}: {e}")
 
 
+def check_availability(calendar_id: str, start_time: str, end_time: str) -> bool:
+    """
+    Consulta la API FreeBusy de Google Calendar para verificar si el hueco está libre.
+    Devuelve True si está disponible, False si está ocupado.
+    """
+    try:
+        service = get_calendar_service()
+        
+        body = {
+            "timeMin": start_time,
+            "timeMax": end_time,
+            "timeZone": "Europe/Madrid",
+            "items": [{"id": calendar_id}]
+        }
+        
+        print(f"🔍 Consultando FreeBusy para {calendar_id} entre {start_time} y {end_time}")
+        freebusy_query = service.freebusy().query(body=body).execute()
+        
+        # Extraemos los periodos ocupados para este calendario
+        busy_periods = freebusy_query.get("calendars", {}).get(calendar_id, {}).get("busy", [])
+        
+        if busy_periods:
+            print(f"❌ Hueco ocupado. Conflictos detectados: {busy_periods}")
+            return False
+            
+        print("✅ Hueco 100% disponible.")
+        return True
+    except Exception as e:
+        print(f"⚠️ Error al comprobar disponibilidad con FreeBusy: {e}")
+        # Por seguridad en entornos de producción, si falla la API asumimos que no está libre 
+        # o puedes cambiarlo a True si prefieres arriesgarte.
+        return False
+
+
 def create_google_event(calendar_id: str, summary: str, start_time: str, end_time: str, description: str = ""):
     try:
         ensure_calendar_access(calendar_id)
+        
+        # 1. Validamos disponibilidad antes de insertar
+        if not check_availability(calendar_id, start_time, end_time):
+            raise Exception("El horario seleccionado ya no está disponible.")
+
         service = get_calendar_service()
 
         event = {
@@ -111,10 +150,9 @@ def create_bot_for_client(nombre_negocio, sector, servicios, horario, zona, voic
     fecha_base = ahora.strftime("%A, %d de %B de %Y")
 
     custom_prompt = f"""Eres el asistente virtual de {nombre_negocio} ({sector}).
-
 **INFORMACIÓN CRÍTICA QUE NUNCA DEBES OLVIDAR NI INVENTAR:**
 - El email del Google Calendar del negocio es exactamente: {calendar_email}
-- Cuando uses la herramienta `book_appointment`, pon SIEMPRE este email en `calendar_email`: {calendar_email}
+- Cuando uses la herramienta `book_appointment`, pon SIEMPRE este email in `calendar_email`: {calendar_email}
 - Nunca inventes otro email.
 
 **Flujo para agendar cita (pregunta uno por uno):**
@@ -122,7 +160,9 @@ def create_bot_for_client(nombre_negocio, sector, servicios, horario, zona, voic
 2. Pregunta: "¿Me puedes decir tu nombre completo?"
 3. Pregunta: "¿Cuál es tu número de teléfono?"
 4. Pregunta: "¿Cuál es el motivo de la cita?"
-5. Solo después de tener los tres datos, llama a la herramienta `book_appointment`."""
+5. Solo después de tener los tres datos, llama a la herramienta `book_appointment`.
+
+Si la herramienta `book_appointment` te devuelve un mensaje de error indicando que el horario no está disponible, infórmale amablemente al usuario y pídele que elija otro día o tramo horario."""
 
     llm_res = retell_request("POST", "/create-retell-llm", {
         "model": "gpt-4o-mini",
@@ -130,7 +170,7 @@ def create_bot_for_client(nombre_negocio, sector, servicios, horario, zona, voic
         "general_tools": [{
             "type": "custom",
             "name": "book_appointment",
-            "description": "Agenda la cita en el calendario del negocio.",
+            "description": "Agenda la cita en el calendario del negocio. Si el hueco está ocupado, devolverá un error.",
             "url": "https://retell-bot.onrender.com/book-appointment",
             "method": "POST",
             "parameters": {
@@ -186,14 +226,12 @@ async def book_appointment(request: Request):
     print("🚨 RETELL LLAMÓ A /book-appointment")
     print("=" * 100)
     try:
-        raw = (await request.body()).decode("utf-8")
-        print("RAW BODY:\n", raw)
-
         data = await request.json()
         args = data.get("args", data)
 
         print("ARGUMENTOS RECIBIDOS:\n", json.dumps(args, indent=2, ensure_ascii=False))
 
+        # Al llamar a create_google_event ya se ejecuta internamente check_availability
         event = create_google_event(
             args.get("calendar_email"),
             args.get("summary"),
@@ -205,6 +243,8 @@ async def book_appointment(request: Request):
         return {"code": "SUCCESS", "message": "Cita agendada correctamente"}
     except Exception as e:
         print(f"❌ ERROR EN BOOK-APPOINTMENT: {e}")
+        # Cambiamos la respuesta HTTP a un JSON estructurado para que el LLM de Retell 
+        # reciba el error explícito de falta de disponibilidad y actúe en consecuencia.
         return {"code": "ERROR", "message": str(e)}
 
 

@@ -57,12 +57,12 @@ def ensure_calendar_access(calendar_id: str):
 
 
 def is_time_slot_available(calendar_id: str, start_time: str, duration_minutes: int = 60):
-    """Comprueba disponibilidad con buffer de 1 hora - Versión corregida según docs de Google"""
+    """Comprueba disponibilidad con buffer de 1 hora - Versión corregida"""
     try:
         print(f"🔍 Comprobando disponibilidad para {start_time} (buffer 60 min)")
         service = get_calendar_service()
 
-        # Formato RFC3339 correcto (obligatorio)
+        # Formato RFC3339 correcto
         start_dt = datetime.fromisoformat(start_time.replace("Z", "+00:00"))
         buffer_start = (start_dt - timedelta(minutes=60)).isoformat(timespec='seconds') + 'Z'
         end_dt = (start_dt + timedelta(minutes=duration_minutes)).isoformat(timespec='seconds') + 'Z'
@@ -79,7 +79,7 @@ def is_time_slot_available(calendar_id: str, start_time: str, duration_minutes: 
         busy_slots = freebusy.get("calendars", {}).get(calendar_id, {}).get("busy", [])
 
         if busy_slots:
-            print(f"❌ HORARIO NO DISPONIBLE - Slots ocupados: {busy_slots}")
+            print(f"❌ HORARIO NO DISPOLIBLE - Slots ocupados: {busy_slots}")
             return False
 
         print("✅ Horario disponible")
@@ -87,13 +87,12 @@ def is_time_slot_available(calendar_id: str, start_time: str, duration_minutes: 
 
     except HttpError as e:
         print(f"❌ HttpError en freeBusy {e.status_code}: {e.reason}")
-        print(f"   Detalles: {e}")
         print(traceback.format_exc())
-        return True  # Permitimos si falla la comprobación
+        return False  # CAMBIADO: Si falla la API de Google, denegamos por seguridad
     except Exception as e:
         print(f"⚠️ Error general en is_time_slot_available: {e}")
         print(traceback.format_exc())
-        return True
+        return False  # CAMBIADO: Denegamos si hay un error inesperado
 
 
 def create_google_event(calendar_id: str, summary: str, start_time: str, end_time: str, description: str = "", check_availability=True):
@@ -153,43 +152,59 @@ def retell_request(method: str, endpoint: str, json_data=None):
 
 # ==================== CREACIÓN DEL BOT ====================
 def create_bot_for_client(nombre_negocio, sector, servicios, horario, zona, voice_id, calendar_email):
-    ahora = datetime.now()
-    fecha_base = ahora.strftime("%A, %d de %B de %Y")
-
     custom_prompt = f"""Eres el asistente virtual de {nombre_negocio} ({sector}).
-
 **INFORMACIÓN CRÍTICA QUE NUNCA DEBES OLVIDAR NI INVENTAR:**
 - El email del Google Calendar del negocio es exactamente: {calendar_email}
-- Cuando uses la herramienta `book_appointment`, pon SIEMPRE este email en `calendar_email`: {calendar_email}
+- Cuando uses herramientas de disponibilidad o reserva, pon SIEMPRE este email en `calendar_email`: {calendar_email}
 
-**Flujo para agendar cita (pregunta uno por uno):**
-1. Confirma día y hora con el usuario.
-2. Pregunta: "¿Me puedes decir tu nombre completo?"
-3. Pregunta: "¿Cuál es tu número de teléfono?"
-4. Pregunta: "¿Cuál es el motivo de la cita?"
-5. Solo después llama a la herramienta `book_appointment`."""
+**Flujo para gestionar la cita (Sigue este orden estrictamente):**
+1. Pregunta al usuario el día y la hora en la que desea agendar su cita.
+2. Inmediatamente después de que te dé un horario, DEBES llamar a la herramienta `check_availability` para ver si está libre.
+3. Si la herramienta responde que NO está disponible, infórmaselo amablemente y ofrécele proponer o buscar otra hora.
+4. Si la herramienta responde que SÍ está disponible, continúa con las siguientes preguntas una por una:
+   - Pregunta: "¿Me puedes decir tu nombre completo?"
+   - Pregunta: "¿Cuál es tu número de teléfono?"
+   - Pregunta: "¿Cuál es el motivo de la cita?"
+5. Solo después de rellenar esos datos y estar seguro de la disponibilidad, llama a la herramienta `book_appointment`."""
 
     llm_res = retell_request("POST", "/create-retell-llm", {
         "model": "gpt-4o-mini",
         "general_prompt": custom_prompt,
-        "general_tools": [{
-            "type": "custom",
-            "name": "book_appointment",
-            "description": "Agenda la cita en el calendario del negocio.",
-            "url": "https://retell-bot.onrender.com/book-appointment",
-            "method": "POST",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "calendar_email": {"type": "string"},
-                    "summary": {"type": "string"},
-                    "start_time": {"type": "string"},
-                    "end_time": {"type": "string"},
-                    "description": {"type": "string"}
-                },
-                "required": ["calendar_email", "summary", "start_time", "end_time"]
+        "general_tools": [
+            {
+                "type": "custom",
+                "name": "check_availability",
+                "description": "Comprueba si un horario específico está libre en el calendario antes de pedir datos personales.",
+                "url": "https://retell-bot.onrender.com/check-availability",
+                "method": "POST",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "calendar_email": {"type": "string"},
+                        "start_time": {"type": "string", "description": "Formato ISO de la fecha y hora seleccionada por el usuario (ej. 2026-07-01T10:00:00+02:00)"}
+                    },
+                    "required": ["calendar_email", "start_time"]
+                }
+            },
+            {
+                "type": "custom",
+                "name": "book_appointment",
+                "description": "Agenda la cita final en el calendario del negocio tras validar la disponibilidad.",
+                "url": "https://retell-bot.onrender.com/book-appointment",
+                "method": "POST",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "calendar_email": {"type": "string"},
+                        "summary": {"type": "string"},
+                        "start_time": {"type": "string"},
+                        "end_time": {"type": "string"},
+                        "description": {"type": "string"}
+                    },
+                    "required": ["calendar_email", "summary", "start_time", "end_time"]
+                }
             }
-        }]
+        ]
     })
 
     if not llm_res or "llm_id" not in llm_res:
@@ -224,6 +239,32 @@ def create_bot_for_client(nombre_negocio, sector, servicios, horario, zona, voic
 
 
 # ==================== ENDPOINTS ====================
+
+@app.post("/check-availability")
+@app.post("/check-availability/")
+async def check_availability(request: Request):
+    print("=" * 80)
+    print("🔍 RETELL LLAMÓ A /check-availability")
+    print("=" * 80)
+    try:
+        data = await request.json()
+        args = data.get("args", data)
+
+        calendar_email = args.get("calendar_email")
+        start_time = args.get("start_time")
+
+        # Comprobamos con la duración estimada por defecto de 60 minutos
+        available = is_time_slot_available(calendar_email, start_time, duration_minutes=60)
+
+        if not available:
+            return {"code": "BUSY", "message": "El horario solicitado no está disponible (está ocupado o en zona de buffer)."}
+
+        return {"code": "AVAILABLE", "message": "El horario está completamente disponible para agendar."}
+    except Exception as e:
+        print(f"❌ ERROR EN CHECK-AVAILABILITY: {e}")
+        return {"code": "ERROR", "message": f"Error al procesar la disponibilidad: {str(e)}"}
+
+
 @app.post("/book-appointment")
 @app.post("/book-appointment/")
 async def book_appointment(request: Request):
@@ -239,6 +280,7 @@ async def book_appointment(request: Request):
 
         print("ARGUMENTOS RECIBIDOS:\n", json.dumps(args, indent=2, ensure_ascii=False))
 
+        # Doble verificación antes de insertar el evento definitivo
         event = create_google_event(
             args.get("calendar_email"),
             args.get("summary"),

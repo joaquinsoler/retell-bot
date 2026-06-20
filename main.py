@@ -73,7 +73,6 @@ def check_availability(calendar_id: str, start_time: str, end_time: str) -> bool
         print(f"🔍 Consultando FreeBusy para {calendar_id} entre {start_time} y {end_time}")
         freebusy_query = service.freebusy().query(body=body).execute()
         
-        # Extraemos los periodos ocupados para este calendario
         busy_periods = freebusy_query.get("calendars", {}).get(calendar_id, {}).get("busy", [])
         
         if busy_periods:
@@ -84,17 +83,15 @@ def check_availability(calendar_id: str, start_time: str, end_time: str) -> bool
         return True
     except Exception as e:
         print(f"⚠️ Error al comprobar disponibilidad con FreeBusy: {e}")
-        # Por seguridad en entornos de producción, si falla la API asumimos que no está libre 
-        # o puedes cambiarlo a True si prefieres arriesgarte.
         return False
 
 
-def create_google_event(calendar_id: str, summary: str, start_time: str, end_time: str, description: str = ""):
+def create_google_event(calendar_id: str, summary: str, start_time: str, end_time: str, description: str = "", bypass_availability: bool = False):
     try:
         ensure_calendar_access(calendar_id)
         
-        # 1. Validamos disponibilidad antes de insertar
-        if not check_availability(calendar_id, start_time, end_time):
+        # Solo validamos disponibilidad si no estamos forzando el bypass (ej. en pruebas de acceso)
+        if not bypass_availability and not check_availability(calendar_id, start_time, end_time):
             raise Exception("El horario seleccionado ya no está disponible.")
 
         service = get_calendar_service()
@@ -150,9 +147,9 @@ def create_bot_for_client(nombre_negocio, sector, servicios, horario, zona, voic
     fecha_base = ahora.strftime("%A, %d de %B de %Y")
 
     custom_prompt = f"""Eres el asistente virtual de {nombre_negocio} ({sector}).
-**INFORMACIÓN CRÍTICA QUE NUNCA DEBES OLVIDAR NI INVENTAR:**
+**INFORMACIÓN CRÍTICA QUE NUNCA DEBES OLBIRAR NI INVENTAR:**
 - El email del Google Calendar del negocio es exactamente: {calendar_email}
-- Cuando uses la herramienta `book_appointment`, pon SIEMPRE este email in `calendar_email`: {calendar_email}
+- Cuando uses la herramienta `book_appointment`, pon SIEMPRE este email en `calendar_email`: {calendar_email}
 - Nunca inventes otro email.
 
 **Flujo para agendar cita (pregunta uno por uno):**
@@ -231,7 +228,7 @@ async def book_appointment(request: Request):
 
         print("ARGUMENTOS RECIBIDOS:\n", json.dumps(args, indent=2, ensure_ascii=False))
 
-        # Al llamar a create_google_event ya se ejecuta internamente check_availability
+        # Las citas reales no llevan bypass, validando disponibilidad
         event = create_google_event(
             args.get("calendar_email"),
             args.get("summary"),
@@ -243,8 +240,6 @@ async def book_appointment(request: Request):
         return {"code": "SUCCESS", "message": "Cita agendada correctamente"}
     except Exception as e:
         print(f"❌ ERROR EN BOOK-APPOINTMENT: {e}")
-        # Cambiamos la respuesta HTTP a un JSON estructurado para que el LLM de Retell 
-        # reciba el error explícito de falta de disponibilidad y actúe en consecuencia.
         return {"code": "ERROR", "message": str(e)}
 
 
@@ -259,11 +254,13 @@ async def verify_calendar_access(request: Request):
         calendar_email = data.get("calendar_email")
         print(f"Email recibido: {calendar_email}")
 
+        # Forzamos bypass_availability=True para que el test estático no falle si ya existe el evento
         create_google_event(
             calendar_email,
             "🧪 Prueba de conexión - Dansu",
             "2026-07-01T10:00:00+02:00",
-            "2026-07-01T10:30:00+02:00"
+            "2026-07-01T10:30:00+02:00",
+            bypass_availability=True
         )
         return {"status": "success", "message": "Acceso verificado correctamente"}
     except Exception as e:

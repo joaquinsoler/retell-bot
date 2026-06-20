@@ -1,226 +1,312 @@
-<!DOCTYPE html>
-<html lang="es">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Creador de Asistentes AI - Dansu</title>
-    <style>
-        html, body {
-            font-family: 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
-            margin: 0; padding: 10px; background: transparent; color: #333;
-        }
-        h2, h3 { color: #111; }
-        .subtitle { color: #666; font-size: 14px; margin-bottom: 20px; }
+import os
+import json
+from datetime import datetime
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.middleware.cors import CORSMiddleware
+import requests
 
-        .slider-container {
-            display: flex; overflow-x: auto; gap: 15px; padding: 10px 5px;
-            scroll-snap-type: x mandatory; scrollbar-width: none;
-        }
-        .slider-container::-webkit-scrollbar { display: none; }
+from google.oauth2 import service_account
+from googleapiclient.discovery import build
+from googleapiclient.errors import HttpError
 
-        .card { flex: 0 0 260px; border: 2px solid #e2e8f0; border-radius: 16px; background: #fff; }
-        .card.selected { border-color: #0078FF; box-shadow: 0 10px 15px rgba(0,120,255,0.2); }
+app = FastAPI(title="Dansu Backend")
 
-        .video-wrapper { height: 160px; background: #000; }
-        video { width: 100%; height: 100%; object-fit: cover; }
+# ==================== VARIABLES DE ENTORNO ====================
+RETELL_API_KEY = os.getenv("RETELL_API_KEY")
+GOOGLE_CREDENTIALS_JSON = os.getenv("GOOGLE_CREDENTIALS")
 
-        .card-info { padding: 15px; }
-        .card-name { font-size: 18px; font-weight: bold; margin-bottom: 12px; }
+if not RETELL_API_KEY or not GOOGLE_CREDENTIALS_JSON:
+    raise Exception("Faltan variables de entorno")
 
-        .btn-select { width: 100%; padding: 10px; border: 2px solid #0078FF; background: transparent; color: #0078FF; border-radius: 8px; font-weight: bold; cursor: pointer; }
-        .card.selected .btn-select { background: #0078FF; color: white; }
+# ==================== CORS ====================
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
-        .form-container, .success-box, .instructions-box, .confirmation-box {
-            max-width: 500px; margin: 25px auto; background: #fff; padding: 25px; border-radius: 16px; box-shadow: 0 4px 12px rgba(0,0,0,0.1);
-        }
-        .form-control { width: 100%; padding: 12px; margin-bottom: 15px; border: 1px solid #cbd5e1; border-radius: 8px; box-sizing: border-box; }
+# ==================== GOOGLE CALENDAR ====================
+SCOPES = ['https://www.googleapis.com/auth/calendar']
 
-        button { width: 100%; padding: 14px; font-size: 16px; font-weight: bold; border: none; border-radius: 8px; cursor: pointer; margin-top: 10px; }
-        .btn-submit { background: #0078FF; color: white; }
-        .btn-connect { background: #34A853; color: white; }
-        .btn-confirm { background: #137333; color: white; }
-        .btn-pagar { background: #EA4335; color: white; font-size: 18px; }
+def get_calendar_service():
+    credentials_info = json.loads(GOOGLE_CREDENTIALS_JSON)
+    credentials = service_account.Credentials.from_service_account_info(
+        credentials_info, scopes=SCOPES
+    )
+    credentials = credentials.with_scopes(SCOPES)
+    if hasattr(credentials, 'with_subject'):
+        credentials = credentials.with_subject(None)
+    if hasattr(credentials, '_regional_access_boundary'):
+        credentials._regional_access_boundary = None
+    return build('calendar', 'v3', credentials=credentials, cache_discovery=False)
 
-        .success-box { border: 2px solid #25D366; display: none; }
-        .instructions-box { border: 2px solid #4285F4; display: none; }
-        .confirmation-box { display: none; }
-        .error-box { border: 2px solid #ea4335; background: #fce8e6; display: none; }
-    </style>
-</head>
-<body>
 
-    <div id="flujo-principal">
-        <h2>Elige la voz de tu asistente</h2>
-        <p class="subtitle">Desliza a la derecha, escucha las muestras de audio y selecciona tu favorito</p>
+def ensure_calendar_access(calendar_id: str):
+    try:
+        service = get_calendar_service()
+        service.calendarList().insert(body={'id': calendar_id}).execute()
+        print(f"✅ Calendario suscrito: {calendar_id}")
+    except HttpError as e:
+        if e.status_code == 409:
+            print(f"ℹ️ Ya suscrito: {calendar_id}")
+        else:
+            print(f"⚠️ Error suscripción {e.status_code}: {e}")
 
-        <div class="slider-container">
-            <div class="card" data-voice="Cimo"><div class="video-wrapper"><video controls preload="metadata" playsinline><source src="https://video.wixstatic.com/video/a23405_aeaa8ab0b44f45d7a743cec6f4c52d71/144p/mp4/file.mp4" type="video/mp4"></video></div><div class="card-info"><div class="card-name">Cimo</div><button class="btn-select" onclick="seleccionarAsistente(this)">Seleccionar</button></div></div>
-            <div class="card" data-voice="Brynne"><div class="video-wrapper"><video controls preload="metadata" playsinline><source src="https://video.wixstatic.com/video/a23405_8d7463b0d217475b854d4348b73225f5/720p/mp4/file.mp4" type="video/mp4"></video></div><div class="card-info"><div class="card-name">Brynne</div><button class="btn-select" onclick="seleccionarAsistente(this)">Seleccionar</button></div></div>
-            <div class="card" data-voice="Chloe"><div class="video-wrapper"><video controls preload="metadata" playsinline><source src="https://video.wixstatic.com/video/a23405_6dee4ac9168044ca8d33ed61d2e1c82d/480p/mp4/file.mp4" type="video/mp4"></video></div><div class="card-info"><div class="card-name">Chloe</div><button class="btn-select" onclick="seleccionarAsistente(this)">Seleccionar</button></div></div>
-            <div class="card" data-voice="Kate"><div class="video-wrapper"><video controls preload="metadata" playsinline><source src="https://video.wixstatic.com/video/a23405_3b57c0423f3946c09256f7a7da0f7e12/144p/mp4/file.mp4" type="video/mp4"></video></div><div class="card-info"><div class="card-name">Kate</div><button class="btn-select" onclick="seleccionarAsistente(this)">Seleccionar</button></div></div>
-            <div class="card" data-voice="Grace"><div class="video-wrapper"><video controls preload="metadata" playsinline><source src="https://video.wixstatic.com/video/a23405_42cd8b8b69054fa48ee2f17a2fb14f07/144p/mp4/file.mp4" type="video/mp4"></video></div><div class="card-info"><div class="card-name">Grace</div><button class="btn-select" onclick="seleccionarAsistente(this)">Seleccionar</button></div></div>
-            <div class="card" data-voice="Leland"><div class="video-wrapper"><video controls preload="metadata" playsinline><source src="https://video.wixstatic.com/video/a23405_56d5f8b0f9ea471194e84b6ca9dac329/720p/mp4/file.mp4" type="video/mp4"></video></div><div class="card-info"><div class="card-name">Leland</div><button class="btn-select" onclick="seleccionarAsistente(this)">Seleccionar</button></div></div>
-            <div class="card" data-voice="Marissa"><div class="video-wrapper"><video controls preload="metadata" playsinline><source src="https://video.wixstatic.com/video/a23405_41447efa9e474ae89bd52134a2f6e5fa/480p/mp4/file.mp4" type="video/mp4"></video></div><div class="card-info"><div class="card-name">Marissa</div><button class="btn-select" onclick="seleccionarAsistente(this)">Seleccionar</button></div></div>
-            <div class="card" data-voice="Lily"><div class="video-wrapper"><video controls preload="metadata" playsinline><source src="https://video.wixstatic.com/video/a23405_2a8ec92d24a44bfe93ab905b79a2bbf8/720p/mp4/file.mp4" type="video/mp4"></video></div><div class="card-info"><div class="card-name">Lily</div><button class="btn-select" onclick="seleccionarAsistente(this)">Seleccionar</button></div></div>
-            <div class="card" data-voice="Della"><div class="video-wrapper"><video controls preload="metadata" playsinline><source src="https://video.wixstatic.com/video/a23405_36d8c455c4a145618063be0974b049d9/720p/mp4/file.mp4" type="video/mp4"></video></div><div class="card-info"><div class="card-name">Della</div><button class="btn-select" onclick="seleccionarAsistente(this)">Seleccionar</button></div></div>
-            <div class="card" data-voice="Nico"><div class="video-wrapper"><video controls preload="metadata" playsinline><source src="https://video.wixstatic.com/video/a23405_245713f3bfed47bb980ea4a93a5f96ea/720p/mp4/file.mp4" type="video/mp4"></video></div><div class="card-info"><div class="card-name">Nico</div><button class="btn-select" onclick="seleccionarAsistente(this)">Seleccionar</button></div></div>
-            <div class="card" data-voice="Rita"><div class="video-wrapper"><video controls preload="metadata" playsinline><source src="https://video.wixstatic.com/video/a23405_1e7c8a61b2f4471cbf7a9508519e4d99/720p/mp4/file.mp4" type="video/mp4"></video></div><div class="card-info"><div class="card-name">Rita</div><button class="btn-select" onclick="seleccionarAsistente(this)">Seleccionar</button></div></div>
-            <div class="card" data-voice="Meritt"><div class="video-wrapper"><video controls preload="metadata" playsinline><source src="https://video.wixstatic.com/video/a23405_292b27688f1548719b78bc144aca0083/720p/mp4/file.mp4" type="video/mp4"></video></div><div class="card-info"><div class="card-name">Meritt</div><button class="btn-select" onclick="seleccionarAsistente(this)">Seleccionar</button></div></div>
-            <div class="card" data-voice="Willa"><div class="video-wrapper"><video controls preload="metadata" playsinline><source src="https://video.wixstatic.com/video/a23405_0b4ec9d8dc8f417c9394be7d35740b90/720p/mp4/file.mp4" type="video/mp4"></video></div><div class="card-info"><div class="card-name">Willa</div><button class="btn-select" onclick="seleccionarAsistente(this)">Seleccionar</button></div></div>
-            <div class="card" data-voice="Maren"><div class="video-wrapper"><video controls preload="metadata" playsinline><source src="https://video.wixstatic.com/video/a23405_4590f73dfb384b8f830bba9cc0102429/720p/mp4/file.mp4" type="video/mp4"></video></div><div class="card-info"><div class="card-name">Maren</div><button class="btn-select" onclick="seleccionarAsistente(this)">Seleccionar</button></div></div>
-            <div class="card" data-voice="Tasmin"><div class="video-wrapper"><video controls preload="metadata" playsinline><source src="https://video.wixstatic.com/video/a23405_a2cf5a18d0544511b21f47de7f960267/720p/mp4/file.mp4" type="video/mp4"></video></div><div class="card-info"><div class="card-name">Tasmin</div><button class="btn-select" onclick="seleccionarAsistente(this)">Seleccionar</button></div></div>
-            <div class="card" data-voice="Ashley"><div class="video-wrapper"><video controls preload="metadata" playsinline><source src="https://video.wixstatic.com/video/a23405_d75c49a573a94294a282f5f7c170731c/720p/mp4/file.mp4" type="video/mp4"></video></div><div class="card-info"><div class="card-name">Ashley</div><button class="btn-select" onclick="seleccionarAsistente(this)">Seleccionar</button></div></div>
-            <div class="card" data-voice="Andrea"><div class="video-wrapper"><video controls preload="metadata" playsinline><source src="https://video.wixstatic.com/video/a23405_d058051cdf3045448cfcb9c06b5f49e3/720p/mp4/file.mp4" type="video/mp4"></video></div><div class="card-info"><div class="card-name">Andrea</div><button class="btn-select" onclick="seleccionarAsistente(this)">Seleccionar</button></div></div>
-            <div class="card" data-voice="Claudia"><div class="video-wrapper"><video controls preload="metadata" playsinline><source src="https://video.wixstatic.com/video/a23405_03c20ace01274d4590fcfa22d79c310a/720p/mp4/file.mp4" type="video/mp4"></video></div><div class="card-info"><div class="card-name">Claudia</div><button class="btn-select" onclick="seleccionarAsistente(this)">Seleccionar</button></div></div>
-            <div class="card" data-voice="Gaby"><div class="video-wrapper"><video controls preload="metadata" playsinline><source src="https://video.wixstatic.com/video/a23405_13c4419d5ee641e88733cf3d23157f4e/720p/mp4/file.mp4" type="video/mp4"></video></div><div class="card-info"><div class="card-name">Gaby</div><button class="btn-select" onclick="seleccionarAsistente(this)">Seleccionar</button></div></div>
-            <div class="card" data-voice="Alejandro"><div class="video-wrapper"><video controls preload="metadata" playsinline><source src="https://video.wixstatic.com/video/a23405_86f94777baee49a1b2e30f486359fc56/720p/mp4/file.mp4" type="video/mp4"></video></div><div class="card-info"><div class="card-name">Alejandro</div><button class="btn-select" onclick="seleccionarAsistente(this)">Seleccionar</button></div></div>
-            <div class="card" data-voice="Sloane"><div class="video-wrapper"><video controls preload="metadata" playsinline><source src="https://video.wixstatic.com/video/a23405_1bdc2297bbc74cf4801f939260e1e941/720p/mp4/file.mp4" type="video/mp4"></video></div><div class="card-info"><div class="card-name">Sloane</div><button class="btn-select" onclick="seleccionarAsistente(this)">Seleccionar</button></div></div>
-        </div>
 
-        <div class="form-container">
-            <h3>Datos del Negocio</h3>
-            <input type="text" id="nombre_negocio" class="form-control" placeholder="Nombre del Negocio *">
-            <input type="text" id="sector" class="form-control" placeholder="Sector / Tipo de Negocio *">
-            <input type="text" id="servicios" class="form-control" placeholder="Servicios que ofreces *">
-            <input type="text" id="horario" class="form-control" placeholder="Horario Comercial *">
-            <input type="text" id="zona" class="form-control" placeholder="Zona de Servicio *">
-            <input type="email" id="google_calendar_email" class="form-control" placeholder="Email de tu Google Calendar *">
-
-            <button onclick="procesarEnvio()" class="btn-submit">Crear Asistente Inteligente ✨</button>
-        </div>
-    </div>
-
-    <div id="success-box" class="success-box">
-        <h3>¡Tu asistente está listo! 🎉</h3>
-        <p><strong>Teléfono de prueba:</strong></p>
-        <div id="telefono-display" style="font-size:28px; font-weight:bold; color:#25D366; margin:15px 0;"></div>
+def check_availability(calendar_id: str, start_time: str, end_time: str) -> bool:
+    """
+    Consulta la API FreeBusy de Google Calendar para verificar si el hueco está libre.
+    Limpia y valida las fechas para evitar errores 400 Bad Request de Google.
+    """
+    try:
+        service = get_calendar_service()
         
-        <p style="background:#f0fdf4; padding:15px; border-radius:8px; border-left:4px solid #25D366; margin:20px 0;">
-            ✅ Se ha activado tu <strong>prueba gratuita de 10 minutos</strong>. 
-            ¡Llama ahora al número de arriba y prueba tu asistente inteligente!
-        </p>
-        
-        <button onclick="mostrarInstrucciones()" class="btn-connect">🔗 Conectar con Google Calendar</button>
-    </div>
-
-    <div id="instructions-box" class="instructions-box">
-        <h3>Cómo compartir tu calendario con Dansu</h3>
-        <p><strong>Email que debes usar:</strong></p>
-        <p style="background:#f1f3f4; padding:12px; border-radius:8px; font-family:monospace; word-break:break-all;">
-            dansu-voice-assistant@dansu-technologies.iam.gserviceaccount.com
-        </p>
-        <ol style="text-align:left; line-height:1.7;">
-            <li>Abre <a href="https://calendar.google.com" target="_blank">Google Calendar</a></li>
-            <li>Haz clic en los 3 puntos del calendario principal → "Configuración y uso compartido"</li>
-            <li>En "Compartir con personas específicas" → "Añadir personas"</li>
-            <li>Pega el email de arriba</li>
-            <li>Selecciona <strong>"Hacer cambios y gestionar el uso compartido"</strong></li>
-            <li>Pulsa "Enviar"</li>
-        </ol>
-        <button onclick="confirmarCompartido()" class="btn-confirm">✅ Ya he compartido el calendario</button>
-    </div>
-
-    <div id="confirmation-box" class="confirmation-box">
-        <div id="success-message" style="display:none;">
-            <p style="color:#137333; font-size:18px; font-weight:bold;">✅ Conexión verificada correctamente</p>
+        # --- LIMPIEZA Y FORMATEO DE FECHAS ---
+        def format_iso_strict(dt_str: str) -> str:
+            if not dt_str:
+                return dt_str
+            dt_str = str(dt_str).strip().replace(" ", "T")
             
-            <a id="btn-probar-llamada" href="#" style="display:block; padding:14px; background:#25D366; color:white; text-align:center; text-decoration:none; border-radius:8px; margin-top:10px;">
-                📞 Hacer llamada de prueba
-            </a>
+            # Si no incluye información de desfase/zona horaria (+ o Z)
+            if "+" not in dt_str and not dt_str.endswith("Z") and dt_str.count("-") < 3:
+                dt_str += "+02:00"
+                
+            return dt_str
 
-            <!-- BOTÓN DE PAGAR AÑADIDO -->
-            <a href="CONFIRMACION_EXITO" style="display:block; padding:16px; background:#EA4335; color:white; text-align:center; text-decoration:none; border-radius:8px; margin-top:15px; font-size:18px; font-weight:bold;">
-                💳 PAGAR Y ACTIVAR ASISTENTE
-            </a>
-        </div>
+        iso_start = format_iso_strict(start_time)
+        iso_end = format_iso_strict(end_time)
+        
+        body = {
+            "timeMin": iso_start,
+            "timeMax": iso_end,
+            "timeZone": "Europe/Madrid",
+            "items": [{"id": calendar_id}]
+        }
+        
+        print(f"🔍 Consultando FreeBusy para {calendar_id} entre {iso_start} y {iso_end}")
+        freebusy_query = service.freebusy().query(body=body).execute()
+        
+        busy_periods = freebusy_query.get("calendars", {}).get(calendar_id, {}).get("busy", [])
+        
+        if busy_periods:
+            print(f"❌ Hueco ocupado. Conflictos detectados: {busy_periods}")
+            return False
+            
+        print("✅ Hueco 100% disponible.")
+        return True
+    except Exception as e:
+        print(f"⚠️ Error al comprobar disponibilidad con FreeBusy: {e}")
+        print("ℹ️ Permitiendo el agendamiento por seguridad (Fail-Safe) para no perder la cita.")
+        return True
 
-        <div id="error-message" style="display:none;" class="error-box">
-            <p><strong>❌ No se detectó el acceso</strong></p>
-            <p>Revisa que hayas compartido el calendario principal y que los permisos estén correctos.</p>
-            <button onclick="mostrarInstrucciones()" style="background:#ea4335; color:white;">Intentar de nuevo</button>
-        </div>
-    </div>
 
-    <script>
-        let asistenteSeleccionado = null;
-        let currentCalendarEmail = "";
+def create_google_event(calendar_id: str, summary: str, start_time: str, end_time: str, description: str = "", bypass_availability: bool = False):
+    try:
+        ensure_calendar_access(calendar_id)
+        
+        # Validamos disponibilidad si no estamos forzando el bypass
+        if not bypass_availability and not check_availability(calendar_id, start_time, end_time):
+            raise Exception("El horario seleccionado ya no está disponible.")
 
-        function seleccionarAsistente(button) {
-            document.querySelectorAll('.card').forEach(c => c.classList.remove('selected'));
-            button.closest('.card').classList.add('selected');
-            asistenteSeleccionado = button.closest('.card').getAttribute('data-voice');
+        service = get_calendar_service()
+
+        event = {
+            'summary': summary[:100],
+            'description': (description or "Cita agendada por Dansu AI"),
+            'start': {'dateTime': start_time, 'timeZone': 'Europe/Madrid'},
+            'end': {'dateTime': end_time, 'timeZone': 'Europe/Madrid'},
+            'reminders': {'useDefault': True}
         }
 
-        async function procesarEnvio() {
-            if (!asistenteSeleccionado) return alert("Selecciona una voz");
+        created = service.events().insert(
+            calendarId=calendar_id,
+            body=event,
+            sendUpdates='none'
+        ).execute()
 
-            const payload = {
-                asistente: asistenteSeleccionado,
-                nombre_negocio: document.getElementById('nombre_negocio').value.trim(),
-                sector: document.getElementById('sector').value.trim(),
-                servicios: document.getElementById('servicios').value.trim(),
-                horario: document.getElementById('horario').value.trim(),
-                zona: document.getElementById('zona').value.trim(),
-                google_calendar_email: document.getElementById('google_calendar_email').value.trim()
-            };
+        print(f"✅ EVENTO CREADO: {created.get('htmlLink')}")
+        return created
+    except Exception as e:
+        print(f"❌ Error Google Calendar: {e}")
+        raise
 
-            if (Object.values(payload).some(v => !v)) return alert("Completa todos los campos");
 
-            try {
-                const res = await fetch("https://retell-bot.onrender.com/create-retell-bot", {
-                    method: "POST",
-                    headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify(payload)
-                });
+# ==================== VOICE MAPPING ====================
+VOICE_MAPPING = {
+    "Cimo": "11labs-Adrian", "Brynne": "11labs-Brynne", "Chloe": "11labs-Chloe",
+    "Kate": "openai-Nova", "Grace": "openai-Shimmer", "Leland": "11labs-Leland",
+    "Marissa": "11labs-Marissa", "Lily": "11labs-Lily", "Della": "11labs-Delia",
+    "Nico": "openai-Onyx", "Rita": "11labs-Rita", "Meritt": "11labs-Meritt",
+    "Willa": "11labs-Willa", "Maren": "11labs-Maren", "Tasmin": "11labs-Tasmin",
+    "Ashley": "11labs-Ashley", "Andrea": "openai-Alloy", "Claudia": "11labs-Claudia",
+    "Gaby": "11labs-Gaby", "Alejandro": "openai-Echo", "Sloane": "11labs-Sloane"
+}
 
-                const data = await res.json();
 
-                if (data.status === "success") {
-                    currentCalendarEmail = payload.google_calendar_email;
-                    document.getElementById('telefono-display').innerText = data.phone_number || "Número no asignado";
-                    document.getElementById('success-box').style.display = 'block';
-                    document.getElementById('success-box').scrollIntoView({ behavior: 'smooth' });
-                    
-                    if(data.phone_number) {
-                        const btnLlamada = document.getElementById('btn-probar-llamada');
-                        btnLlamada.href = `tel:${data.phone_number}`;
-                    }
-                } else {
-                    alert("Error del servidor: " + (data.detail || "No se pudo crear"));
-                }
-            } catch (e) {
-                alert("Error al crear el asistente");
+def retell_request(method: str, endpoint: str, json_data=None):
+    url = f"https://api.retellai.com{endpoint}"
+    headers = {"Authorization": f"Bearer {RETELL_API_KEY}", "Content-Type": "application/json"}
+    try:
+        r = requests.request(method, url, headers=headers, json=json_data, timeout=30)
+        print(f"→ Retell {method} {endpoint} → {r.status_code}")
+        return r.json() if r.ok else None
+    except Exception as e:
+        print(f"❌ Error Retell: {e}")
+        return None
+
+
+# ==================== CREACIÓN DEL BOT (con prompt reforzado) ====================
+def create_bot_for_client(nombre_negocio, sector, servicios, horario, zona, voice_id, calendar_email):
+    ahora = datetime.now()
+    fecha_base = ahora.strftime("%A, %d de %B de %Y")
+
+    custom_prompt = f"""Eres el asistente virtual de {nombre_negocio} ({sector}).
+**INFORMACIÓN CRÍTICA QUE NUNCA DEBES OLVIDAR NI INVENTAR:**
+- El email del Google Calendar del negocio es exactamente: {calendar_email}
+- Cuando uses la herramienta `book_appointment`, pon SIEMPRE este email en `calendar_email`: {calendar_email}
+- Nunca inventes otro email.
+
+**Flujo para agendar cita (pregunta uno por uno):**
+1. Confirma día y hora con el usuario.
+2. Pregunta: "¿Me puedes decir tu nombre completo?"
+3. Pregunta: "¿Cuál es tu número de teléfono?"
+4. Pregunta: "¿Cuál es el motivo de la cita?"
+5. Solo después de tener los tres datos, llama a la herramienta `book_appointment`.
+
+Si la herramienta `book_appointment` te devuelve un mensaje de error indicando que el horario no está disponible, infórmale amablemente al usuario y pídele que elija otro día o tramo horario."""
+
+    llm_res = retell_request("POST", "/create-retell-llm", {
+        "model": "gpt-4o-mini",
+        "general_prompt": custom_prompt,
+        "general_tools": [{
+            "type": "custom",
+            "name": "book_appointment",
+            "description": "Agenda la cita en el calendario del negocio. Si el hueco está ocupado, devolverá un error.",
+            "url": "https://retell-bot.onrender.com/book-appointment",
+            "method": "POST",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "calendar_email": {"type": "string"},
+                    "summary": {"type": "string"},
+                    "start_time": {"type": "string"},
+                    "end_time": {"type": "string"},
+                    "description": {"type": "string"}
+                },
+                "required": ["calendar_email", "summary", "start_time", "end_time"]
             }
-        }
+        }]
+    })
 
-        function mostrarInstrucciones() {
-            document.getElementById('instructions-box').style.display = 'block';
-            document.getElementById('instructions-box').scrollIntoView({ behavior: 'smooth' });
-        }
+    if not llm_res or "llm_id" not in llm_res:
+        raise Exception("Error creando LLM")
 
-        async function confirmarCompartido() {
-            try {
-                const res = await fetch("https://retell-bot.onrender.com/verify-calendar-access", {
-                    method: "POST",
-                    headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({ calendar_email: currentCalendarEmail })
-                });
+    agent_res = retell_request("POST", "/create-agent", {
+        "agent_name": f"Bot {nombre_negocio}",
+        "response_engine": {"type": "retell-llm", "llm_id": llm_res["llm_id"]},
+        "voice_id": voice_id,
+        "language": "es-ES"
+    })
 
-                if (res.ok) {
-                    document.getElementById('success-message').style.display = 'block';
-                    document.getElementById('error-message').style.display = 'none';
-                } else {
-                    throw new Error();
-                }
-            } catch (err) {
-                document.getElementById('success-message').style.display = 'none';
-                document.getElementById('error-message').style.display = 'block';
-            }
+    if not agent_res or "agent_id" not in agent_res:
+        raise Exception("Error creando Agent")
 
-            document.getElementById('confirmation-box').style.display = 'block';
-            // Scroll automático hacia el final para que el botón "Pagar" sea visible
-            document.getElementById('confirmation-box').scrollIntoView({ behavior: 'smooth' });
-        }
-    </script>
-</body>
-</html>
+    agent_id = agent_res["agent_id"]
+
+    numbers = retell_request("GET", "/v2/list-phone-numbers")
+    free_number = None
+    if numbers and "items" in numbers:
+        for p in numbers["items"]:
+            if not p.get("inbound_agents"):
+                free_number = p.get("phone_number")
+                break
+
+    if free_number:
+        retell_request("PATCH", f"/update-phone-number/{free_number}", {
+            "inbound_agents": [{"agent_id": agent_id, "weight": 1.0}]
+        })
+
+    return {"status": "success", "agent_id": agent_id, "phone_number": free_number}
+
+
+# ==================== ENDPOINTS ====================
+@app.post("/book-appointment")
+@app.post("/book-appointment/")
+async def book_appointment(request: Request):
+    print("\n" + "="*40 + " [RETELL JSON COMPLETO] " + "="*40)
+    try:
+        raw_body = (await request.body()).decode("utf-8")
+        print(raw_body)
+        print("="*104 + "\n")
+
+        data = json.loads(raw_body) if raw_body else {}
+        args = data.get("args", data)
+
+        print("--- PARÁMETROS INTERNOS EXTRAÍDOS ---")
+        print(f"📅 start_time original: {args.get('start_time')}")
+        print(f"📅 end_time original:   {args.get('end_time')}")
+        print(f"📧 calendar_email:       {args.get('calendar_email')}\n")
+
+        event = create_google_event(
+            args.get("calendar_email"),
+            args.get("summary"),
+            args.get("start_time"),
+            args.get("end_time"),
+            args.get("description", "")
+        )
+
+        return {"code": "SUCCESS", "message": "Cita agendada correctamente"}
+    except Exception as e:
+        print(f"❌ ERROR EN BOOK-APPOINTMENT: {e}")
+        return {"code": "ERROR", "message": str(e)}
+
+
+@app.post("/verify-calendar-access")
+@app.post("/verify-calendar-access/")
+async def verify_calendar_access(request: Request):
+    print("=" * 80)
+    print("🔍 VERIFICANDO ACCESO A GOOGLE CALENDAR")
+    print("=" * 80)
+    try:
+        data = await request.json()
+        calendar_email = data.get("calendar_email")
+        print(f"Email recibido: {calendar_email}")
+
+        create_google_event(
+            calendar_email,
+            "🧪 Prueba de conexión - Dansu",
+            "2026-07-01T10:00:00+02:00",
+            "2026-07-01T10:30:00+02:00",
+            bypass_availability=True
+        )
+        return {"status": "success", "message": "Acceso verificado correctamente"}
+    except Exception as e:
+        print(f"❌ Error en verify-calendar-access: {e}")
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.post("/create-retell-bot")
+async def create_retell_bot_endpoint(request: Request):
+    try:
+        payload = await request.json()
+        data = payload if isinstance(payload, dict) else payload.get("data", payload)
+        voice_id = VOICE_MAPPING.get(data.get("asistente"), "openai-Alloy")
+        return create_bot_for_client(
+            data.get("nombre_negocio"), data.get("sector"), data.get("servicios"),
+            data.get("horario"), data.get("zona"), voice_id, data.get("google_calendar_email")
+        )
+    except Exception as e:
+        print(f"❌ Error en create-retell-bot: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/")
+async def root():
+    return {"status": "Dansu Backend OK"}
+
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)

@@ -1,6 +1,7 @@
 import os
 import json
 from datetime import datetime
+from zoneinfo import ZoneInfo  # Gestión nativa y precisa de zonas horarias en Python 3.9+
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 import requests
@@ -29,6 +30,7 @@ app.add_middleware(
 
 # ==================== GOOGLE CALENDAR ====================
 SCOPES = ['https://www.googleapis.com/auth/calendar']
+MADRID_TZ = ZoneInfo("Europe/Madrid")  # Huso horario de referencia absoluto para el negocio
 
 def get_calendar_service():
     credentials_info = json.loads(GOOGLE_CREDENTIALS_JSON)
@@ -55,6 +57,34 @@ def ensure_calendar_access(calendar_id: str):
             print(f"⚠️ Error suscripción {e.status_code}: {e}")
 
 
+def normalize_to_madrid_iso(dt_str: str) -> str:
+    """
+    Toma cualquier formato de fecha de Retell (con 'Z' de UTC, desfases o nativas),
+    la interpreta correctamente preservando el momento en el tiempo, la convierte
+    al huso horario de Madrid y devuelve la cadena ISO oficial esperada por Google.
+    """
+    if not dt_str:
+        return dt_str
+        
+    dt_str = str(dt_str).strip().replace(" ", "T")
+    
+    # Manejo explícito de la 'Z' de UTC (Zulú) habitual en Retell AI
+    if dt_str.endswith("Z"):
+        dt = datetime.fromisoformat(dt_str[:-1]).replace(tzinfo=ZoneInfo("UTC"))
+    else:
+        try:
+            dt = datetime.fromisoformat(dt_str)
+            if dt.tzinfo is None:
+                # Si viene sin zona horaria asignada, la tratamos bajo el huso de Madrid
+                dt = dt.replace(tzinfo=MADRID_TZ)
+        except ValueError:
+            return dt_str
+
+    # Conversión limpia y precisa de la hora al huso horario de Madrid
+    dt_madrid = dt.astimezone(MADRID_TZ)
+    return dt_madrid.isoformat()
+
+
 def check_availability(calendar_id: str, start_time: str, end_time: str) -> bool:
     """
     Consulta la API FreeBusy de Google Calendar para verificar si el hueco está libre.
@@ -63,20 +93,9 @@ def check_availability(calendar_id: str, start_time: str, end_time: str) -> bool
     try:
         service = get_calendar_service()
         
-        # --- LIMPIEZA Y FORMATEO DE FECHAS ---
-        def format_iso_strict(dt_str: str) -> str:
-            if not dt_str:
-                return dt_str
-            dt_str = str(dt_str).strip().replace(" ", "T")
-            
-            # Si no incluye información de desfase/zona horaria (+ o Z)
-            if "+" not in dt_str and not dt_str.endswith("Z") and dt_str.count("-") < 3:
-                dt_str += "+02:00"
-                
-            return dt_str
-
-        iso_start = format_iso_strict(start_time)
-        iso_end = format_iso_strict(end_time)
+        # --- NORMALIZACIÓN SEGURA DE FECHAS Y ZONAS HORARIAS ---
+        iso_start = normalize_to_madrid_iso(start_time)
+        iso_end = normalize_to_madrid_iso(end_time)
         
         body = {
             "timeMin": iso_start,
@@ -106,8 +125,12 @@ def create_google_event(calendar_id: str, summary: str, start_time: str, end_tim
     try:
         ensure_calendar_access(calendar_id)
         
+        # Normalizamos las marcas de tiempo antes de realizar validaciones o inserciones
+        iso_start = normalize_to_madrid_iso(start_time)
+        iso_end = normalize_to_madrid_iso(end_time)
+        
         # Validamos disponibilidad si no estamos forzando el bypass
-        if not bypass_availability and not check_availability(calendar_id, start_time, end_time):
+        if not bypass_availability and not check_availability(calendar_id, iso_start, iso_end):
             raise Exception("El horario seleccionado ya no está disponible.")
 
         service = get_calendar_service()
@@ -115,8 +138,8 @@ def create_google_event(calendar_id: str, summary: str, start_time: str, end_tim
         event = {
             'summary': summary[:100],
             'description': (description or "Cita agendada por Dansu AI"),
-            'start': {'dateTime': start_time, 'timeZone': 'Europe/Madrid'},
-            'end': {'dateTime': end_time, 'timeZone': 'Europe/Madrid'},
+            'start': {'dateTime': iso_start, 'timeZone': 'Europe/Madrid'},
+            'end': {'dateTime': iso_end, 'timeZone': 'Europe/Madrid'},
             'reminders': {'useDefault': True}
         }
 

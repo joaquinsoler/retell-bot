@@ -24,14 +24,20 @@ RETELL_API_KEY = os.getenv("RETELL_API_KEY")
 GOOGLE_CREDENTIALS_JSON = os.getenv("GOOGLE_CREDENTIALS")
 DATABASE_URL = os.getenv("DATABASE_URL")
 
-# Configuración SMTP corporativa para soporte@dansutech.com
+# Configuración SMTP corporativa usando el puerto seguro 465 (SSL)
 SMTP_SERVER = "smtp.gmail.com"
-SMTP_PORT = 587
+SMTP_PORT = 465  # Puerto de salida seguro nativo
 SMTP_USER = "soporte@dansutech.com"
 SMTP_PASSWORD = os.getenv("GMAIL_APP_PASSWORD")
 
 if not RETELL_API_KEY or not GOOGLE_CREDENTIALS_JSON or not DATABASE_URL:
     raise Exception("Faltan variables de entorno críticas (RETELL_API_KEY, GOOGLE_CREDENTIALS o DATABASE_URL)")
+
+if not SMTP_PASSWORD:
+    print("⚠️ ADVERTENCIA: La variable GMAIL_APP_PASSWORD no está cargada en el entorno.")
+
+# ==================== ALMACENAMIENTO TEMPORAL EN MEMORIA (OTPs) ====================
+codigos_verificacion = {}
 
 # ==================== CORS ====================
 app.add_middleware(
@@ -66,7 +72,6 @@ def init_db():
             fecha_creacion TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
     """)
-    # Asegurar que la columna password exista si la tabla fue creada previamente
     cur.execute("""
         ALTER TABLE asistentes ADD COLUMN IF NOT EXISTS password VARCHAR(255);
     """)
@@ -81,12 +86,11 @@ init_db()
 MADRID_TZ = ZoneInfo("Europe/Madrid")
 
 def generar_password_aleatoria(longitud=10):
-    """Genera una contraseña alfanumérica segura para el cliente"""
     caracteres = string.ascii_letters + string.digits
     return ''.join(random.choice(caracteres) for _ in range(longitud))
 
 def enviar_correo_bienvenida(destinatario: str, password: str, es_nuevo: bool, negocio: str):
-    """Envía un correo electrónico con las credenciales de acceso al Área de Cliente"""
+    """Envía un correo electrónico con las credenciales utilizando SMTP_SSL por el puerto 465"""
     if not SMTP_PASSWORD:
         print("⚠️ Configuración SMTP ausente. Clave:", password)
         return False
@@ -126,15 +130,15 @@ def enviar_correo_bienvenida(destinatario: str, password: str, es_nuevo: bool, n
     msg.attach(MIMEText(html, 'html'))
 
     try:
-        server = smtplib.SMTP(SMTP_SERVER, SMTP_PORT)
-        server.starttls()
+        # Uso estricto de SMTP_SSL para túneles limpios en el puerto 465
+        server = smtplib.SMTP_SSL(SMTP_SERVER, SMTP_PORT)
         server.login(SMTP_USER, SMTP_PASSWORD)
         server.sendmail(SMTP_USER, destinatario, msg.as_string())
         server.quit()
-        print(f"📧 Correo de credenciales enviado con éxito a {destinatario}")
+        print(f"📧 Correo de credenciales enviado de forma segura con SSL a {destinatario}")
         return True
     except Exception as e:
-        print(f"❌ Error SMTP: {e}")
+        print(f"❌ Error en la conexión SMTP_SSL por puerto 465: {e}")
         return False
 
 def get_calendar_service():
@@ -183,7 +187,7 @@ def create_google_event(calendar_id: str, summary: str, start_time: str, end_tim
         return service.events().insert(calendarId=calendar_id, body=event, sendUpdates='none').execute()
     except Exception as e: raise
 
-# ==================== VOICE MAPPING & UTILS ====================
+# ==================== VOICE MAPPING ====================
 VOICE_MAPPING = {
     "Cimo": "11labs-Adrian", "Brynne": "11labs-Brynne", "Chloe": "11labs-Chloe",
     "Kate": "openai-Nova", "Grace": "openai-Shimmer", "Leland": "11labs-Leland",
@@ -200,7 +204,6 @@ def build_custom_prompt(nombre_negocio, sector, servicios, horario, zona, calend
 def create_bot_for_client(nombre_negocio, sector, servicios, horario, zona, voice_id, calendar_email):
     email_limpio = calendar_email.strip().lower()
     
-    # 1. Comprobar si el email ya tiene una contraseña asignada en el sistema
     conn = get_db_connection()
     cur = conn.cursor()
     cur.execute("SELECT password FROM asistentes WHERE google_calendar_email = %s LIMIT 1;", (email_limpio,))
@@ -215,7 +218,6 @@ def create_bot_for_client(nombre_negocio, sector, servicios, horario, zona, voic
 
     custom_prompt = build_custom_prompt(nombre_negocio, sector, servicios, horario, zona, email_limpio)
     
-    # 2. Creación del motor cognitivo del bot en Retell
     llm_res = retell_request("POST", "/create-retell-llm", {
         "model": "gpt-4o-mini",
         "general_prompt": custom_prompt,
@@ -250,7 +252,6 @@ def create_bot_for_client(nombre_negocio, sector, servicios, horario, zona, voic
     if not agent_res or "agent_id" not in agent_res: raise Exception("Error creando Agent en Retell AI")
     agent_id = agent_res["agent_id"]
 
-    # 3. Asignación de número telefónico disponible
     numbers = retell_request("GET", "/v2/list-phone-numbers")
     free_number = None
     if numbers and "items" in numbers:
@@ -261,7 +262,6 @@ def create_bot_for_client(nombre_negocio, sector, servicios, horario, zona, voic
     if free_number:
         retell_request("PATCH", f"/update-phone-number/{free_number}", {"inbound_agents": [{"agent_id": agent_id, "weight": 1.0}]})
 
-    # 4. Insertar en la BD guardando la clave permanente
     cur.execute("""
         INSERT INTO asistentes (nombre_negocio, sector, servicios, horario, zona, google_calendar_email, asistente, agent_id, phone_number, password)
         VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s);
@@ -270,23 +270,21 @@ def create_bot_for_client(nombre_negocio, sector, servicios, horario, zona, voic
     cur.close()
     conn.close()
 
-    # 5. Enviar el correo electrónico informativo
     enviar_correo_bienvenida(email_limpio, password_cliente, es_nuevo, nombre_negocio)
 
     return {"status": "success", "agent_id": agent_id, "phone_number": free_number, "es_nuevo": es_nuevo}
 
-# ==================== ENDPOINTS DE VALIDACIÓN DE ÁREA DE CLIENTE ====================
+# ==================== ENDPOINTS DE VALIDACIÓN ====================
 
 @app.post("/verify-login-password")
 async def verify_login_password(request: Request):
-    """Verifica si las credenciales de email y contraseña fija coinciden en PostgreSQL"""
     try:
         data = await request.json()
         email = data.get("email", "").strip().lower()
         password = data.get("password", "").strip()
 
         if not email or not password:
-            raise HTTPException(status_code=400, detail="El email y la contraseña son campos obligatorios.")
+            raise HTTPException(status_code=400, detail="El email y la contraseña son requeridos.")
 
         conn = get_db_connection()
         cur = conn.cursor()
@@ -296,13 +294,11 @@ async def verify_login_password(request: Request):
         conn.close()
 
         if not bots:
-            raise HTTPException(status_code=401, detail="Credenciales incorrectas. Revisa el email o la contraseña.")
+            raise HTTPException(status_code=401, detail="Credenciales incorrectas.")
 
         return {"status": "success", "bots": bots}
     except HTTPException as he: raise he
     except Exception as e: raise HTTPException(status_code=500, detail=str(e))
-
-# ==================== ENDPOINTS RESTANTES (Mantenidos intactos) ====================
 
 @app.post("/update-retell-bot")
 async def update_retell_bot_endpoint(request: Request):

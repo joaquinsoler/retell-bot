@@ -376,6 +376,58 @@ async def update_retell_bot_endpoint(request: Request):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.post("/delete-retell-bot")
+async def delete_retell_bot_endpoint(request: Request):
+    """
+    Elimina por completo el agente de Retell AI, desvincula el número de teléfono 
+    para que quede libre y borra el registro permanentemente de PostgreSQL.
+    """
+    try:
+        data = await request.json()
+        agent_id = data.get("agent_id")
+
+        if not agent_id:
+            raise HTTPException(status_code=400, detail="Falta el parámetro agent_id")
+
+        # 1. Obtener los detalles del agente en Retell para conocer su número y su LLM
+        agent_info = retell_request("GET", f"/get-agent/{agent_id}")
+        
+        if agent_info:
+            llm_id = agent_info.get("response_engine", {}).get("llm_id")
+            
+            # 2. Buscar si el número de teléfono está asignado a este agente y desvincularlo
+            numbers_res = retell_request("GET", "/v2/list-phone-numbers")
+            if numbers_res and "items" in numbers_res:
+                for phone in numbers_res["items"]:
+                    agents = phone.get("inbound_agents", [])
+                    if any(a.get("agent_id") == agent_id for a in agents):
+                        # Hacemos una actualización limpia enviando una lista vacía para liberar el número
+                        retell_request("PATCH", f"/update-phone-number/{phone['phone_number']}", {
+                            "inbound_agents": []
+                        })
+                        print(f"ℹ️ Número de teléfono {phone['phone_number']} liberado exitosamente.")
+
+            # 3. Eliminar el Agente de Retell AI
+            retell_request("DELETE", f"/delete-agent/{agent_id}")
+            
+            # 4. Eliminar el motor LLM asociado para no dejar basura huérfana en Retell
+            if llm_id:
+                retell_request("DELETE", f"/delete-retell-llm/{llm_id}")
+
+        # 5. Eliminar permanentemente el registro de la base de datos PostgreSQL
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute("DELETE FROM asistentes WHERE agent_id = %s;", (agent_id,))
+        conn.commit()
+        cur.close()
+        conn.close()
+
+        return {"status": "success", "message": "Asistente eliminado de forma permanente de todos los sistemas."}
+    except Exception as e:
+        print(f"❌ Error en delete-retell-bot: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 # ==================== ENDPOINTS GENERALES ====================
 @app.post("/book-appointment")
 @app.post("/book-appointment/")

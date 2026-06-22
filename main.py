@@ -2,9 +2,6 @@ import os
 import json
 import random
 import string
-import smtplib
-from email.mime.text import MIMEText
-from email.mime.multipart import MIMEMultipart
 from datetime import datetime
 from zoneinfo import ZoneInfo
 from fastapi import FastAPI, HTTPException, Request
@@ -24,17 +21,11 @@ RETELL_API_KEY = os.getenv("RETELL_API_KEY")
 GOOGLE_CREDENTIALS_JSON = os.getenv("GOOGLE_CREDENTIALS")
 DATABASE_URL = os.getenv("DATABASE_URL")
 
-# Configuración SMTP corporativa usando el puerto seguro 465 (SSL)
-SMTP_SERVER = "smtp.gmail.com"
-SMTP_PORT = 465  # Puerto de salida seguro nativo
-SMTP_USER = "soporte@dansutech.com"
-SMTP_PASSWORD = os.getenv("GMAIL_APP_PASSWORD")
+# API Key de Resend para saltarse el firewall de Render usando HTTP (Puerto 443)
+RESEND_API_KEY = os.getenv("RESEND_API_KEY")
 
 if not RETELL_API_KEY or not GOOGLE_CREDENTIALS_JSON or not DATABASE_URL:
     raise Exception("Faltan variables de entorno críticas (RETELL_API_KEY, GOOGLE_CREDENTIALS o DATABASE_URL)")
-
-if not SMTP_PASSWORD:
-    print("⚠️ ADVERTENCIA: La variable GMAIL_APP_PASSWORD no está cargada en el entorno.")
 
 # ==================== ALMACENAMIENTO TEMPORAL EN MEMORIA (OTPs) ====================
 codigos_verificacion = {}
@@ -53,7 +44,6 @@ def get_db_connection():
     return psycopg2.connect(DATABASE_URL, cursor_factory=RealDictCursor)
 
 def init_db():
-    """Crea o actualiza la tabla de asistentes en PostgreSQL para incluir la columna password"""
     conn = get_db_connection()
     cur = conn.cursor()
     cur.execute("""
@@ -90,16 +80,11 @@ def generar_password_aleatoria(longitud=10):
     return ''.join(random.choice(caracteres) for _ in range(longitud))
 
 def enviar_correo_bienvenida(destinatario: str, password: str, es_nuevo: bool, negocio: str):
-    """Envía un correo electrónico con las credenciales utilizando SMTP_SSL por el puerto 465"""
-    if not SMTP_PASSWORD:
-        print("⚠️ Configuración SMTP ausente. Clave:", password)
+    """Envía un correo utilizando la API HTTP de Resend saltándose las restricciones de puertos de Render"""
+    if not RESEND_API_KEY:
+        print("⚠️ Configuración RESEND_API_KEY ausente. Clave generada:", password)
         return False
         
-    msg = MIMEMultipart()
-    msg['From'] = f"Dansu AI <{SMTP_USER}>"
-    msg['To'] = destinatario
-    msg['Subject'] = f"Tu asistente virtual de {negocio} ya está listo - Dansu AI"
-
     if es_nuevo:
         texto_password = f"""
         <p>Como es tu primer asistente con nosotros, hemos generado una <strong>Contraseña Maestra de Acceso</strong> única para tu cuenta corporativa:</p>
@@ -113,7 +98,7 @@ def enviar_correo_bienvenida(destinatario: str, password: str, es_nuevo: bool, n
         <p>Hemos vinculado este nuevo agente a tu cuenta existente. Puedes acceder a gestionarlo en tu Área de Cliente utilizando tu <strong>Contraseña Maestra habitual</strong>.</p>
         """
 
-    html = f"""
+    html_content = f"""
     <html>
     <body style="font-family: 'Segoe UI', Arial, sans-serif; color: #333; line-height: 1.6; margin: 0; padding: 0;">
         <div style="max-width: 550px; margin: 40px auto; padding: 30px; border: 1px solid #e2e8f0; border-radius: 16px; background-color: #ffffff; box-shadow: 0 4px 12px rgba(0,0,0,0.03);">
@@ -127,18 +112,30 @@ def enviar_correo_bienvenida(destinatario: str, password: str, es_nuevo: bool, n
     </body>
     </html>
     """
-    msg.attach(MIMEText(html, 'html'))
+
+    # Llamada HTTPS limpia (Aceptada por Render sin bloqueos)
+    url = "https://api.resend.com/emails"
+    headers = {
+        "Authorization": f"Bearer {RESEND_API_KEY}",
+        "Content-Type": "application/json"
+    }
+    payload = {
+        "from": "Dansu AI <onboarding@resend.dev>", # Nota: Cuando verifiques dansutech.com en Resend, podrás poner soporte@dansutech.com
+        "to": [destinatario],
+        "subject": f"Tu asistente virtual de {negocio} ya está listo - Dansu AI",
+        "html": html_content
+    }
 
     try:
-        # Uso estricto de SMTP_SSL para túneles limpios en el puerto 465
-        server = smtplib.SMTP_SSL(SMTP_SERVER, SMTP_PORT)
-        server.login(SMTP_USER, SMTP_PASSWORD)
-        server.sendmail(SMTP_USER, destinatario, msg.as_string())
-        server.quit()
-        print(f"📧 Correo de credenciales enviado de forma segura con SSL a {destinatario}")
-        return True
+        r = requests.post(url, headers=headers, json=payload, timeout=15)
+        if r.ok:
+            print(f"📧 Correo transaccional enviado vía API HTTP con éxito a {destinatario}")
+            return True
+        else:
+            print(f"❌ Fallo en la API de Resend: {r.status_code} - {r.text}")
+            return False
     except Exception as e:
-        print(f"❌ Error en la conexión SMTP_SSL por puerto 465: {e}")
+        print(f"❌ Error al conectar con la API de Resend: {e}")
         return False
 
 def get_calendar_service():

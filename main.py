@@ -92,42 +92,28 @@ def ensure_calendar_access(calendar_id: str):
 
 
 def normalize_to_madrid_iso(dt_str: str) -> str:
-    """
-    Toma cualquier formato de fecha de Retell (con 'Z' de UTC, desfases o nativas),
-    la interpreta correctamente preservando el momento en el tiempo, la convierte
-    al huso horario de Madrid y devuelve la cadena ISO oficial esperada por Google.
-    """
     if not dt_str:
         return dt_str
         
     dt_str = str(dt_str).strip().replace(" ", "T")
     
-    # Manejo explícito de la 'Z' de UTC (Zulú) habitual en Retell AI
     if dt_str.endswith("Z"):
         dt = datetime.fromisoformat(dt_str[:-1]).replace(tzinfo=ZoneInfo("UTC"))
     else:
         try:
             dt = datetime.fromisoformat(dt_str)
             if dt.tzinfo is None:
-                # Si viene sin zona horaria asignada, la tratamos bajo el huso de Madrid
                 dt = dt.replace(tzinfo=MADRID_TZ)
         except ValueError:
             return dt_str
 
-    # Conversión limpia y precisa de la hora al huso horario de Madrid
     dt_madrid = dt.astimezone(MADRID_TZ)
     return dt_madrid.isoformat()
 
 
 def check_availability(calendar_id: str, start_time: str, end_time: str) -> bool:
-    """
-    Consulta la API FreeBusy de Google Calendar para verificar si el hueco está libre.
-    Limpia y valida las fechas para evitar errores 400 Bad Request de Google.
-    """
     try:
         service = get_calendar_service()
-        
-        # --- NORMALIZACIÓN SEGURA DE FECHAS Y ZONAS HORARIAS ---
         iso_start = normalize_to_madrid_iso(start_time)
         iso_end = normalize_to_madrid_iso(end_time)
         
@@ -140,7 +126,6 @@ def check_availability(calendar_id: str, start_time: str, end_time: str) -> bool
         
         print(f"🔍 Consultando FreeBusy para {calendar_id} entre {iso_start} y {iso_end}")
         freebusy_query = service.freebusy().query(body=body).execute()
-        
         busy_periods = freebusy_query.get("calendars", {}).get(calendar_id, {}).get("busy", [])
         
         if busy_periods:
@@ -151,24 +136,19 @@ def check_availability(calendar_id: str, start_time: str, end_time: str) -> bool
         return True
     except Exception as e:
         print(f"⚠️ Error al comprobar disponibilidad con FreeBusy: {e}")
-        print("ℹ️ Permitiendo el agendamiento por seguridad (Fail-Safe) para no perder la cita.")
         return True
 
 
 def create_google_event(calendar_id: str, summary: str, start_time: str, end_time: str, description: str = "", bypass_availability: bool = False):
     try:
         ensure_calendar_access(calendar_id)
-        
-        # Normalizamos las marcas de tiempo antes de realizar validaciones o inserciones
         iso_start = normalize_to_madrid_iso(start_time)
         iso_end = normalize_to_madrid_iso(end_time)
         
-        # Validamos disponibilidad si no estamos forzando el bypass
         if not bypass_availability and not check_availability(calendar_id, iso_start, iso_end):
             raise Exception("El horario seleccionado ya no está disponible.")
 
         service = get_calendar_service()
-
         event = {
             'summary': summary[:100],
             'description': (description or "Cita agendada por Dansu AI"),
@@ -301,7 +281,6 @@ def create_bot_for_client(nombre_negocio, sector, servicios, horario, zona, voic
             "inbound_agents": [{"agent_id": agent_id, "weight": 1.0}]
         })
 
-    # Guardado permanente de los datos del asistente creado en la tabla de PostgreSQL
     conn = get_db_connection()
     cur = conn.cursor()
     cur.execute("""
@@ -318,7 +297,6 @@ def create_bot_for_client(nombre_negocio, sector, servicios, horario, zona, voic
 # ==================== ENDPOINTS ÁREA DE CLIENTE ====================
 @app.post("/get-user-bots")
 async def get_user_bots(request: Request):
-    """Obtiene de forma filtrada los asistentes vinculados al email de un usuario"""
     try:
         data = await request.json()
         email = data.get("email", "").strip()
@@ -336,8 +314,9 @@ async def get_user_bots(request: Request):
 @app.post("/update-retell-bot")
 async def update_retell_bot_endpoint(request: Request):
     """
-    Actualiza la configuración del asistente en PostgreSQL y sincroniza el nuevo 
-    prompt reforzado con la API de Retell AI en vivo sin provocar cortes del servicio.
+    Actualiza la configuración del asistente en PostgreSQL y sincroniza forzosamente
+    el prompt operativo JUNTO con el esquema de herramientas funcionales en Retell AI 
+    para mantener intacto el sistema de validación de huecos libres de Google Calendar.
     """
     try:
         data = await request.json()
@@ -348,11 +327,12 @@ async def update_retell_bot_endpoint(request: Request):
         horario = data.get("horario")
         zona = data.get("zona")
         calendar_email = data.get("google_calendar_email")
+        asistente_nombre = data.get("asistente")
 
         if not agent_id:
             raise HTTPException(status_code=400, detail="Falta el agent_id")
 
-        # 1. Recuperar la información del agente de Retell AI para obtener su llm_id
+        # 1. Recuperar información del agente en Retell AI para extraer el llm_id
         agent_info = retell_request("GET", f"/get-agent/{agent_id}")
         if not agent_info or "response_engine" not in agent_info:
             raise HTTPException(status_code=404, detail="No se encontró el agente en Retell AI")
@@ -361,29 +341,58 @@ async def update_retell_bot_endpoint(request: Request):
         if not llm_id:
             raise HTTPException(status_code=400, detail="El agente no dispone de un motor LLM vinculado")
 
-        # 2. Generar el nuevo prompt adaptado con las modificaciones estructurales del cliente
+        # 2. Re-generar el prompt comercial del asistente
         nuevo_prompt = build_custom_prompt(nombre_negocio, sector, servicios, horario, zona, calendar_email)
 
-        # 3. Sincronizar y hacer Patch directo del prompt actualizado en Retell AI
+        # 3. SOLUCIÓN COMPLETA: Forzar el refresco de las herramientas junto al prompt para que Retell compile el control de errores
         llm_update = retell_request("PATCH", f"/update-retell-llm/{llm_id}", {
-            "general_prompt": nuevo_prompt
+            "general_prompt": nuevo_prompt,
+            "general_tools": [{
+                "type": "custom",
+                "name": "book_appointment",
+                "description": "Agenda la cita en el calendario del negocio. Si el hueco está ocupado o falla, devolverá un error.",
+                "url": "https://retell-bot.onrender.com/book-appointment",
+                "method": "POST",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "calendar_email": {"type": "string"},
+                        "summary": {"type": "string"},
+                        "start_time": {"type": "string"},
+                        "end_time": {"type": "string"},
+                        "description": {"type": "string"}
+                    },
+                    "required": ["calendar_email", "summary", "start_time", "end_time"]
+                }
+            }]
         })
+        
         if not llm_update:
-            raise HTTPException(status_code=500, detail="Error al sincronizar cambios con el motor de Retell AI")
+            raise HTTPException(status_code=500, detail="Error al sincronizar cambios y herramientas funcionales con el motor de Retell AI")
 
-        # 4. Actualizar el registro de manera persistente en PostgreSQL
+        # 4. Sincronizar el cambio de voz si se ha editado
+        voice_id_tecnico = VOICE_MAPPING.get(asistente_nombre)
+        if voice_id_tecnico:
+            retell_request("PATCH", f"/update-agent/{agent_id}", {
+                "voice_id": voice_id_tecnico
+            })
+            print(f"ℹ️ Voz de Retell AI actualizada a: {voice_id_tecnico}")
+        else:
+            voice_id_tecnico = agent_info.get("voice_id")
+
+        # 5. Guardar permanentemente en PostgreSQL
         conn = get_db_connection()
         cur = conn.cursor()
         cur.execute("""
             UPDATE asistentes 
-            SET nombre_negocio = %s, sector = %s, servicios = %s, horario = %s, zona = %s, google_calendar_email = %s
+            SET nombre_negocio = %s, sector = %s, servicios = %s, horario = %s, zona = %s, google_calendar_email = %s, asistente = %s
             WHERE agent_id = %s;
-        """, (nombre_negocio, sector, servicios, horario, zona, calendar_email, agent_id))
+        """, (nombre_negocio, sector, servicios, horario, zona, calendar_email, voice_id_tecnico, agent_id))
         conn.commit()
         cur.close()
         conn.close()
 
-        return {"status": "success", "message": "Asistente actualizado y sincronizado correctamente"}
+        return {"status": "success", "message": "Asistente modificado con control de disponibilidad de agenda re-activado con éxito."}
     except Exception as e:
         print(f"❌ Error en update-retell-bot: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -391,10 +400,6 @@ async def update_retell_bot_endpoint(request: Request):
 
 @app.post("/delete-retell-bot")
 async def delete_retell_bot_endpoint(request: Request):
-    """
-    Elimina por completo el agente de Retell AI, desvincula el número de teléfono 
-    para que quede libre y borra el registro permanentemente de PostgreSQL.
-    """
     try:
         data = await request.json()
         agent_id = data.get("agent_id")
@@ -402,31 +407,31 @@ async def delete_retell_bot_endpoint(request: Request):
         if not agent_id:
             raise HTTPException(status_code=400, detail="Falta el parámetro agent_id")
 
-        # 1. Obtener los detalles del agente en Retell para conocer su número y su LLM
+        print(f"🗑️ Iniciando borrado adaptativo del agente: {agent_id}")
         agent_info = retell_request("GET", f"/get-agent/{agent_id}")
         
-        if agent_info:
+        if agent_info and isinstance(agent_info, dict):
             llm_id = agent_info.get("response_engine", {}).get("llm_id")
             
-            # 2. Buscar si el número de teléfono está asignado a este agente y desvincularlo
-            numbers_res = retell_request("GET", "/v2/list-phone-numbers")
-            if numbers_res and "items" in numbers_res:
-                for phone in numbers_res["items"]:
-                    agents = phone.get("inbound_agents", [])
-                    if any(a.get("agent_id") == agent_id for a in agents):
-                        retell_request("PATCH", f"/update-phone-number/{phone['phone_number']}", {
-                            "inbound_agents": []
-                        })
-                        print(f"ℹ️ Número de teléfono {phone['phone_number']} liberado exitosamente.")
+            try:
+                numbers_res = retell_request("GET", "/v2/list-phone-numbers")
+                if numbers_res and "items" in numbers_res:
+                    for phone in numbers_res["items"]:
+                        agents = phone.get("inbound_agents", [])
+                        if any(a.get("agent_id") == agent_id for a in agents):
+                            retell_request("PATCH", f"/update-phone-number/{phone['phone_number']}", {
+                                "inbound_agents": []
+                            })
+                            print(f"ℹ️ Número de teléfono {phone['phone_number']} liberado exitosamente.")
+            except Exception as e_phone:
+                print(f"⚠️ No se pudo liberar el teléfono: {e_phone}")
 
-            # 3. Eliminar el Agente de Retell AI
             retell_request("DELETE", f"/delete-agent/{agent_id}")
-            
-            # 4. Eliminar el motor LLM asociado para no dejar basura huérfana en Retell
             if llm_id:
                 retell_request("DELETE", f"/delete-retell-llm/{llm_id}")
+        else:
+            print(f"ℹ️ El agente {agent_id} ya no existe en Retell AI. Procediendo a purgar Base de Datos directamente.")
 
-        # 5. Eliminar permanentemente el registro de la base de datos PostgreSQL
         conn = get_db_connection()
         cur = conn.cursor()
         cur.execute("DELETE FROM asistentes WHERE agent_id = %s;", (agent_id,))
@@ -434,29 +439,31 @@ async def delete_retell_bot_endpoint(request: Request):
         cur.close()
         conn.close()
 
+        print(f"✅ Registro limpiado con éxito en PostgreSQL para: {agent_id}")
         return {"status": "success", "message": "Asistente eliminado de forma permanente de todos los sistemas."}
+
     except Exception as e:
-        print(f"❌ Error en delete-retell-bot: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        print(f"❌ Error crítico en delete-retell-bot: {e}")
+        try:
+            conn = get_db_connection()
+            cur = conn.cursor()
+            cur.execute("DELETE FROM asistentes WHERE agent_id = %s;", (agent_id,))
+            conn.commit()
+            cur.close()
+            conn.close()
+            return {"status": "success", "message": "Limpieza forzada en base de datos completada."}
+        except Exception as db_err:
+            raise HTTPException(status_code=500, detail=f"Fallo total e irrecuperable en DB: {str(db_err)}")
 
 
 # ==================== ENDPOINTS GENERALES ====================
 @app.post("/book-appointment")
 @app.post("/book-appointment/")
 async def book_appointment(request: Request):
-    print("\n" + "="*40 + " [RETELL JSON COMPLETO] " + "="*40)
     try:
         raw_body = (await request.body()).decode("utf-8")
-        print(raw_body)
-        print("="*104 + "\n")
-
         data = json.loads(raw_body) if raw_body else {}
         args = data.get("args", data)
-
-        print("--- PARÁMETROS INTERNOS EXTRAÍDOS ---")
-        print(f"📅 start_time original: {args.get('start_time')}")
-        print(f"📅 end_time original:   {args.get('end_time')}")
-        print(f"📧 calendar_email:       {args.get('calendar_email')}\n")
 
         event = create_google_event(
             args.get("calendar_email"),
@@ -475,14 +482,9 @@ async def book_appointment(request: Request):
 @app.post("/verify-calendar-access")
 @app.post("/verify-calendar-access/")
 async def verify_calendar_access(request: Request):
-    print("=" * 80)
-    print("🔍 VERIFICANDO ACCESO A GOOGLE CALENDAR")
-    print("=" * 80)
     try:
         data = await request.json()
         calendar_email = data.get("calendar_email")
-        print(f"Email recibido: {calendar_email}")
-
         create_google_event(
             calendar_email,
             "🧪 Prueba de conexión - Dansu",
@@ -492,7 +494,6 @@ async def verify_calendar_access(request: Request):
         )
         return {"status": "success", "message": "Acceso verificado correctamente"}
     except Exception as e:
-        print(f"❌ Error en verify-calendar-access: {e}")
         raise HTTPException(status_code=400, detail=str(e))
 
 
@@ -507,7 +508,6 @@ async def create_retell_bot_endpoint(request: Request):
             data.get("horario"), data.get("zona"), voice_id, data.get("google_calendar_email")
         )
     except Exception as e:
-        print(f"❌ Error en create-retell-bot: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 

@@ -5,19 +5,22 @@ from zoneinfo import ZoneInfo  # Gestión nativa y precisa de zonas horarias en 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 import requests
+import psycopg2  # Conector nativo de PostgreSQL
+from psycopg2.extras import RealDictCursor
 
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
-app = FastAPI(title="Dansu Backend")
+app = FastAPI(title="Dansu Backend Completo")
 
 # ==================== VARIABLES DE ENTORNO ====================
 RETELL_API_KEY = os.getenv("RETELL_API_KEY")
 GOOGLE_CREDENTIALS_JSON = os.getenv("GOOGLE_CREDENTIALS")
+DATABASE_URL = os.getenv("DATABASE_URL")
 
-if not RETELL_API_KEY or not GOOGLE_CREDENTIALS_JSON:
-    raise Exception("Faltan variables de entorno")
+if not RETELL_API_KEY or not GOOGLE_CREDENTIALS_JSON or not DATABASE_URL:
+    raise Exception("Faltan variables de entorno críticas (RETELL_API_KEY, GOOGLE_CREDENTIALS o DATABASE_URL)")
 
 # ==================== CORS ====================
 app.add_middleware(
@@ -27,6 +30,37 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# ==================== CONEXIÓN E INICIALIZACIÓN DE POSTGRESQL ====================
+def get_db_connection():
+    return psycopg2.connect(DATABASE_URL, cursor_factory=RealDictCursor)
+
+def init_db():
+    """Crea la tabla de asistentes si no existe en PostgreSQL al arrancar"""
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS asistentes (
+            id SERIAL PRIMARY KEY,
+            nombre_negocio VARCHAR(255),
+            sector VARCHAR(255),
+            servicios TEXT,
+            horario VARCHAR(255),
+            zona VARCHAR(255),
+            google_calendar_email VARCHAR(255),
+            asistente VARCHAR(255),
+            agent_id VARCHAR(255) UNIQUE,
+            phone_number VARCHAR(255),
+            fecha_creacion TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+    """)
+    conn.commit()
+    cur.close()
+    conn.close()
+    print("✅ Base de datos PostgreSQL inicializada y lista.")
+
+# Inicializamos la estructura de la base de datos al arrancar el backend
+init_db()
 
 # ==================== GOOGLE CALENDAR ====================
 SCOPES = ['https://www.googleapis.com/auth/calendar']
@@ -156,7 +190,7 @@ def create_google_event(calendar_id: str, summary: str, start_time: str, end_tim
         raise
 
 
-# ==================== VOICE MAPPING ====================
+# ==================== VOICE MAPPING & RETELL UTILS ====================
 VOICE_MAPPING = {
     "Cimo": "11labs-Adrian", "Brynne": "11labs-Brynne", "Chloe": "11labs-Chloe",
     "Kate": "openai-Nova", "Grace": "openai-Shimmer", "Leland": "11labs-Leland",
@@ -179,17 +213,15 @@ def retell_request(method: str, endpoint: str, json_data=None):
         print(f"❌ Error Retell: {e}")
         return None
 
-
-# ==================== CREACIÓN DEL BOT (con prompt reforzado) ====================
-def create_bot_for_client(nombre_negocio, sector, servicios, horario, zona, voice_id, calendar_email):
-    ahora = datetime.now()
-    fecha_base = ahora.strftime("%A, %d de %B de %Y")
-
-    custom_prompt = f"""Eres el asistente virtual de {nombre_negocio} ({sector}).
-**INFORMACIÓN CRÍTICA QUE NUNCA DEBES OLVIDAR NI INVENTAR:**
+def build_custom_prompt(nombre_negocio, sector, servicios, horario, zona, calendar_email):
+    return f"""Eres el asistente virtual de {nombre_negocio} ({sector}).
+**INFORMACIÓN CRÍTICA QUE NUNCA DEBES OLVIRAR NI INVENTAR:**
 - El email del Google Calendar del negocio es exactamente: {calendar_email}
 - Cuando uses la herramienta `book_appointment`, pon SIEMPRE este email en `calendar_email`: {calendar_email}
 - Nunca inventes otro email.
+- Ubicación / Zona: {zona}
+- Horario de atención: {horario}
+- Servicios que ofreces: {servicios}
 
 **Flujo para agendar cita (pregunta uno por uno):**
 1. Confirma día y hora con el usuario.
@@ -199,6 +231,11 @@ def create_bot_for_client(nombre_negocio, sector, servicios, horario, zona, voic
 5. Solo después de tener los tres datos, llama a la herramienta `book_appointment`.
 
 Si la herramienta `book_appointment` te devuelve un mensaje de error indicando que el horario no está disponible, infórmale amablemente al usuario y pídele que elija otro día o tramo horario."""
+
+
+# ==================== LÓGICA DE CREACIÓN ====================
+def create_bot_for_client(nombre_negocio, sector, servicios, horario, zona, voice_id, calendar_email):
+    custom_prompt = build_custom_prompt(nombre_negocio, sector, servicios, horario, zona, calendar_email)
 
     llm_res = retell_request("POST", "/create-retell-llm", {
         "model": "gpt-4o-mini",
@@ -251,10 +288,95 @@ Si la herramienta `book_appointment` te devuelve un mensaje de error indicando q
             "inbound_agents": [{"agent_id": agent_id, "weight": 1.0}]
         })
 
+    # Guardado permanente de los datos del asistente creado en la tabla de PostgreSQL
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute("""
+        INSERT INTO asistentes (nombre_negocio, sector, servicios, horario, zona, google_calendar_email, asistente, agent_id, phone_number)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s);
+    """, (nombre_negocio, sector, servicios, horario, zona, calendar_email, voice_id, agent_id, free_number))
+    conn.commit()
+    cur.close()
+    conn.close()
+
     return {"status": "success", "agent_id": agent_id, "phone_number": free_number}
 
 
-# ==================== ENDPOINTS ====================
+# ==================== ENDPOINTS ÁREA DE CLIENTE ====================
+@app.post("/get-user-bots")
+async def get_user_bots(request: Request):
+    """Obtiene de forma filtrada los asistentes vinculados al email de un usuario"""
+    try:
+        data = await request.json()
+        email = data.get("email", "").strip()
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute("SELECT * FROM asistentes WHERE google_calendar_email = %s ORDER BY id DESC;", (email,))
+        bots = cur.fetchall()
+        cur.close()
+        conn.close()
+        return {"status": "success", "bots": bots}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/update-retell-bot")
+async def update_retell_bot_endpoint(request: Request):
+    """
+    Actualiza la configuración del asistente en PostgreSQL y sincroniza el nuevo 
+    prompt reforzado con la API de Retell AI en vivo sin provocar cortes del servicio.
+    """
+    try:
+        data = await request.json()
+        agent_id = data.get("agent_id")
+        nombre_negocio = data.get("nombre_negocio")
+        sector = data.get("sector")
+        servicios = data.get("servicios")
+        horario = data.get("horario")
+        zona = data.get("zona")
+        calendar_email = data.get("google_calendar_email")
+
+        if not agent_id:
+            raise HTTPException(status_code=400, detail="Falta el agent_id")
+
+        # 1. Recuperar la información del agente de Retell AI para obtener su llm_id
+        agent_info = retell_request("GET", f"/get-agent/{agent_id}")
+        if not agent_info or "response_engine" not in agent_info:
+            raise HTTPException(status_code=404, detail="No se encontró el agente en Retell AI")
+
+        llm_id = agent_info["response_engine"].get("llm_id")
+        if not llm_id:
+            raise HTTPException(status_code=400, detail="El agente no dispone de un motor LLM vinculado")
+
+        # 2. Generar el nuevo prompt adaptado con las modificaciones estructurales del cliente
+        nuevo_prompt = build_custom_prompt(nombre_negocio, sector, servicios, horario, zona, calendar_email)
+
+        # 3. Sincronizar y hacer Patch directo del prompt actualizado en Retell AI
+        llm_update = retell_request("PATCH", f"/update-retell-llm/{llm_id}", {
+            "general_prompt": nuevo_prompt
+        })
+        if not llm_update:
+            raise HTTPException(status_code=500, detail="Error al sincronizar cambios con el motor de Retell AI")
+
+        # 4. Actualizar el registro de manera persistente en PostgreSQL
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute("""
+            UPDATE asistentes 
+            SET nombre_negocio = %s, sector = %s, servicios = %s, horario = %s, zona = %s, google_calendar_email = %s
+            WHERE agent_id = %s;
+        """, (nombre_negocio, sector, servicios, horario, zona, calendar_email, agent_id))
+        conn.commit()
+        cur.close()
+        conn.close()
+
+        return {"status": "success", "message": "Asistente actualizado y sincronizado correctamente"}
+    except Exception as e:
+        print(f"❌ Error en update-retell-bot: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ==================== ENDPOINTS GENERALES ====================
 @app.post("/book-appointment")
 @app.post("/book-appointment/")
 async def book_appointment(request: Request):
@@ -327,7 +449,7 @@ async def create_retell_bot_endpoint(request: Request):
 
 @app.get("/")
 async def root():
-    return {"status": "Dansu Backend OK"}
+    return {"status": "Dansu Backend Completo OK"}
 
 
 if __name__ == "__main__":

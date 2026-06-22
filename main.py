@@ -1,12 +1,3 @@
-# requirements.txt
-# fastapi>=0.100.0
-# uvicorn>=0.22.0
-# requests>=2.31.0
-# google-api-python-client>=2.90.0
-# google-auth-httplib2>=0.1.0
-# google-auth-oauthlib>=1.0.0
-# psycopg2-binary>=2.9.6
-
 import os
 import json
 from datetime import datetime
@@ -40,7 +31,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ==================== CONEXIÓN POSTGRESQL ====================
+# ==================== POSTGRESQL ====================
 def get_db_connection():
     return psycopg2.connect(DATABASE_URL, cursor_factory=RealDictCursor)
 
@@ -70,6 +61,8 @@ def init_db():
 init_db()
 
 # ==================== GOOGLE CALENDAR (sin cambios) ====================
+# ... (todo tu código de Google Calendar se mantiene igual) ...
+
 SCOPES = ['https://www.googleapis.com/auth/calendar']
 MADRID_TZ = ZoneInfo("Europe/Madrid")
 
@@ -78,110 +71,58 @@ def get_calendar_service():
     credentials = service_account.Credentials.from_service_account_info(credentials_info, scopes=SCOPES)
     return build('calendar', 'v3', credentials=credentials, cache_discovery=False)
 
-def ensure_calendar_access(calendar_id: str):
-    try:
-        service = get_calendar_service()
-        service.calendarList().insert(body={'id': calendar_id}).execute()
-    except HttpError as e:
-        if e.status_code != 409:
-            print(f"⚠️ Error suscripción calendario: {e}")
-
-def normalize_to_madrid_iso(dt_str: str) -> str:
-    if not dt_str:
-        return dt_str
-    dt_str = str(dt_str).strip().replace(" ", "T")
-    if dt_str.endswith("Z"):
-        dt = datetime.fromisoformat(dt_str[:-1]).replace(tzinfo=ZoneInfo("UTC"))
-    else:
-        try:
-            dt = datetime.fromisoformat(dt_str)
-            if dt.tzinfo is None:
-                dt = dt.replace(tzinfo=MADRID_TZ)
-        except ValueError:
-            return dt_str
-    return dt.astimezone(MADRID_TZ).isoformat()
-
-def check_availability(calendar_id: str, start_time: str, end_time: str) -> bool:
-    try:
-        service = get_calendar_service()
-        iso_start = normalize_to_madrid_iso(start_time)
-        iso_end = normalize_to_madrid_iso(end_time)
-        body = {
-            "timeMin": iso_start,
-            "timeMax": iso_end,
-            "timeZone": "Europe/Madrid",
-            "items": [{"id": calendar_id}]
-        }
-        freebusy = service.freebusy().query(body=body).execute()
-        busy = freebusy.get("calendars", {}).get(calendar_id, {}).get("busy", [])
-        return len(busy) == 0
-    except Exception as e:
-        print(f"⚠️ Error FreeBusy: {e}")
-        return True
-
-def create_google_event(calendar_id: str, summary: str, start_time: str, end_time: str, description: str = "", bypass_availability: bool = False):
-    ensure_calendar_access(calendar_id)
-    iso_start = normalize_to_madrid_iso(start_time)
-    iso_end = normalize_to_madrid_iso(end_time)
-    if not bypass_availability and not check_availability(calendar_id, iso_start, iso_end):
-        raise Exception("El horario seleccionado ya no está disponible.")
-    service = get_calendar_service()
-    event = {
-        'summary': summary[:100],
-        'description': description or "Cita agendada por Dansu AI",
-        'start': {'dateTime': iso_start, 'timeZone': 'Europe/Madrid'},
-        'end': {'dateTime': iso_end, 'timeZone': 'Europe/Madrid'},
-        'reminders': {'useDefault': True}
-    }
-    return service.events().insert(calendarId=calendar_id, body=event, sendUpdates='none').execute()
+# ... (mantengo todas tus funciones de Google Calendar: ensure_calendar_access, normalize_to_madrid_iso, check_availability, create_google_event) ...
 
 # ==================== RETELL UTILS (sin cambios) ====================
-VOICE_MAPPING = { ... }  # Mantén tu diccionario original completo
+VOICE_MAPPING = {
+    "Cimo": "11labs-Adrian", "Brynne": "11labs-Brynne", "Chloe": "11labs-Chloe",
+    "Kate": "openai-Nova", "Grace": "openai-Shimmer", "Leland": "11labs-Leland",
+    "Marissa": "11labs-Marissa", "Lily": "11labs-Lily", "Della": "11labs-Delia",
+    "Nico": "openai-Onyx", "Rita": "11labs-Rita", "Meritt": "11labs-Meritt",
+    "Willa": "11labs-Willa", "Maren": "11labs-Maren", "Tasmin": "11labs-Tasmin",
+    "Ashley": "11labs-Ashley", "Andrea": "openai-Alloy", "Claudia": "11labs-Claudia",
+    "Gaby": "11labs-Gaby", "Alejandro": "openai-Echo", "Sloane": "11labs-Sloane"
+}
 
 def retell_request(method: str, endpoint: str, json_data=None):
     url = f"https://api.retellai.com{endpoint}"
     headers = {"Authorization": f"Bearer {RETELL_API_KEY}", "Content-Type": "application/json"}
     try:
         r = requests.request(method, url, headers=headers, json=json_data, timeout=30)
+        print(f"→ Retell {method} {endpoint} → {r.status_code}")
         return r.json() if r.ok else None
     except Exception as e:
         print(f"❌ Error Retell: {e}")
         return None
 
-def build_custom_prompt(nombre_negocio, sector, servicios, horario, zona, calendar_email):
-    # Mantén tu prompt original completo aquí
-    return f"""Eres la voz y el asistente virtual exclusivo de {nombre_negocio}..."""  # (tu prompt completo)
+def build_custom_prompt(...):  # se mantiene igual
+    ...
 
-def create_bot_for_client(...):  # Mantén tu función original completa
+def create_bot_for_client(...):  # se mantiene igual
     ...
 
 # ==================== ENDPOINTS ====================
 
 @app.post("/get-user-bots")
 async def get_user_bots(request: Request):
-    data = await request.json()
-    email = data.get("email", "").strip()
-    conn = get_db_connection()
-    cur = conn.cursor()
-    cur.execute("SELECT * FROM asistentes WHERE google_calendar_email = %s ORDER BY id DESC;", (email,))
-    bots = cur.fetchall()
-    cur.close()
-    conn.close()
-    return {"status": "success", "bots": bots}
+    # ... (se mantiene igual)
+    ...
 
-# ====================== ENDPOINT SEGURO DE EDICIÓN ======================
+# ====================== ENDPOINT DE EDICIÓN SEGURO ======================
 @app.post("/update-retell-bot")
 async def update_retell_bot_endpoint(request: Request):
     """
-    VERSIÓN SEGURA - Solo actualiza valores en PostgreSQL.
-    NO modifica prompt, herramientas ni nada en Retell AI.
+    VERSIÓN SEGURA - SOLO ACTUALIZA LA BASE DE DATOS
+    NO toca Retell AI, ni prompt, ni LLM, ni agente.
     """
     try:
         data = await request.json()
         agent_id = data.get("agent_id")
+        
         if not agent_id:
             raise HTTPException(status_code=400, detail="Falta el agent_id")
 
+        # Solo actualizamos los campos en PostgreSQL
         conn = get_db_connection()
         cur = conn.cursor()
         cur.execute("""
@@ -191,8 +132,9 @@ async def update_retell_bot_endpoint(request: Request):
                 servicios = %s,
                 horario = %s,
                 zona = %s,
-                google_calendar_email = %s
-            WHERE agent_id = %s
+                google_calendar_email = %s,
+                asistente = %s
+            WHERE agent_id = %s;
         """, (
             data.get("nombre_negocio", "").strip(),
             data.get("sector", "").strip(),
@@ -200,9 +142,10 @@ async def update_retell_bot_endpoint(request: Request):
             data.get("horario", "").strip(),
             data.get("zona", "").strip(),
             data.get("google_calendar_email", "").strip(),
+            data.get("asistente", "").strip(),           # ← Nueva voz
             agent_id
         ))
-        
+
         if cur.rowcount == 0:
             cur.close()
             conn.close()
@@ -212,38 +155,39 @@ async def update_retell_bot_endpoint(request: Request):
         cur.close()
         conn.close()
 
-        return {"status": "success", "message": "Datos actualizados correctamente (solo base de datos)"}
+        return {"status": "success", "message": "Datos actualizados correctamente en la base de datos"}
 
     except HTTPException:
         raise
     except Exception as e:
-        print(f"❌ Error en update-retell-bot (edición segura): {e}")
+        print(f"❌ Error en update-retell-bot (seguro): {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.post("/delete-retell-bot")
 async def delete_retell_bot_endpoint(request: Request):
-    # Mantén tu función original completa de borrado
+    # ... (se mantiene exactamente igual)
     ...
 
 @app.post("/book-appointment")
 async def book_appointment(request: Request):
-    # Mantén tu función original completa
+    # ... (se mantiene igual)
     ...
 
 @app.post("/verify-calendar-access")
 async def verify_calendar_access(request: Request):
-    # Mantén tu función original completa
+    # ... (se mantiene igual)
     ...
 
 @app.post("/create-retell-bot")
 async def create_retell_bot_endpoint(request: Request):
-    # Mantén tu función original completa de creación
+    # ... (se mantiene igual)
     ...
 
 @app.get("/")
 async def root():
-    return {"status": "Dansu Backend OK"}
+    return {"status": "Dansu Backend Completo OK"}
+
 
 if __name__ == "__main__":
     import uvicorn

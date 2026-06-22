@@ -336,13 +336,12 @@ async def get_user_bots(request: Request):
 @app.post("/update-retell-bot")
 async def update_retell_bot_endpoint(request: Request):
     """
-    Actualiza la configuración del asistente en PostgreSQL, cambia la voz del carrusel 
-    si se solicita y sincroniza en caliente el prompt con Retell AI.
+    Actualiza la configuración del asistente en PostgreSQL y sincroniza el nuevo 
+    prompt reforzado con la API de Retell AI en vivo sin provocar cortes del servicio.
     """
     try:
         data = await request.json()
         agent_id = data.get("agent_id")
-        nombre_voz_ui = data.get("asistente") # Nombre amigable de la voz (ej: Cimo, Brynne)
         nombre_negocio = data.get("nombre_negocio")
         sector = data.get("sector")
         servicios = data.get("servicios")
@@ -362,28 +361,24 @@ async def update_retell_bot_endpoint(request: Request):
         if not llm_id:
             raise HTTPException(status_code=400, detail="El agente no dispone de un motor LLM vinculado")
 
-        # 2. Sincronizar cambios en el prompt dinámico
+        # 2. Generar el nuevo prompt adaptado con las modificaciones estructurales del cliente
         nuevo_prompt = build_custom_prompt(nombre_negocio, sector, servicios, horario, zona, calendar_email)
+
+        # 3. Sincronizar y hacer Patch directo del prompt actualizado en Retell AI
         llm_update = retell_request("PATCH", f"/update-retell-llm/{llm_id}", {
             "general_prompt": nuevo_prompt
         })
         if not llm_update:
-            raise HTTPException(status_code=500, detail="Error al sincronizar cambios con el motor LLM de Retell AI")
-
-        # 3. Sincronizar el cambio de voz del carrusel en Retell AI (si se modificó)
-        voice_id_real = VOICE_MAPPING.get(nombre_voz_ui, agent_info.get("voice_id"))
-        agent_update = retell_request("PATCH", f"/update-agent/{agent_id}", {
-            "voice_id": voice_id_real
-        })
+            raise HTTPException(status_code=500, detail="Error al sincronizar cambios con el motor de Retell AI")
 
         # 4. Actualizar el registro de manera persistente en PostgreSQL
         conn = get_db_connection()
         cur = conn.cursor()
         cur.execute("""
             UPDATE asistentes 
-            SET nombre_negocio = %s, sector = %s, servicios = %s, horario = %s, zona = %s, google_calendar_email = %s, asistente = %s
+            SET nombre_negocio = %s, sector = %s, servicios = %s, horario = %s, zona = %s, google_calendar_email = %s
             WHERE agent_id = %s;
-        """, (nombre_negocio, sector, servicios, horario, zona, calendar_email, nombre_voz_ui, agent_id))
+        """, (nombre_negocio, sector, servicios, horario, zona, calendar_email, agent_id))
         conn.commit()
         cur.close()
         conn.close()
@@ -519,6 +514,8 @@ async def create_retell_bot_endpoint(request: Request):
 @app.get("/")
 async def root():
     return {"status": "Dansu Backend Completo OK"}
+
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)

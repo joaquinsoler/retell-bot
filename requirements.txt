@@ -1,7 +1,23 @@
 fastapi>=0.100.0
 uvicorn>=0.22.0
 requests>=2.31.0
+
+# Google Calendar
 google-api-python-client>=2.90.0
 google-auth-httplib2>=0.1.0
 google-auth-oauthlib>=1.0.0
+
+# Base de datos
 psycopg2-binary>=2.9.6
+
+# ====================== NUEVAS DEPENDENCIAS ======================
+
+# Autenticación JWT
+python-jose[cryptography]>=3.3.0
+
+# Envío de emails con Resend
+resend>=2.0.0
+
+# Opcional pero recomendado (mejora FastAPI)
+pydantic>=2.0.0
+python-multipart>=0.0.6

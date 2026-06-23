@@ -126,7 +126,7 @@ def init_db():
 
 init_db()
 
-# ==================== SERVICIO DE ENVÍO BREVO (SMTP) CON DIAGNÓSTICO DETALLADO ====================
+# ==================== SERVICIO DE ENVÍO BREVO (SMTP) ====================
 def enviar_correo_brevo(destinatario: str, enlace_magico: str):
     """Envía el email del enlace mágico utilizando el servidor SMTP Relay de Brevo con manejo exhaustivo de errores"""
     logger.info(f"Iniciando intento de envío SMTP vía Brevo hacia: {destinatario}")
@@ -164,13 +164,7 @@ def enviar_correo_brevo(destinatario: str, enlace_magico: str):
 
         logger.info("Conectando al host smtp-relay.brevo.com en el puerto 587...")
         server = smtplib.SMTP('smtp-relay.brevo.com', 587, timeout=15)
-        
-        server.set_debuglevel(1)
-        
-        logger.info("Enviando comando EHLO/HELO...")
         server.ehlo()
-        
-        logger.info("Iniciando TLS seguro (STARTTLS)...")
         server.starttls()
         server.ehlo()
         
@@ -181,38 +175,24 @@ def enviar_correo_brevo(destinatario: str, enlace_magico: str):
         logger.info(f"Enviando correo desde {BREVO_SMTP_USER} hacia {destinatario}...")
         server.sendmail(BREVO_SMTP_USER, destinatario, msg.as_string())
         
-        logger.info("Cerrando conexión SMTP con el servidor...")
         server.quit()
-        
         logger.info(f"📧 Enlace mágico enviado con éxito rotundo a {destinatario}")
         return True
 
-    except smtplib.SMTPAuthenticationError:
-        logger.error("❌ ERROR DE AUTENTICACIÓN SMTP: El usuario o la contraseña de Brevo SMTP Relay son incorrectos. "
-                     "Verifica que estés usando la clave SMTP generada en Brevo y no la contraseña normal de login de la plataforma web.", exc_info=True)
-        return False
-    except smtplib.SMTPConnectError:
-        logger.error("❌ ERROR DE CONEXIÓN SMTP: No se pudo establecer conexión con smtp-relay.brevo.com en el puerto 587. "
-                     "Verifica si tu entorno de red o el hosting (Render) experimenta restricciones de salida en dicho puerto.", exc_info=True)
-        return False
-    except smtplib.SMTPServerDisconnected:
-        logger.error("❌ ERROR SMTP: El servidor remoto se desconectó inesperadamente durante la transacción de envío.", exc_info=True)
-        return False
     except Exception as e:
-        logger.error(f"❌ ERROR INESPERADO EN ENVÍO BREVO SMTP: {str(e)}", exc_info=True)
+        logger.error(f"❌ ERROR EN ENVÍO BREVO SMTP: {str(e)}", exc_info=True)
         return False
 
 # ==================== LÓGICA DE GOOGLE CALENDAR ====================
 def get_calendar_service():
     """Inicializa el cliente de Google Calendar usando la cuenta de servicio"""
     try:
-        logger.info("Inicializando cliente de la API de Google Calendar...")
         creds_dict = json.loads(GOOGLE_CREDENTIALS_JSON)
         scopes = ['https://www.googleapis.com/auth/calendar']
         creds = service_account.Credentials.from_service_account_info(creds_dict, scopes=scopes)
         return build('calendar', 'v3', credentials=creds)
     except Exception as e:
-        logger.error(f"❌ Error al autenticar con Google Calendar credentials: {str(e)}", exc_info=True)
+        logger.error(f"❌ Error al autenticar con Google Calendar: {str(e)}", exc_info=True)
         raise e
 
 def create_google_event(calendar_id, summary, start_iso, end_iso, bypass_availability=False):
@@ -231,26 +211,64 @@ def create_google_event(calendar_id, summary, start_iso, end_iso, bypass_availab
             free_busy_res = service.freebusy().query(body=body).execute()
             busy_list = free_busy_res.get('calendars', {}).get(calendar_id, {}).get('busy', [])
             if len(busy_list) > 0:
-                logger.warning(f"Conflicto de agenda detectado en el calendario: {calendar_id}")
                 raise Exception("El hueco seleccionado ya se encuentra ocupado en tu calendario.")
-            logger.info("El slot de tiempo consultado está completamente libre.")
         except HttpError as err:
-            logger.error(f"Error HTTP de Google en FreeBusy: {err.resp.status} - {err.content}", exc_info=True)
             if err.resp.status == 404:
                 raise Exception(f"No se ha encontrado el calendario '{calendar_id}'. Verifica que la cuenta de servicio tenga acceso.")
             raise err
 
-    logger.info(f"Insertando evento '{summary}' en el calendario...")
     event = {
         'summary': summary,
         'start': {'dateTime': start_iso},
         'end': {'dateTime': end_iso},
     }
-    resultado_evento = service.events().insert(calendarId=calendar_id, body=event).execute()
-    logger.info(f"Evento insertado con éxito. ID de Google Event: {resultado_evento.get('id')}")
-    return resultado_evento
+    return service.events().insert(calendarId=calendar_id, body=event).execute()
 
-# ==================== INTEGRACIÓN DE AGENTES (RETELL AI CORREGIDO) ====================
+# ==================== LÓGICA DE ASIGNACIÓN DINÁMICA DE TELÉFONO LIBRE ====================
+def auto_assign_free_phone_number(agent_id: str):
+    """Busca en Retell AI el primer número de teléfono disponible (libre) y le asocia este agent_id"""
+    logger.info("Buscando números de teléfono disponibles en la cuenta de Retell AI...")
+    url_list = "https://api.retellai.com/list-phone-numbers"
+    headers = {"Authorization": f"Bearer {RETELL_API_KEY}"}
+    
+    try:
+        res = requests.get(url_list, headers=headers)
+        if res.status_code != 200:
+            logger.error(f"No se pudo listar los números de teléfono de Retell: {res.text}")
+            return None
+        
+        phone_numbers = res.json()
+        numero_libre = None
+        
+        # Recorrer la lista para encontrar uno que no tenga bound_agent_id asociado
+        for phone in phone_numbers:
+            if not phone.get("bound_agent_id"):
+                numero_libre = phone.get("phone_number")
+                logger.info(f"¡Número libre detectado en tu cuenta!: {numero_libre}")
+                break
+                
+        if numero_libre:
+            # Asociar el número de teléfono encontrado con el nuevo agent_id creado
+            logger.info(f"Vinculando el número {numero_libre} al Agent ID {agent_id}...")
+            url_bind = f"https://api.retellai.com/update-phone-number/{numero_libre}"
+            payload = {"bound_agent_id": agent_id}
+            
+            bind_res = requests.patch(url_bind, json=payload, headers=headers)
+            if bind_res.status_code == 200:
+                logger.info(f"✅ Vínculo exitoso. El asistente ahora responde en el número: {numero_libre}")
+                return numero_libre
+            else:
+                logger.error(f"Error al intentar vincular el número en Retell AI: {bind_res.text}")
+                return None
+        else:
+            logger.warning("⚠️ No se encontró ningún número de teléfono libre/disponible en tu panel de Retell AI.")
+            return None
+            
+    except Exception as e:
+        logger.error(f"Excepción en el proceso de auto-asignación de teléfono: {str(e)}", exc_info=True)
+        return None
+
+# ==================== INTEGRACIÓN DE AGENTES (RETELL AI) ====================
 def create_bot_for_client(nombre_negocio, sector, servicios, horario, zona, voice_id):
     """Crea un agente conversacional nativo en Retell AI inyectándole su prompt adaptado (API v2 actual)"""
     logger.info(f"Solicitando creación de agente en Retell AI para el negocio: {nombre_negocio}")
@@ -267,7 +285,6 @@ def create_bot_for_client(nombre_negocio, sector, servicios, horario, zona, voic
         f"y agendar de forma autónoma sus citas en los huecos disponibles."
     )
     
-    # CORRECCIÓN: Se envuelve la configuración del LLM en el parámetro obligatorio 'response_engine'
     payload = {
         "agent_name": f"Bot-{nombre_negocio.replace(' ', '_')}",
         "voice_id": voice_id,
@@ -294,32 +311,26 @@ def create_bot_for_client(nombre_negocio, sector, servicios, horario, zona, voic
 
 @app.post("/request-magic-link")
 async def request_magic_link(request: Request):
-    """Genera el token temporal único y dispara el correo por Brevo si el usuario existe"""
     logger.info("Petición entrante en endpoint POST /request-magic-link")
     try:
         data = await request.json()
         email = data.get("email", "").strip().lower()
-        logger.info(f"Correo electrónico solicitado para login: '{email}'")
         
         if not email:
-            logger.warning("Petición rechazada: El campo email está vacío.")
             raise HTTPException(status_code=400, detail="El email es obligatorio")
 
-        logger.info(f"Buscando si el usuario '{email}' existe en la tabla de asistentes...")
         conn = get_db_connection()
         cur = conn.cursor()
         cur.execute("SELECT 1 FROM asistentes WHERE google_calendar_email = %s LIMIT 1;", (email,))
         user_exists = cur.fetchone()
         
         if not user_exists:
-            logger.warning(f"El correo '{email}' no posee registros asociados en la base de datos.")
             cur.close()
             conn.close()
             return {"status": "success", "message": "Si tu correo electrónico está registrado, recibirás un enlace mágico de acceso en unos instantes."}
 
         token = str(uuid.uuid4())
         expiracion = datetime.utcnow() + timedelta(minutes=15)
-        logger.info(f"Usuario validado. Token único generado: {token} (Expiración UTC: {expiracion})")
 
         cur.execute(
             "INSERT INTO magic_tokens (email, token, expiracion) VALUES (%s, %s, %s);",
@@ -328,36 +339,27 @@ async def request_magic_link(request: Request):
         conn.commit()
         cur.close()
         conn.close()
-        logger.info("Token registrado correctamente en la tabla 'magic_tokens'.")
 
         enlace_magico = f"{FRONTEND_URL}?token={token}"
-        logger.info(f"Enlace mágico final construido: {enlace_magico}")
-        
         envio_ok = enviar_correo_brevo(email, enlace_magico)
         if not envio_ok:
-            logger.error("El backend de Brevo SMTP ha fallado en la ejecución del envío.")
             raise HTTPException(status_code=500, detail="Error interno del sistema al intentar enviar el correo electrónico vía Brevo.")
 
-        logger.info(f"Proceso finalizado con éxito para {email}.")
         return {"status": "success", "message": "Enlace de acceso enviado correctamente. Por favor, revisa tu bandeja de entrada."}
     except HTTPException as he:
         raise he
     except Exception as e:
-        logger.error(f"❌ Error excepcional en endpoint request-magic-link: {str(e)}", exc_info=True)
+        logger.error(f"❌ Error en request-magic-link: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.post("/verify-magic-token")
 async def verify_magic_token(request: Request):
-    """Valida el token de la URL, lo inhabilita inmediatamente y devuelve el listado de bots"""
-    logger.info("Petición entrante en endpoint POST /verify-magic-token")
     try:
         data = await request.json()
         token = data.get("token", "").strip()
-        logger.info(f"Validando token recibido del frontend: '{token}'")
 
         if not token:
-            logger.warning("Petición rechazada: Token no suministrado por el cliente.")
             raise HTTPException(status_code=400, detail="Token no suministrado")
 
         conn = get_db_connection()
@@ -370,24 +372,18 @@ async def verify_magic_token(request: Request):
         token_record = cur.fetchone()
 
         if not token_record:
-            logger.warning(f"El token '{token}' no existe, ya fue consumido o es totalmente inválido.")
             cur.close()
             conn.close()
             raise HTTPException(status_code=401, detail="El enlace mágico no es válido o ya ha sido utilizado con anterioridad.")
 
         if datetime.utcnow() > token_record["expiracion"]:
-            logger.warning(f"El token '{token}' ha caducado. Expiración: {token_record['expiracion']}, Hora actual UTC: {datetime.utcnow()}")
             cur.close()
             conn.close()
-            raise HTTPException(status_code=401, detail="El enlace mágico ha expirado (el tiempo máximo de validez es de 15 minutos).")
+            raise HTTPException(status_code=401, detail="El enlace mágico ha expirado.")
 
         email_usuario = token_record["email"]
-        logger.info(f"Token legítimo. Propietario identificado: {email_usuario}")
-
         cur.execute("UPDATE magic_tokens SET utilizado = TRUE WHERE token = %s;", (token,))
-        logger.info(f"Token '{token}' marcado como UTILIZADO en base de datos para prevenir reutilizaciones.")
         
-        logger.info(f"Cargando asistentes vinculados a: {email_usuario}")
         cur.execute("SELECT * FROM asistentes WHERE google_calendar_email = %s ORDER BY id DESC;", (email_usuario,))
         bots = cur.fetchall()
         
@@ -395,12 +391,11 @@ async def verify_magic_token(request: Request):
         cur.close()
         conn.close()
         
-        logger.info(f"Devolviendo {len(bots)} asistentes encontrados para el usuario.")
         return {"status": "success", "email": email_usuario, "bots": bots}
     except HTTPException as he:
         raise he
     except Exception as e:
-        logger.error(f"❌ Error excepcional en endpoint verify-magic-token: {str(e)}", exc_info=True)
+        logger.error(f"❌ Error en verify-magic-token: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
 # ==================== RESTO DE ENDPOINTS DE NEGOCIO ORIGINALES ====================
@@ -408,13 +403,9 @@ async def verify_magic_token(request: Request):
 @app.post("/verify-calendar-access")
 @app.post("/verify-calendar-access/")
 async def verify_calendar_access(request: Request):
-    """Endpoint que invoca Wix para comprobar la conexión inicial con el calendario"""
-    logger.info("Petición entrante en /verify-calendar-access")
     try:
         data = await request.json()
         calendar_email = data.get("calendar_email")
-        logger.info(f"Verificando accesibilidad del calendario para: {calendar_email}")
-        
         create_google_event(
             calendar_email,
             "🧪 Prueba de conexión - Dansu",
@@ -424,20 +415,18 @@ async def verify_calendar_access(request: Request):
         )
         return {"status": "success", "message": "Acceso verificado correctamente"}
     except Exception as e:
-        logger.error(f"Fallo de verificación en /verify-calendar-access: {str(e)}", exc_info=True)
         raise HTTPException(status_code=400, detail=str(e))
 
 
 @app.post("/create-retell-bot")
 async def create_retell_bot_endpoint(request: Request):
-    """Crea y persiste un nuevo bot tras procesarse la suscripción"""
+    """Crea el bot en Retell AI, busca y auto-asigna un número libre en la cuenta y persiste en BD"""
     logger.info("Petición entrante en /create-retell-bot")
     try:
         payload = await request.json()
         data = payload if isinstance(payload, dict) else payload.get("data", payload)
         
         voice_id = VOICE_MAPPING.get(data.get("asistente"), "openai-Alloy")
-        logger.info(f"Configurando voz para el nuevo bot: {data.get('asistente')} -> ID: {voice_id}")
         
         # 1. Registrar agente en la API de Retell
         retell_agent = create_bot_for_client(
@@ -446,10 +435,15 @@ async def create_retell_bot_endpoint(request: Request):
         )
         
         agent_id = retell_agent.get("agent_id")
-        logger.info(f"Bot desplegado en Retell con AgentID asignado: {agent_id}")
+        
+        # LÓGICA CORREGIDA: Llamar a la función para buscar y enlazar dinámicamente un número libre en Retell
+        assigned_phone = auto_assign_free_phone_number(agent_id)
+        
+        # Si no hay ningún número libre en tu cuenta de Retell, usamos el fallback por defecto
+        final_phone_number = assigned_phone or "+34900000000"
         
         # 2. Guardar en la Base de Datos PostgreSQL
-        logger.info("Guardando registro del asistente en PostgreSQL...")
+        logger.info("Guardando registro final del asistente en PostgreSQL...")
         conn = get_db_connection()
         cur = conn.cursor()
         cur.execute("""
@@ -459,15 +453,15 @@ async def create_retell_bot_endpoint(request: Request):
         """, (
             data.get("nombre_negocio"), data.get("sector"), data.get("servicios"),
             data.get("horario"), data.get("zona"), data.get("google_calendar_email"),
-            data.get("asistente"), agent_id, "+34900000000"
+            data.get("asistente"), agent_id, final_phone_number
         ))
         
         conn.commit()
         cur.close()
         conn.close()
-        logger.info("Asistente persistido exitosamente en base de datos.")
+        logger.info("Asistente persistido exitosamente con su número libre asignado.")
         
-        return {"status": "success", "agent_id": agent_id, "message": "Asistente virtual creado e indexado correctamente."}
+        return {"status": "success", "agent_id": agent_id, "phone_number": final_phone_number, "message": "Asistente virtual creado y número asignado con éxito."}
     except Exception as e:
         logger.error(f"❌ Error crítico en /create-retell-bot: {str(e)}", exc_info=True)
         return {"code": "ERROR", "message": str(e)}
@@ -475,20 +469,15 @@ async def create_retell_bot_endpoint(request: Request):
 
 @app.post("/update-retell-bot")
 async def update_retell_bot(request: Request):
-    """Actualiza la configuración de un bot existente en BD y actualiza su prompt/voz en Retell AI"""
-    logger.info("Petición entrante en /update-retell-bot")
     try:
         data = await request.json()
         agent_id = data.get("agent_id")
-        logger.info(f"Solicitud de reconfiguración para AgentID: '{agent_id}'")
         
         if not agent_id:
-            logger.warning("Falta parámetro agent_id")
             raise HTTPException(status_code=400, detail="Falta el parámetro 'agent_id' obligatorio.")
 
         voice_id = VOICE_MAPPING.get(data.get("asistente"), "openai-Alloy")
         
-        # 1. Actualizar Datos del Agente en la API de Retell adaptado al response_engine obligatorio
         url = f"https://api.retellai.com/update-agent/{agent_id}"
         headers = {
             "Authorization": f"Bearer {RETELL_API_KEY}",
@@ -511,14 +500,10 @@ async def update_retell_bot(request: Request):
             "system_prompt": nuevo_prompt
         }
         
-        logger.info(f"Enviando solicitud PATCH a Retell AI para el bot {agent_id}...")
         retell_res = requests.patch(url, json=payload, headers=headers)
         if retell_res.status_code != 200:
-            logger.error(f"Fallo al actualizar en servidores de Retell: {retell_res.text}")
             raise HTTPException(status_code=500, detail=f"Error actualizando en Retell: {retell_res.text}")
 
-        # 2. Actualizar registros locales en PostgreSQL
-        logger.info("Actualizando metadatos locales en la base de datos...")
         conn = get_db_connection()
         cur = conn.cursor()
         cur.execute("""
@@ -533,7 +518,6 @@ async def update_retell_bot(request: Request):
         conn.commit()
         cur.close()
         conn.close()
-        logger.info(f"Sincronización de actualización completada para {agent_id}.")
         
         return {"status": "success", "message": "El asistente virtual ha sido actualizado con éxito."}
     except HTTPException as he:
@@ -545,35 +529,27 @@ async def update_retell_bot(request: Request):
 
 @app.post("/delete-retell-bot")
 async def delete_retell_bot(request: Request):
-    """Elimina permanentemente el bot de Retell AI y de la base de datos local"""
-    logger.info("Petición entrante en /delete-retell-bot")
     try:
         data = await request.json()
         agent_id = data.get("agent_id")
-        logger.info(f"Solicitud de baja e irreversible destrucción del bot: {agent_id}")
         
         if not agent_id:
-            logger.warning("Falta parámetro agent_id")
             raise HTTPException(status_code=400, detail="Falta el parámetro 'agent_id'.")
 
         url = f"https://api.retellai.com/delete-agent/{agent_id}"
         headers = {"Authorization": f"Bearer {RETELL_API_KEY}"}
         
-        logger.info(f"Invocando DELETE en la API de Retell para {agent_id}...")
         retell_res = requests.delete(url, headers=headers)
         
         if retell_res.status_code not in [200, 204, 404]:
-            logger.error(f"Error devuelto por la API de Retell al borrar: {retell_res.status_code} - {retell_res.text}")
             raise HTTPException(status_code=500, detail=f"Error al eliminar en Retell: {retell_res.text}")
 
-        logger.info(f"Borrando el registro local de la tabla asistentes para agent_id: {agent_id}")
         conn = get_db_connection()
         cur = conn.cursor()
         cur.execute("DELETE FROM asistentes WHERE agent_id = %s;", (agent_id,))
         conn.commit()
         cur.close()
         conn.close()
-        logger.info(f"Bot {agent_id} purgado de forma exitosa del sistema.")
         
         return {"status": "success", "message": "Asistente eliminado de todos los entornos."}
     except HTTPException as he:
@@ -584,5 +560,4 @@ async def delete_retell_bot(request: Request):
 
 if __name__ == "__main__":
     import uvicorn
-    logger.info("Iniciando Uvicorn de forma local...")
     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)

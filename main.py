@@ -2,7 +2,7 @@ import os
 import json
 import uuid
 import smtplib
-import logging  # <-- NUEVO: Para un manejo profesional de logs
+import logging
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from datetime import datetime, timedelta
@@ -132,12 +132,10 @@ def enviar_correo_brevo(destinatario: str, enlace_magico: str):
     logger.info(f"Iniciando intento de envío SMTP vía Brevo hacia: {destinatario}")
     
     try:
-        # 1. Validación inicial de credenciales locales
         if not BREVO_SMTP_USER or not BREVO_SMTP_PASSWORD:
             logger.error("SMTP abortado: BREVO_SMTP_USER o BREVO_SMTP_PASSWORD están vacíos en la ejecución.")
             return False
 
-        # 2. Construcción de la estructura del correo MIME
         logger.info("Construyendo el mensaje MIME (Multi-part HTML)...")
         msg = MIMEMultipart()
         msg['From'] = BREVO_SMTP_USER
@@ -164,11 +162,9 @@ def enviar_correo_brevo(destinatario: str, enlace_magico: str):
         msg.attach(MIMEText(html, 'html'))
         logger.info("Mensaje MIME ensamblado correctamente.")
 
-        # 3. Establecer conexión con el servidor de Brevo
         logger.info("Conectando al host smtp-relay.brevo.com en el puerto 587...")
         server = smtplib.SMTP('smtp-relay.brevo.com', 587, timeout=15)
         
-        # Opcional para depuración extrema (vuelca el protocolo SMTP crudo en la consola)
         server.set_debuglevel(1)
         
         logger.info("Enviando comando EHLO/HELO...")
@@ -178,12 +174,10 @@ def enviar_correo_brevo(destinatario: str, enlace_magico: str):
         server.starttls()
         server.ehlo()
         
-        # 4. Proceso de login
         logger.info(f"Intentando autenticación SMTP con el usuario: {BREVO_SMTP_USER}")
         server.login(BREVO_SMTP_USER, BREVO_SMTP_PASSWORD)
         logger.info("Autenticación SMTP de Brevo aceptada de forma correcta.")
         
-        # 5. Envío del flujo de datos
         logger.info(f"Enviando correo desde {BREVO_SMTP_USER} hacia {destinatario}...")
         server.sendmail(BREVO_SMTP_USER, destinatario, msg.as_string())
         
@@ -256,9 +250,9 @@ def create_google_event(calendar_id, summary, start_iso, end_iso, bypass_availab
     logger.info(f"Evento insertado con éxito. ID de Google Event: {resultado_evento.get('id')}")
     return resultado_evento
 
-# ==================== INTEGRACIÓN DE AGENTES (RETELL AI) ====================
+# ==================== INTEGRACIÓN DE AGENTES (RETELL AI CORREGIDO) ====================
 def create_bot_for_client(nombre_negocio, sector, servicios, horario, zona, voice_id):
-    """Crea un agente conversacional nativo en Retell AI inyectándole su prompt adaptado"""
+    """Crea un agente conversacional nativo en Retell AI inyectándole su prompt adaptado (API v2 actual)"""
     logger.info(f"Solicitando creación de agente en Retell AI para el negocio: {nombre_negocio}")
     url = "https://api.retellai.com/create-agent"
     headers = {
@@ -273,10 +267,14 @@ def create_bot_for_client(nombre_negocio, sector, servicios, horario, zona, voic
         f"y agendar de forma autónoma sus citas en los huecos disponibles."
     )
     
+    # CORRECCIÓN: Se envuelve la configuración del LLM en el parámetro obligatorio 'response_engine'
     payload = {
         "agent_name": f"Bot-{nombre_negocio.replace(' ', '_')}",
         "voice_id": voice_id,
-        "llm_websocket_url": "wss://api.retellai.com/llm-websocket",
+        "response_engine": {
+            "type": "custom-llm",
+            "llm_websocket_url": "wss://api.retellai.com/llm-websocket"
+        },
         "voice_settings": {
             "speed": 1.0,
             "temperature": 0.5
@@ -307,7 +305,6 @@ async def request_magic_link(request: Request):
             logger.warning("Petición rechazada: El campo email está vacío.")
             raise HTTPException(status_code=400, detail="El email es obligatorio")
 
-        # Verificar en PostgreSQL si tiene algún bot configurado antes de mandar el email
         logger.info(f"Buscando si el usuario '{email}' existe en la tabla de asistentes...")
         conn = get_db_connection()
         cur = conn.cursor()
@@ -318,10 +315,8 @@ async def request_magic_link(request: Request):
             logger.warning(f"El correo '{email}' no posee registros asociados en la base de datos.")
             cur.close()
             conn.close()
-            # Por seguridad (prevención de enumeración de cuentas), indicamos éxito simulado
             return {"status": "success", "message": "Si tu correo electrónico está registrado, recibirás un enlace mágico de acceso en unos instantes."}
 
-        # Crear token seguro de un solo uso válido por 15 minutos
         token = str(uuid.uuid4())
         expiracion = datetime.utcnow() + timedelta(minutes=15)
         logger.info(f"Usuario validado. Token único generado: {token} (Expiración UTC: {expiracion})")
@@ -335,11 +330,9 @@ async def request_magic_link(request: Request):
         conn.close()
         logger.info("Token registrado correctamente en la tabla 'magic_tokens'.")
 
-        # Montar la URL final a la que viajará el usuario en Wix
         enlace_magico = f"{FRONTEND_URL}?token={token}"
         logger.info(f"Enlace mágico final construido: {enlace_magico}")
         
-        # Procesar el envío mediante Brevo
         envio_ok = enviar_correo_brevo(email, enlace_magico)
         if not envio_ok:
             logger.error("El backend de Brevo SMTP ha fallado en la ejecución del envío.")
@@ -370,7 +363,6 @@ async def verify_magic_token(request: Request):
         conn = get_db_connection()
         cur = conn.cursor()
         
-        # Validar si el token existe, no ha caducado y no ha sido utilizado previamente
         cur.execute(
             "SELECT email, expiracion FROM magic_tokens WHERE token = %s AND utilizado = FALSE LIMIT 1;",
             (token,)
@@ -383,7 +375,6 @@ async def verify_magic_token(request: Request):
             conn.close()
             raise HTTPException(status_code=401, detail="El enlace mágico no es válido o ya ha sido utilizado con anterioridad.")
 
-        # Control exacto de expiración temporal basada en UTC
         if datetime.utcnow() > token_record["expiracion"]:
             logger.warning(f"El token '{token}' ha caducado. Expiración: {token_record['expiracion']}, Hora actual UTC: {datetime.utcnow()}")
             cur.close()
@@ -393,11 +384,9 @@ async def verify_magic_token(request: Request):
         email_usuario = token_record["email"]
         logger.info(f"Token legítimo. Propietario identificado: {email_usuario}")
 
-        # Inhabilitar el token inmediatamente (Single-use token)
         cur.execute("UPDATE magic_tokens SET utilizado = TRUE WHERE token = %s;", (token,))
         logger.info(f"Token '{token}' marcado como UTILIZADO en base de datos para prevenir reutilizaciones.")
         
-        # Extraer los asistentes de este cliente autenticado
         logger.info(f"Cargando asistentes vinculados a: {email_usuario}")
         cur.execute("SELECT * FROM asistentes WHERE google_calendar_email = %s ORDER BY id DESC;", (email_usuario,))
         bots = cur.fetchall()
@@ -470,7 +459,7 @@ async def create_retell_bot_endpoint(request: Request):
         """, (
             data.get("nombre_negocio"), data.get("sector"), data.get("servicios"),
             data.get("horario"), data.get("zona"), data.get("google_calendar_email"),
-            data.get("asistente"), agent_id, "+34900000000"  # Número de prueba por defecto
+            data.get("asistente"), agent_id, "+34900000000"
         ))
         
         conn.commit()
@@ -499,7 +488,7 @@ async def update_retell_bot(request: Request):
 
         voice_id = VOICE_MAPPING.get(data.get("asistente"), "openai-Alloy")
         
-        # 1. Actualizar Datos del Agente en la API de Retell
+        # 1. Actualizar Datos del Agente en la API de Retell adaptado al response_engine obligatorio
         url = f"https://api.retellai.com/update-agent/{agent_id}"
         headers = {
             "Authorization": f"Bearer {RETELL_API_KEY}",
@@ -515,6 +504,10 @@ async def update_retell_bot(request: Request):
         
         payload = {
             "voice_id": voice_id,
+            "response_engine": {
+                "type": "custom-llm",
+                "llm_websocket_url": "wss://api.retellai.com/llm-websocket"
+            },
             "system_prompt": nuevo_prompt
         }
         
@@ -563,19 +556,16 @@ async def delete_retell_bot(request: Request):
             logger.warning("Falta parámetro agent_id")
             raise HTTPException(status_code=400, detail="Falta el parámetro 'agent_id'.")
 
-        # 1. Dar de baja en Retell AI
         url = f"https://api.retellai.com/delete-agent/{agent_id}"
         headers = {"Authorization": f"Bearer {RETELL_API_KEY}"}
         
         logger.info(f"Invocando DELETE en la API de Retell para {agent_id}...")
         retell_res = requests.delete(url, headers=headers)
         
-        # Nota: Si el bot ya fue borrado en Retell, permitimos continuar para limpiar la base de datos local
         if retell_res.status_code not in [200, 204, 404]:
             logger.error(f"Error devuelto por la API de Retell al borrar: {retell_res.status_code} - {retell_res.text}")
             raise HTTPException(status_code=500, detail=f"Error al eliminar en Retell: {retell_res.text}")
 
-        # 2. Eliminar de PostgreSQL
         logger.info(f"Borrando el registro local de la tabla asistentes para agent_id: {agent_id}")
         conn = get_db_connection()
         cur = conn.cursor()
@@ -592,7 +582,6 @@ async def delete_retell_bot(request: Request):
         logger.error(f"❌ Error crítico en /delete-retell-bot: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
-# Para ejecución en desarrollo local
 if __name__ == "__main__":
     import uvicorn
     logger.info("Iniciando Uvicorn de forma local...")

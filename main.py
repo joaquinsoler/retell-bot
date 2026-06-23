@@ -1,11 +1,17 @@
 import os
 import json
-from datetime import datetime
-from zoneinfo import ZoneInfo  # Gestión nativa y precisa de zonas horarias en Python 3.9+
+import uuid
+import smtplib
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
+
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
 import requests
-import psycopg2  # Conector nativo de PostgreSQL
+import psycopg2
 from psycopg2.extras import RealDictCursor
 
 from google.oauth2 import service_account
@@ -18,6 +24,9 @@ app = FastAPI(title="Dansu Backend Completo")
 RETELL_API_KEY = os.getenv("RETELL_API_KEY")
 GOOGLE_CREDENTIALS_JSON = os.getenv("GOOGLE_CREDENTIALS")
 DATABASE_URL = os.getenv("DATABASE_URL")
+BREVO_SMTP_USER = os.getenv("BREVO_SMTP_USER")
+BREVO_SMTP_PASSWORD = os.getenv("BREVO_SMTP_PASSWORD")
+FRONTEND_BASE_URL = "https://dansu.info"   # ← CAMBIA esto por tu URL real de Wix
 
 if not RETELL_API_KEY or not GOOGLE_CREDENTIALS_JSON or not DATABASE_URL:
     raise Exception("Faltan variables de entorno críticas (RETELL_API_KEY, GOOGLE_CREDENTIALS o DATABASE_URL)")
@@ -30,6 +39,13 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# ==================== MODELOS PARA MAGIC LINK ====================
+class MagicLinkRequest(BaseModel):
+    email: str
+
+class TokenVerify(BaseModel):
+    token: str
 
 # ==================== CONEXIÓN E INICIALIZACIÓN DE POSTGRESQL ====================
 def get_db_connection():
@@ -54,6 +70,19 @@ def init_db():
             fecha_creacion TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
     """)
+    
+    # Tabla para enlaces mágicos
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS magic_links (
+            id SERIAL PRIMARY KEY,
+            email VARCHAR(255) NOT NULL,
+            token VARCHAR(255) UNIQUE NOT NULL,
+            expires_at TIMESTAMP NOT NULL,
+            used BOOLEAN DEFAULT FALSE,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+    """)
+    
     conn.commit()
     cur.close()
     conn.close()
@@ -64,7 +93,7 @@ init_db()
 
 # ==================== GOOGLE CALENDAR ====================
 SCOPES = ['https://www.googleapis.com/auth/calendar']
-MADRID_TZ = ZoneInfo("Europe/Madrid")  # Huso horario de referencia absoluto para el negocio
+MADRID_TZ = ZoneInfo("Europe/Madrid")
 
 def get_calendar_service():
     credentials_info = json.loads(GOOGLE_CREDENTIALS_JSON)
@@ -294,7 +323,89 @@ def create_bot_for_client(nombre_negocio, sector, servicios, horario, zona, voic
     return {"status": "success", "agent_id": agent_id, "phone_number": free_number}
 
 
-# ==================== ENDPOINTS ÁREA DE CLIENTE ====================
+# ==================== MAGIC LINK ====================
+def send_magic_link(email: str):
+    token = str(uuid.uuid4())
+    expires_at = datetime.utcnow() + timedelta(minutes=30)
+
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute("""
+        INSERT INTO magic_links (email, token, expires_at)
+        VALUES (%s, %s, %s)
+        ON CONFLICT (email) DO UPDATE 
+        SET token = EXCLUDED.token, expires_at = EXCLUDED.expires_at, used = FALSE;
+    """, (email.lower().strip(), token, expires_at))
+    conn.commit()
+    cur.close()
+    conn.close()
+
+    magic_url = f"{FRONTEND_BASE_URL}/area-cliente?token={token}"
+
+    html = f"""
+    <h2>Accede a tu Panel Dansu AI</h2>
+    <p>Haz clic en el botón para gestionar tus asistentes:</p>
+    <a href="{magic_url}" style="background:#0078FF;color:white;padding:14px 28px;text-decoration:none;border-radius:8px;font-weight:bold;display:inline-block;">
+        ABRIR MI PANEL DE ASISTENTES
+    </a>
+    <p><small>El enlace caduca en 30 minutos. Si no lo solicitaste, ignora este correo.</small></p>
+    """
+
+    msg = MIMEMultipart("alternative")
+    msg["Subject"] = "Tu enlace mágico - Dansu AI"
+    msg["From"] = BREVO_SMTP_USER
+    msg["To"] = email
+    msg.attach(MIMEText(html, "html"))
+
+    try:
+        server = smtplib.SMTP("smtp-relay.brevo.com", 587)
+        server.starttls()
+        server.login(BREVO_SMTP_USER, BREVO_SMTP_PASSWORD)
+        server.send_message(msg)
+        server.quit()
+        print(f"✅ Magic link enviado a {email}")
+    except Exception as e:
+        print(f"❌ Error enviando magic link: {e}")
+        raise
+
+
+# ==================== ENDPOINTS MAGIC LINK ====================
+@app.post("/send-magic-link")
+async def send_magic_link_endpoint(request: MagicLinkRequest):
+    if not BREVO_SMTP_USER or not BREVO_SMTP_PASSWORD:
+        raise HTTPException(500, detail="Brevo SMTP no configurado")
+    try:
+        send_magic_link(request.email)
+        return {"status": "success", "message": "Enlace enviado correctamente. Revisa tu correo."}
+    except Exception as e:
+        raise HTTPException(500, detail=str(e))
+
+
+@app.post("/verify-magic-link")
+async def verify_magic_link(request: TokenVerify):
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT email FROM magic_links 
+        WHERE token = %s AND expires_at > NOW() AND used = FALSE
+    """, (request.token,))
+    row = cur.fetchone()
+    
+    if not row:
+        cur.close()
+        conn.close()
+        raise HTTPException(401, detail="Enlace inválido o caducado")
+    
+    email = row["email"]
+    cur.execute("UPDATE magic_links SET used = TRUE WHERE token = %s", (request.token,))
+    conn.commit()
+    cur.close()
+    conn.close()
+    
+    return {"status": "success", "email": email}
+
+
+# ==================== ENDPOINTS ORIGINALES (sin cambios) ====================
 @app.post("/get-user-bots")
 async def get_user_bots(request: Request):
     try:
@@ -313,11 +424,6 @@ async def get_user_bots(request: Request):
 
 @app.post("/update-retell-bot")
 async def update_retell_bot_endpoint(request: Request):
-    """
-    Actualiza la configuración del asistente en PostgreSQL y sincroniza forzosamente
-    el prompt operativo JUNTO con el esquema de herramientas funcionales en Retell AI 
-    para mantener intacto el sistema de validación de huecos libres de Google Calendar.
-    """
     try:
         data = await request.json()
         agent_id = data.get("agent_id")
@@ -332,7 +438,6 @@ async def update_retell_bot_endpoint(request: Request):
         if not agent_id:
             raise HTTPException(status_code=400, detail="Falta el agent_id")
 
-        # 1. Recuperar información del agente en Retell AI para extraer el llm_id
         agent_info = retell_request("GET", f"/get-agent/{agent_id}")
         if not agent_info or "response_engine" not in agent_info:
             raise HTTPException(status_code=404, detail="No se encontró el agente en Retell AI")
@@ -341,10 +446,8 @@ async def update_retell_bot_endpoint(request: Request):
         if not llm_id:
             raise HTTPException(status_code=400, detail="El agente no dispone de un motor LLM vinculado")
 
-        # 2. Re-generar el prompt comercial del asistente
         nuevo_prompt = build_custom_prompt(nombre_negocio, sector, servicios, horario, zona, calendar_email)
 
-        # 3. SOLUCIÓN COMPLETA: Forzar el refresco de las herramientas junto al prompt para que Retell compile el control de errores
         llm_update = retell_request("PATCH", f"/update-retell-llm/{llm_id}", {
             "general_prompt": nuevo_prompt,
             "general_tools": [{
@@ -370,7 +473,6 @@ async def update_retell_bot_endpoint(request: Request):
         if not llm_update:
             raise HTTPException(status_code=500, detail="Error al sincronizar cambios y herramientas funcionales con el motor de Retell AI")
 
-        # 4. Sincronizar el cambio de voz si se ha editado
         voice_id_tecnico = VOICE_MAPPING.get(asistente_nombre)
         if voice_id_tecnico:
             retell_request("PATCH", f"/update-agent/{agent_id}", {
@@ -380,7 +482,6 @@ async def update_retell_bot_endpoint(request: Request):
         else:
             voice_id_tecnico = agent_info.get("voice_id")
 
-        # 5. Guardar permanentemente en PostgreSQL
         conn = get_db_connection()
         cur = conn.cursor()
         cur.execute("""
@@ -456,7 +557,6 @@ async def delete_retell_bot_endpoint(request: Request):
             raise HTTPException(status_code=500, detail=f"Fallo total e irrecuperable en DB: {str(db_err)}")
 
 
-# ==================== ENDPOINTS GENERALES ====================
 @app.post("/book-appointment")
 @app.post("/book-appointment/")
 async def book_appointment(request: Request):

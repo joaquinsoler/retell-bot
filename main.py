@@ -224,7 +224,46 @@ def create_google_event(calendar_id, summary, start_iso, end_iso, bypass_availab
     }
     return service.events().insert(calendarId=calendar_id, body=event).execute()
 
-# ==================== LÓGICA DE ASIGNACIÓN DINÁMICA DE TELÉFONO LIBRE (CORREGIDA) ====================
+# ==================== INTEGRACIÓN DE AGENTES (RETELL AI) ====================
+def create_bot_for_client(nombre_negocio, sector, servicios, horario, zona, voice_id):
+    """Crea un agente conversacional nativo en Retell AI inyectándole su prompt adaptado (API v2 actual)"""
+    logger.info(f"Solicitando creación de agente en Retell AI para el negocio: {nombre_negocio}")
+    url = "https://api.retellai.com/create-agent"
+    headers = {
+        "Authorization": f"Bearer {RETELL_API_KEY}",
+        "Content-Type": "application/json"
+    }
+    
+    prompt_base = (
+        f"Eres el asistente virtual inteligente de {nombre_negocio}, un negocio del sector {sector}. "
+        f"Tus servicios principales son: {servicios}. Tu horario de atención comercial es: {horario}. "
+        f"Operas bajo la zona horaria {zona}. Tu objetivo primordial es guiar y atender amablemente a los clientes "
+        f"y agendar de forma autónoma sus citas en los huecos disponibles."
+    )
+    
+    payload = {
+        "agent_name": f"Bot-{nombre_negocio.replace(' ', '_')}",
+        "voice_id": voice_id,
+        "response_engine": {
+            "type": "custom-llm",
+            "llm_websocket_url": "wss://api.retellai.com/llm-websocket"
+        },
+        "voice_settings": {
+            "speed": 1.0,
+            "temperature": 0.5
+        },
+        "system_prompt": prompt_base
+    }
+    
+    response = requests.post(url, json=payload, headers=headers)
+    if response.status_code != 201:
+        logger.error(f"Error de respuesta desde los servidores de Retell AI: {response.status_code} - {response.text}")
+        raise Exception(f"Error en la API de Retell AI: {response.text}")
+        
+    logger.info("Agente creado exitosamente en los entornos remotos de Retell AI.")
+    return response.json()
+
+# ==================== LÓGICA DE ASIGNACIÓN DINÁMICA DE TELÉFONO LIBRE ====================
 def auto_assign_free_phone_number(agent_id: str):
     """Busca en Retell AI el primer número de teléfono disponible (libre) y le asocia este agent_id usando las propiedades correctas de su API"""
     logger.info("Buscando números de teléfono disponibles en la cuenta de Retell AI...")
@@ -251,7 +290,6 @@ def auto_assign_free_phone_number(agent_id: str):
                 break
                 
         if numero_libre:
-            # CORRECCIÓN DE PAYLOAD: Enviamos 'agent_id' que es el parámetro nativo de la v2 de Retell, manteniendo 'bound_agent_id' por retrocompatibilidad
             logger.info(f"Vinculando de forma definitiva el número {numero_libre} al Agent ID {agent_id}...")
             url_bind = f"https://api.retellai.com/update-phone-number/{numero_libre}"
             payload = {
@@ -403,7 +441,7 @@ async def create_retell_bot_endpoint(request: Request):
         
         agent_id = retell_agent.get("agent_id")
         
-        # Llamar a la función corregida para buscar y enlazar dinámicamente un número libre en Retell
+        # Llamar a la función para buscar y enlazar dinámicamente un número libre en Retell
         assigned_phone = auto_assign_free_phone_number(agent_id)
         
         # Si no hay ningún número libre en tu cuenta de Retell, usamos el fallback por defecto

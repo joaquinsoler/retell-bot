@@ -15,7 +15,7 @@ from googleapiclient.errors import HttpError
 
 from jose import JWTError, jwt  # Añadido para el manejo seguro de tokens del Magic Link
 
-app = FastAPI(title="Dansu Backend Completo con Magic Link")
+app = FastAPI(title="Dansu Backend Completo OK - Multi-Bot Google Calendar Fixed")
 
 # ==================== VARIABLES DE ENTORNO ====================
 RETELL_API_KEY = os.getenv("RETELL_API_KEY")
@@ -91,16 +91,33 @@ def get_calendar_service():
     return build('calendar', 'v3', credentials=credentials, cache_discovery=False)
 
 
+# ==================== FUNCIÓN AUXILIAR CORREGIDA MULTI-BOT ====================
 def ensure_calendar_access(calendar_id: str):
+    """
+    Intenta suscribir la cuenta de servicio al calendario del cliente.
+    Si el calendario ya está suscrito (Error 409 Conflict), devuelve
+    el objeto de servicio existente en lugar de fallar, permitiendo
+    que múltiples asistentes usen el mismo correo.
+    """
     try:
-        service = get_calendar_service()
+        service = get_calendar_service()  # Inicializamos el servicio
+        # Intentamos insertar la suscripción
         service.calendarList().insert(body={'id': calendar_id}).execute()
         print(f"✅ Calendario suscrito: {calendar_id}")
+        return service  # Devolvemos el servicio funcional tras la nueva suscripción
+
     except HttpError as e:
+        # Manejo específico del error 409: Conflicto / Ya suscrito
         if e.status_code == 409:
-            print(f"ℹ️ Ya suscrito: {calendar_id}")
+            print(f"ℹ️ El calendario {calendar_id} ya estaba suscrito. Reutilizando conexión.")
+            # MODIFICACIÓN CRÍTICA: Devolvemos un objeto de servicio fresco.
+            return get_calendar_service() 
+        
+        # Para cualquier otro error (404, 403, etc.), imprimimos el log y re-lanzamos.
         else:
-            print(f"⚠️ Error suscripción {e.status_code}: {e}")
+            print(f"⚠️ Error suscripción {e.status_code} para {calendar_id}: {e}")
+            raise  # Re-lanzamos la excepción original para que el backend la gestione.
+# ==================== FIN DE LA CORRECCIÓN ====================
 
 
 def normalize_to_madrid_iso(dt_str: str) -> str:
@@ -153,7 +170,9 @@ def check_availability(calendar_id: str, start_time: str, end_time: str) -> bool
 
 def create_google_event(calendar_id: str, summary: str, start_time: str, end_time: str, description: str = "", bypass_availability: bool = False):
     try:
+        # Llamamos a ensure_calendar_access para asegurar que estamos suscritos al calendario.
         ensure_calendar_access(calendar_id)
+        
         iso_start = normalize_to_madrid_iso(start_time)
         iso_end = normalize_to_madrid_iso(end_time)
         
@@ -238,7 +257,7 @@ Solo cuando tengas recopilados estos 4 datos de forma exitosa, utiliza la herram
 - Si experimentas algún problema técnico interno con las herramientas, mantén la calma, discúlpate amablemente por la pequeña pausa y reconduce la llamada ofreciéndote a tomar nota manualmente o pedirle que lo intente en unos instantes, garantizando siempre una experiencia de atención al cliente excelente."""
 
 
-# ==================== LÓGICA DE CREACIÓN ====================
+# ==================== LÓGICA DE CREACIÓN (ORIGINAL) ====================
 def create_bot_for_client(nombre_negocio, sector, servicios, horario, zona, voice_id, calendar_email):
     custom_prompt = build_custom_prompt(nombre_negocio, sector, servicios, horario, zona, calendar_email)
 
@@ -355,6 +374,7 @@ async def request_magic_link(request: Request):
             raise HTTPException(400, "Email inválido")
 
         token = create_magic_token(email)
+        # Asegúrate de actualizar la URL de redirección final si es necesario
         magic_link = f"https://retell-bot.onrender.com/redirect-to-wix?token={token}"
 
         if send_magic_link_email(email, magic_link):
@@ -413,7 +433,7 @@ async def check_session(request: Request):
     return {"status": "success", "email": email, "bots": bots}
 
 
-# ==================== ENDPOINTS ÁREA DE CLIENTE (ORIGINALES MANTENIDOS) ====================
+# ==================== ENDPOINTS ÁREA DE CLIENTE (ORIGINALES TOTALMENTE PROTEGIDOS) ====================
 @app.post("/get-user-bots")
 async def get_user_bots(request: Request):
     try:
@@ -432,6 +452,11 @@ async def get_user_bots(request: Request):
 
 @app.post("/update-retell-bot")
 async def update_retell_bot_endpoint(request: Request):
+    """
+    Actualiza la configuración del asistente en PostgreSQL y sincroniza forzosamente
+    el prompt operativo JUNTO con el esquema de herramientas funcionales en Retell AI 
+    para mantener intacto el sistema de validación de huecos libres de Google Calendar.
+    """
     try:
         data = await request.json()
         agent_id = data.get("agent_id")
@@ -446,6 +471,7 @@ async def update_retell_bot_endpoint(request: Request):
         if not agent_id:
             raise HTTPException(status_code=400, detail="Falta el agent_id")
 
+        # 1. Recuperar información del agente en Retell AI para extraer el llm_id
         agent_info = retell_request("GET", f"/get-agent/{agent_id}")
         if not agent_info or "response_engine" not in agent_info:
             raise HTTPException(status_code=404, detail="No se encontró el agente en Retell AI")
@@ -454,8 +480,10 @@ async def update_retell_bot_endpoint(request: Request):
         if not llm_id:
             raise HTTPException(status_code=400, detail="El agente no dispone de un motor LLM vinculado")
 
+        # 2. Re-generar el prompt comercial del asistente
         nuevo_prompt = build_custom_prompt(nombre_negocio, sector, servicios, horario, zona, calendar_email)
 
+        # 3. SOLUCIÓN COMPLETA: Forzar el refresco de las herramientas junto al prompt para que Retell compile el control de errores
         llm_update = retell_request("PATCH", f"/update-retell-llm/{llm_id}", {
             "general_prompt": nuevo_prompt,
             "general_tools": [{
@@ -481,6 +509,7 @@ async def update_retell_bot_endpoint(request: Request):
         if not llm_update:
             raise HTTPException(status_code=500, detail="Error al sincronizar cambios y herramientas funcionales con el motor de Retell AI")
 
+        # 4. Sincronizar el cambio de voz si se ha editado
         voice_id_tecnico = VOICE_MAPPING.get(asistente_nombre)
         if voice_id_tecnico:
             retell_request("PATCH", f"/update-agent/{agent_id}", {
@@ -490,6 +519,7 @@ async def update_retell_bot_endpoint(request: Request):
         else:
             voice_id_tecnico = agent_info.get("voice_id")
 
+        # 5. Guardar permanentemente en PostgreSQL
         conn = get_db_connection()
         cur = conn.cursor()
         cur.execute("""
@@ -509,6 +539,9 @@ async def update_retell_bot_endpoint(request: Request):
 
 @app.post("/delete-retell-bot")
 async def delete_retell_bot_endpoint(request: Request):
+    """
+    Borrado adaptativo de Retell AI y limpieza total en base de datos.
+    """
     try:
         data = await request.json()
         agent_id = data.get("agent_id")
@@ -565,10 +598,14 @@ async def delete_retell_bot_endpoint(request: Request):
             raise HTTPException(status_code=500, detail=f"Fallo total e irrecuperable en DB: {str(db_err)}")
 
 
-# ==================== ENDPOINTS GENERALES ORIGINALES ====================
+# ==================== ENDPOINTS GENERALES (ORIGINALES) ====================
 @app.post("/book-appointment")
 @app.post("/book-appointment/")
 async def book_appointment(request: Request):
+    """
+    Endpoint al que llama el bot en producción para agendar.
+    Maneja FreeBusy y creación de evento nativamente.
+    """
     try:
         raw_body = (await request.body()).decode("utf-8")
         data = json.loads(raw_body) if raw_body else {}
@@ -585,21 +622,26 @@ async def book_appointment(request: Request):
         return {"code": "SUCCESS", "message": "Cita agendada correctamente"}
     except Exception as e:
         print(f"❌ ERROR EN BOOK-APPOINTMENT: {e}")
+        # Retell AI necesita recibir JSON plano para que el bot pueda hablar.
         return {"code": "ERROR", "message": str(e)}
 
 
 @app.post("/verify-calendar-access")
 @app.post("/verify-calendar-access/")
 async def verify_calendar_access(request: Request):
+    """
+    Utilizado en el frontend de creación para verificar la conexión.
+    """
     try:
         data = await request.json()
         calendar_email = data.get("calendar_email")
+        # Creamos un evento de prueba en una fecha futura lejana
         create_google_event(
             calendar_email,
             "🧪 Prueba de conexión - Dansu",
             "2026-07-01T10:00:00+02:00",
             "2026-07-01T10:30:00+02:00",
-            bypass_availability=True
+            bypass_availability=True  # Saltamos FreeBusy para esta prueba
         )
         return {"status": "success", "message": "Acceso verificado correctamente"}
     except Exception as e:
@@ -608,9 +650,14 @@ async def verify_calendar_access(request: Request):
 
 @app.post("/create-retell-bot")
 async def create_retell_bot_endpoint(request: Request):
+    """
+    Endpoint de creación de bot desde el flujo principal.
+    """
     try:
         payload = await request.json()
+        # Adaptación para diferentes formatos de payload
         data = payload if isinstance(payload, dict) else payload.get("data", payload)
+        
         voice_id = VOICE_MAPPING.get(data.get("asistente"), "openai-Alloy")
         return create_bot_for_client(
             data.get("nombre_negocio"), data.get("sector"), data.get("servicios"),
@@ -627,4 +674,6 @@ async def root():
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    # En producción Render usa variables de entorno para el puerto.
+    port = int(os.environ.get("PORT", 8000))
+    uvicorn.run(app, host="0.0.0.0", port=port)

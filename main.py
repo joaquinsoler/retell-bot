@@ -6,6 +6,7 @@ from zoneinfo import ZoneInfo
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 
 import requests
@@ -18,7 +19,7 @@ from googleapiclient.errors import HttpError
 
 from jose import JWTError, jwt
 
-app = FastAPI(title="Dansu Backend Completo Corregido")
+app = FastAPI(title="Dansu Backend Completo con Puente de Redirección")
 
 # ==================== VARIABLES DE ENTORNO ====================
 RETELL_API_KEY = os.getenv("RETELL_API_KEY")
@@ -188,11 +189,10 @@ def retell_request(method: str, endpoint: str, json_data=None):
         return None
 
 def create_bot_for_client(nombre_negocio, sector, servicios, horario, zona, voice_id, calendar_email):
-    # Conservamos tu lógica original de creación de bot
     print(f"🤖 Ejecutando creación de bot marcador de posición para {nombre_negocio}...")
     return {"status": "success", "agent_id": f"agent_{int(datetime.utcnow().timestamp())}", "phone_number": "+34900000000"}
 
-# ==================== LÓGICA DE TOKENS SEGURS ====================
+# ==================== LÓGICA DE TOKENS MAGIC LINK ====================
 def create_magic_token(email: str):
     expire = datetime.utcnow() + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
     return jwt.encode({"sub": email.lower(), "exp": expire}, JWT_SECRET_KEY, algorithm=ALGORITHM)
@@ -205,7 +205,6 @@ def verify_magic_token(token: str):
         print(f"⚠️ Error de validación de JWT Token: {str(e)}")
         return None
 
-# CORRECCIÓN BREVO: Pasamos de usar templateId a htmlContent directo
 def send_magic_link_email(email: str, magic_link: str):
     if not BREVO_API_KEY:
         print("❌ No se puede enviar el email porque BREVO_API_KEY está vacía.")
@@ -249,15 +248,12 @@ def send_magic_link_email(email: str, magic_link: str):
         )
 
         print(f"📥 Respuesta de Brevo HTTP Status: {response.status_code}")
-        print(f"📥 Respuesta de Brevo Body: {response.text}")
-
         if response.status_code in (200, 201):
             print(f"✅ Correo electrónico transaccional enviado con éxito a {email}")
             return True
         else:
             print(f"❌ Brevo ha rechazado la llamada. Código: {response.status_code}, Detalle: {response.text}")
             return False
-
     except Exception as e:
         print(f"❌ Excepción severa al procesar el envío de correo con Brevo: {str(e)}")
         print(traceback.format_exc())
@@ -270,7 +266,6 @@ async def request_magic_link(request: Request):
     print("\n--- 📥 NUEVA SOLICITUD EN /request-magic-link ---")
     try:
         data = await request.json()
-        print(f"Payload recibido en backend: {data}")
         email = data.get("email", "").strip().lower()
         
         if not email or "@" not in email:
@@ -278,24 +273,61 @@ async def request_magic_link(request: Request):
             raise HTTPException(400, "Email inválido")
 
         token = create_magic_token(email)
-        # Apunta a la página de tu Wix donde está el frontend embebido
-        magic_link = f"https://www.dansu.info/blank-4?token={token}"
+        
+        # NUEVA FUNCIÓN: Ahora el link apunta directamente a Render para actuar como puente seguro
+        magic_link = f"https://retell-bot.onrender.com/redirect-to-wix?token={token}"
 
         print(f"🔗 Token JWT creado para: {email}")
-        print(f"🔗 URL mágica generada: {magic_link}")
+        print(f"🔗 URL del puente de Render generada: {magic_link}")
 
         if send_magic_link_email(email, magic_link):
-            return {"status": "success", "message": "Enlace enviado. Revisa tu correo (incluida la carpeta de spam)"}
+            return {"status": "success", "message": "Enlace enviado. Revisa tu correo."}
         else:
-            print("❌ send_magic_link_email devolvió False.")
-            raise HTTPException(500, "Error de envío a través de Brevo. Verifica la consola del servidor.")
-            
+            raise HTTPException(500, "Error de envío a través de Brevo.")
     except HTTPException as he:
         raise he
     except Exception as e:
         print(f"❌ Error inesperado en /request-magic-link: {str(e)}")
         print(traceback.format_exc())
         raise HTTPException(500, f"Error interno: {str(e)}")
+
+
+@app.get("/redirect-to-wix", response_class=HTMLResponse)
+async def redirect_to_wix(token: str):
+    """
+    NUEVA FUNCIÓN INFALIBLE: Recibe al usuario desde el correo, rompe las restricciones del iframe
+    inyectando el token en el sessionStorage/localStorage y redirige de forma limpia a Wix.
+    """
+    print(f"\n--- 🔀 PUENTE ACTIVADO: Redirigiendo token {token[:15]}... hacia Wix ---")
+    wix_url = f"https://www.dansu.info/blank-4?token={token}"
+    
+    return f"""
+    <html>
+        <head>
+            <title>Conectando con Dansu AI...</title>
+            <meta charset="utf-8">
+        </head>
+        <body style="font-family: system-ui, sans-serif; background-color: #f8fafc; color: #0f172a; text-align: center; padding-top: 60px;">
+            <div style="max-width: 400px; margin: 0 auto; background: white; padding: 30px; border-radius: 16px; border: 1px solid #e2e8f0; box-shadow: 0 4px 6px rgba(0,0,0,0.05);">
+                <h3 style="margin-top:0;">Estableciendo conexión segura...</h3>
+                <p style="font-size: 14px; color: #475569;">Cargando tus asistentes automatizados de forma directa.</p>
+                <div style="width: 30px; height: 30px; border: 3px solid #0078FF; border-top-color: transparent; border-radius: 50%; display: inline-block; animation: spin 1s linear infinite; margin: 15px 0;"></div>
+            </div>
+            <style>@keyframes spin {{ to {{ transform: rotate(360deg); }} }}</style>
+            <script>
+                try {{
+                    // Almacenamos el token localmente en el dominio raíz por si hiciese falta recuperarlo
+                    localStorage.setItem('dansu_magic_token', '{token}');
+                }} catch(e) {{
+                    console.error("Error guardando en localStorage puente:", e);
+                }}
+                // Redirección definitiva
+                window.location.href = "{wix_url}";
+            </script>
+        </body>
+    </html>
+    """
+
 
 @app.post("/verify-magic-token")
 async def verify_magic_token_endpoint(request: Request):
@@ -305,15 +337,14 @@ async def verify_magic_token_endpoint(request: Request):
         token = data.get("token")
         
         if not token:
-            print("⚠️ No se ha recibido ningún token en la petición.")
             raise HTTPException(400, "Falta el token")
             
         email = verify_magic_token(token)
         if not email:
-            print("❌ El token ha expirado o su firma criptográfica es incorrecta.")
+            print("❌ El token ha expirado o es incorrecto.")
             raise HTTPException(401, "Enlace inválido o caducado")
 
-        print(f"✅ Token verificado. Buscando asistentes vinculados a: {email}")
+        print(f"✅ Token verificado para: {email}")
         
         conn = get_db_connection()
         cur = conn.cursor()
@@ -322,37 +353,23 @@ async def verify_magic_token_endpoint(request: Request):
         cur.close()
         conn.close()
 
-        print(f"📊 Se han encontrado {len(bots)} asistentes para el usuario {email}")
         return {"status": "success", "email": email, "bots": bots}
-        
     except HTTPException as he:
         raise he
     except Exception as e:
         print(f"❌ Error crítico en /verify-magic-token: {str(e)}")
         print(traceback.format_exc())
-        raise HTTPException(401, "Token inválido o error en la base de datos.")
+        raise HTTPException(401, "Error en la base de datos o token inválido.")
 
 @app.post("/update-retell-bot")
 async def update_retell_bot_endpoint(request: Request):
     print("\n--- 📥 NUEVA SOLICITUD EN /update-retell-bot ---")
     try:
         data = await request.json()
-        print(f"Datos recibidos para actualizar: {data}")
-        
         agent_id = data.get("agent_id")
-        nombre_negocio = data.get("nombre_negocio")
-        sector = data.get("sector")
-        servicios = data.get("servicios")
-        horario = data.get("horario")
-        zona = data.get("zona")
-        google_calendar_email = data.get("google_calendar_email")
-        asistente = data.get("asistente")
-
+        
         if not agent_id:
             raise HTTPException(400, "Falta el campo 'agent_id'")
-
-        # Aquí realizarías la llamada real a Retell AI si fuera necesario actualizar el prompt dinámicamente
-        print(f"🤖 Sincronizando cambios del agente {agent_id} con la API de Retell...")
 
         conn = get_db_connection()
         cur = conn.cursor()
@@ -361,7 +378,7 @@ async def update_retell_bot_endpoint(request: Request):
             SET nombre_negocio = %s, sector = %s, servicios = %s, horario = %s, zona = %s, google_calendar_email = %s, asistente = %s
             WHERE agent_id = %s
             RETURNING *;
-        """, (nombre_negocio, sector, servicios, horario, zona, google_calendar_email, asistente, agent_id))
+        """, (data.get("nombre_negocio"), data.get("sector"), data.get("servicios"), data.get("horario"), data.get("zona"), data.get("google_calendar_email"), data.get("asistente"), agent_id))
         
         updated_bot = cur.fetchone()
         conn.commit()
@@ -369,17 +386,14 @@ async def update_retell_bot_endpoint(request: Request):
         conn.close()
 
         if not updated_bot:
-            print(f"❌ No se encontró ningún bot en la base de datos con agent_id: {agent_id}")
-            raise HTTPException(404, "El asistente no existe en la base de datos.")
+            raise HTTPException(404, "El asistente no existe.")
 
-        print(f"✅ Registro actualizado con éxito en la base de datos.")
+        print(f"✅ Registro {agent_id} actualizado con éxito.")
         return {"status": "success", "bot": updated_bot}
-        
     except HTTPException as he:
         raise he
     except Exception as e:
         print(f"❌ Error en /update-retell-bot: {str(e)}")
-        print(traceback.format_exc())
         raise HTTPException(500, str(e))
 
 @app.post("/delete-retell-bot")
@@ -388,13 +402,9 @@ async def delete_retell_bot_endpoint(request: Request):
     try:
         data = await request.json()
         agent_id = data.get("agent_id")
-        print(f"Solicitud para eliminar el bot: {agent_id}")
 
         if not agent_id:
             raise HTTPException(400, "Falta el campo 'agent_id'")
-
-        # Lógica para dar de baja en el proveedor externo (Retell) si se requiere
-        print(f"🤖 Solicitando baja del agente {agent_id} en Retell AI...")
 
         conn = get_db_connection()
         cur = conn.cursor()
@@ -405,17 +415,14 @@ async def delete_retell_bot_endpoint(request: Request):
         conn.close()
 
         if not deleted_row:
-            print(f"❌ No se pudo eliminar porque no existía el agent_id: {agent_id}")
-            raise HTTPException(404, "Asistente no encontrado en la base de datos.")
+            raise HTTPException(404, "Asistente no encontrado.")
 
-        print(f"🗑️ Asistente eliminado con éxito de la base de datos.")
+        print(f"🗑️ Asistente {agent_id} eliminado de la base de datos.")
         return {"status": "success", "message": "Asistente eliminado de todos los sistemas."}
-        
     except HTTPException as he:
         raise he
     except Exception as e:
         print(f"❌ Error en /delete-retell-bot: {str(e)}")
-        print(traceback.format_exc())
         raise HTTPException(500, str(e))
 
 @app.post("/create-retell-bot")
@@ -430,7 +437,6 @@ async def create_retell_bot_endpoint(request: Request):
             data.get("horario"), data.get("zona"), voice_id, data.get("google_calendar_email")
         )
         
-        # Guardar en DB para que luego aparezca en el panel
         conn = get_db_connection()
         cur = conn.cursor()
         cur.execute("""
@@ -448,7 +454,7 @@ async def create_retell_bot_endpoint(request: Request):
 
 @app.get("/")
 async def root():
-    return {"status": "✅ Dansu Backend OK - Logs y Magic Link Operacionales"}
+    return {"status": "✅ Dansu Backend OK - Logs y Puente de Redirección Listos"}
 
 if __name__ == "__main__":
     import uvicorn

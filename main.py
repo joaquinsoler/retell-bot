@@ -8,17 +8,27 @@
         html, body {
             font-family: 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
             margin: 0; padding: 15px; background: transparent; color: #333;
-            overflow-y: auto; overflow-x: hidden;
+            /* Solución a la doble barra de scroll en integraciones tipo Wix/Iframe */
+            overflow-y: auto;
+            overflow-x: hidden;
         }
-        .header-nav { display: flex; justify-content: space-between; align-items: center; margin-bottom: 25px; }
+        
+        /* Cabecera con Navegación */
+        .header-nav {
+            display: flex; justify-content: space-between; align-items: center; margin-bottom: 25px;
+        }
         h2 { color: #111; margin: 0; }
         .subtitle { color: #666; font-size: 14px; margin-bottom: 25px; }
+
+        /* Botón Volver a Inicio */
         .btn-back-home {
             display: inline-flex; align-items: center; gap: 8px; padding: 8px 16px;
             background: #f1f5f9; color: #334155; border: 1px solid #e2e8f0; border-radius: 10px;
             font-weight: 600; font-size: 13px; text-decoration: none; cursor: pointer; transition: all 0.2s;
         }
         .btn-back-home:hover { background: #e2e8f0; color: #0f172a; }
+        
+        /* Caja de Autenticación Inicial */
         .login-box {
             max-width: 400px; margin: 40px auto; padding: 30px;
             background: #fff; border: 1px solid #e2e8f0; border-radius: 20px;
@@ -33,25 +43,55 @@
             border: none; border-radius: 12px; font-weight: 600; cursor: pointer; transition: background 0.2s;
         }
         .btn-primary:hover { background: #0056B3; }
-        .btn-primary:disabled { background: #94a3b8; cursor: not-allowed; }
+
+        /* Grid de Asistentes */
         .panel-container { display: none; }
-        .bots-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 20px; margin-bottom: 30px; }
-        .bot-card { border: 1px solid #e2e8f0; border-radius: 16px; background: #fff; padding: 20px; box-shadow: 0 4px 6px -1px rgba(0,0,0,0.05); position: relative; }
+        .bots-grid {
+            display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+            gap: 20px; margin-bottom: 30px;
+        }
+        .bot-card {
+            border: 1px solid #e2e8f0; border-radius: 16px; background: #fff; padding: 20px;
+            box-shadow: 0 4px 6px -1px rgba(0,0,0,0.05); position: relative;
+        }
         .bot-title { font-size: 18px; font-weight: 600; color: #111; margin: 0 0 5px 0; }
-        .bot-sector { font-size: 11px; font-weight: 600; text-transform: uppercase; color: #0078FF; background: #E6F2FF; padding: 3px 8px; border-radius: 20px; display: inline-block; margin-bottom: 15px; }
+        .bot-sector { 
+            font-size: 11px; font-weight: 600; text-transform: uppercase; color: #0078FF; 
+            background: #E6F2FF; padding: 3px 8px; border-radius: 20px; display: inline-block; margin-bottom: 15px;
+        }
         .bot-info { font-size: 13px; color: #555; margin-bottom: 8px; }
         .bot-info strong { color: #222; }
+        
         .action-buttons-container { display: flex; gap: 8px; margin-top: 15px; }
-        .btn-manage { flex: 2; padding: 10px; background: #0078FF; color: #fff; border: none; border-radius: 10px; font-weight: 600; cursor: pointer; }
+        .btn-manage {
+            flex: 2; padding: 10px; background: #0078FF; color: #fff;
+            border: none; border-radius: 10px; font-weight: 600; cursor: pointer;
+        }
         .btn-manage:hover { background: #0056B3; }
-        .btn-delete-bot { flex: 1; padding: 10px; background: #ef4444; color: #fff; border: none; border-radius: 10px; font-weight: 600; cursor: pointer; }
+        
+        .btn-delete-bot {
+            flex: 1; padding: 10px; background: #ef4444; color: #fff;
+            border: none; border-radius: 10px; font-weight: 600; cursor: pointer;
+        }
         .btn-delete-bot:hover { background: #b91c1c; }
-        .edit-box { display: none; background: #fff; border: 1px solid #e2e8f0; border-radius: 20px; padding: 25px; box-shadow: 0 20px 25px -5px rgba(0,0,0,0.1); margin-top: 20px; }
+
+        /* Formulario de Edición */
+        .edit-box {
+            display: none; background: #fff; border: 1px solid #e2e8f0; border-radius: 20px;
+            padding: 25px; box-shadow: 0 20px 25px -5px rgba(0,0,0,0.1); margin-top: 20px;
+        }
         .form-group { margin-bottom: 15px; }
         label { display: block; font-weight: 600; font-size: 13px; margin-bottom: 6px; color: #444; }
-        input[type="text"], input[type="email"], textarea { width: 100%; padding: 11px; border: 1px solid #cbd5e1; border-radius: 10px; box-sizing: border-box; font-family: inherit; font-size: 14px; }
+        input[type="text"], input[type="email"], textarea {
+            width: 100%; padding: 11px; border: 1px solid #cbd5e1; border-radius: 10px; box-sizing: border-box; font-family: inherit; font-size: 14px;
+        }
         textarea { resize: vertical; height: 80px; }
-        .slider-container { display: flex; overflow-x: auto; gap: 15px; padding: 10px 5px; scroll-snap-type: x mandatory; scrollbar-width: none; margin-bottom: 20px; }
+
+        /* Carrusel de Voces en Edición */
+        .slider-container {
+            display: flex; overflow-x: auto; gap: 15px; padding: 10px 5px;
+            scroll-snap-type: x mandatory; scrollbar-width: none; margin-bottom: 20px;
+        }
         .slider-container::-webkit-scrollbar { display: none; }
         .card { flex: 0 0 240px; border: 2px solid #e2e8f0; border-radius: 16px; background: #fff; scroll-snap-align: start; }
         .card.selected { border-color: #0078FF; box-shadow: 0 10px 15px rgba(0,120,255,0.15); }
@@ -61,27 +101,35 @@
         .card-name { font-size: 16px; font-weight: bold; margin-bottom: 8px; }
         .btn-select { width: 100%; padding: 8px; border: 2px solid #0078FF; background: transparent; color: #0078FF; border-radius: 8px; font-weight: bold; cursor: pointer; font-size: 13px; }
         .card.selected .btn-select { background: #0078FF; color: white; }
+        
         .btn-container { display: flex; gap: 10px; margin-top: 20px; }
         .btn-save { flex: 2; padding: 12px; background: #10B981; color: white; border: none; border-radius: 10px; font-weight: 600; cursor: pointer; }
         .btn-save:hover { background: #059669; }
         .btn-cancel { flex: 1; padding: 12px 20px; background: #64748b; color: white; border: none; border-radius: 10px; font-weight: 600; cursor: pointer; }
         .btn-cancel:hover { background: #475569; }
-        .btn-danger-zone { width: 100%; padding: 12px; background: #ef4444; color: white; border: none; border-radius: 10px; font-weight: 600; cursor: pointer; margin-top: 15px; transition: background 0.2s; }
+
+        .btn-danger-zone {
+            width: 100%; padding: 12px; background: #ef4444; color: white; border: none; border-radius: 10px; font-weight: 600; cursor: pointer; margin-top: 15px; transition: background 0.2s;
+        }
         .btn-danger-zone:hover { background: #b91c1c; }
+        
         .no-bots { text-align: center; color: #94a3b8; padding: 40px 0; font-size: 15px; grid-column: 1 / -1; }
     </style>
 </head>
 <body>
 
     <div class="header-nav">
-        <a href="https://dansu.info" target="_top" class="btn-back-home">← Volver a Inicio</a>
+        <a href="https://dansu.info" target="_top" class="btn-back-home">
+            ← Volver a Inicio
+        </a>
     </div>
 
     <div id="auth-screen" class="login-box">
         <h3 style="margin-top:0;">Accede a tu Panel</h3>
-        <p id="auth-instruction" style="font-size:13px; color:#666; margin:0;">Introduce el Email de Google Calendar vinculado a tus asistentes. Te enviaremos un enlace mágico de acceso directo a tu correo electrónico.</p>
+        <p id="auth-instruction" style="font-size:13px; color:#666; margin:0;">Introduce el Email de Google Calendar vinculado a tus asistentes para gestionarlos de forma segura.</p>
         <input type="email" id="auth-email" placeholder="ejemplo@gmail.com" required>
         <button id="btn-login" class="btn-primary" onclick="solicitarEnlaceMagico()">Recibir Enlace Mágico ✨</button>
+        <p id="manual-trigger-text" style="font-size:11px; margin-top:15px; color:#94a3b8; cursor:pointer;" onclick="conmutarModoManual()">¿Prefieres entrar de manera manual tradicional?</p>
     </div>
 
     <div id="main-panel" class="panel-container">
@@ -156,52 +204,65 @@
     </div>
 
     <script>
-        const BACKEND_URL = "https://retell-bot.onrender.com"; 
+        const BACKEND_URL = "https://retell-bot.onrender.com";
         let emailUsuario = "";
         let listaBots = [];
         let botEnEdicion = null;
         let vozSeleccionadaNombre = "";
+        let modoManualActivo = false;
 
-        // ==================== ESTRATEGIA DE AUTENTICACIÓN INVISIBLE POR COMPROBACIÓN DE IP ====================
+        // ==================== COMPROBACIÓN INVISIBLE POR ASOCIACIÓN DE IP ====================
         window.onload = async function() {
-            console.log("🚀 Frontend cargado. Consultando estado de sesión invisible por IP...");
-            
-            // Ponemos la interfaz en modo comprobación temporal por si acaso hay una sesión activa
-            document.getElementById('auth-instruction').innerText = "⏳ Sincronizando de forma segura tus credenciales de acceso...";
+            console.log("🚀 Iniciando comprobación de sesión segura...");
+            document.getElementById('auth-instruction').innerText = "⏳ Sincronizando credenciales de acceso con el servidor...";
             document.getElementById('auth-email').style.display = 'none';
             document.getElementById('btn-login').style.display = 'none';
+            document.getElementById('manual-trigger-text').style.display = 'none';
             
             try {
-                // El iFrame le pregunta a Render si su IP se acaba de validar en el correo electrónico
                 const res = await fetch(`${BACKEND_URL}/check-session`);
                 const data = await res.json();
-                console.log("📥 Resultado de sesión por IP:", data);
 
                 if (res.ok && data.status === "success") {
-                    // ¡BINGO! Render validó su IP. Iniciamos sesión automáticamente
                     emailUsuario = data.email;
                     listaBots = data.bots;
-                    
                     document.getElementById('auth-screen').style.display = 'none';
                     document.getElementById('main-panel').style.display = 'block';
                     renderizarTarjetas();
                 } else {
-                    // No hay sesión activa para esta IP. Devolvemos el login manual
-                    console.log("🔍 No hay sesión activa por IP. Restaurando login manual.");
+                    console.log("No hay sesión por IP activa.");
                     restaurarPantallaLogin();
                 }
             } catch (error) {
-                console.error("❌ Error verificando sesión invisible:", error);
+                console.error("Error en autologin por IP:", error);
                 restaurarPantallaLogin();
             }
         };
 
         function restaurarPantallaLogin() {
-            document.getElementById('auth-instruction').innerText = "Introduce el Email de Google Calendar vinculado a tus asistentes. Te enviaremos un enlace mágico de acceso directo a tu correo electrónico.";
+            modoManualActivo = false;
+            document.getElementById('auth-instruction').innerText = "Introduce el Email de Google Calendar vinculado a tus asistentes para gestionarlos de forma segura.";
             document.getElementById('auth-email').style.display = 'block';
+            document.getElementById('auth-email').value = "";
             document.getElementById('btn-login').style.display = 'block';
+            document.getElementById('btn-login').className = "btn-primary";
             document.getElementById('btn-login').innerText = "Recibir Enlace Mágico ✨";
+            document.getElementById('btn-login').setAttribute("onclick", "solicitarEnlaceMagico()");
             document.getElementById('btn-login').disabled = false;
+            document.getElementById('manual-trigger-text').style.display = 'block';
+            document.getElementById('manual-trigger-text').innerText = "¿Prefieres entrar de manera manual tradicional?";
+        }
+
+        function conmutarModoManual() {
+            if (!modoManualActivo) {
+                modoManualActivo = true;
+                document.getElementById('auth-instruction').innerText = "Introduce tu email para cargar tus asistentes manualmente (Modo de contingencia).";
+                document.getElementById('btn-login').innerText = "Ver mis Asistentes";
+                document.getElementById('btn-login').setAttribute("onclick", "cargarAsistentes()");
+                document.getElementById('manual-trigger-text').innerText = "← Volver al acceso seguro por Enlace Mágico";
+            } else {
+                restaurarPantallaLogin();
+            }
         }
 
         async function solicitarEnlaceMagico() {
@@ -211,42 +272,66 @@
             }
             
             const btn = document.getElementById('btn-login');
-            btn.innerText = "Enviando correo...";
+            btn.innerText = "Enviando enlace...";
             btn.disabled = true;
 
             try {
-                console.log("📡 Solicitando enlace mágico para:", emailInput);
                 const res = await fetch(`${BACKEND_URL}/request-magic-link`, {
                     method: "POST",
                     headers: { "Content-Type": "application/json" },
                     body: JSON.stringify({ email: emailInput })
                 });
-
                 const data = await res.json();
                 
                 if (res.ok && data.status === "success") {
-                    alert("¡Correo enviado con éxito! Abre el email recibido desde el dispositivo donde tengas abierto Wix para acceder instantáneamente.");
+                    alert("¡Enlace enviado! Revisa tu correo y haz clic en él para entrar directamente.");
                     btn.innerText = "¡Enviado! Revisa tu email";
                 } else {
-                    alert("Aviso del Servidor: " + (data.detail || "No se pudo procesar."));
+                    alert("Aviso del Servidor: " + (data.detail || "No se pudo enviar."));
                     btn.innerText = "Recibir Enlace Mágico ✨";
                     btn.disabled = false;
                 }
             } catch (error) {
-                console.error("❌ Error en solicitud:", error);
-                alert("Error de conexión con el backend.");
+                alert("Error de conexión al solicitar el enlace.");
                 btn.innerText = "Recibir Enlace Mágico ✨";
                 btn.disabled = false;
             }
         }
 
-        // ==================== RENDERIZADO Y LOGICA COMERCIAL OPERATIVA MANTENIDA ====================
+        // ==================== FUNCIONES ORIGINALES (CONSERVADAS AL 100%) ====================
+        async function cargarAsistentes() {
+            const emailInput = document.getElementById('auth-email').value.trim();
+            if (!emailInput) {
+                return alert("Por favor, introduce un correo electrónico válido.");
+            }
+
+            emailUsuario = emailInput;
+
+            try {
+                const res = await fetch(`${BACKEND_URL}/get-asistentes`, {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ calendar_email: emailUsuario })
+                });
+
+                if (!res.ok) throw new Error("Error en la respuesta del servidor");
+
+                listaBots = await res.json();
+                document.getElementById('auth-screen').style.display = 'none';
+                document.getElementById('main-panel').style.display = 'block';
+                renderizarTarjetas();
+
+            } catch (error) {
+                alert("No se pudieron cargar los asistentes. Revisa la conexión con el backend.");
+            }
+        }
+
         function renderizarTarjetas() {
             const container = document.getElementById("bots-container");
             container.innerHTML = "";
 
             if (!listaBots || listaBots.length === 0) {
-                container.innerHTML = `<div class="no-bots">No se encontraron asistentes configurados para ${emailUsuario}.</div>`;
+                container.innerHTML = `<div class="no-bots">No se encontraron asistentes virtuales configurados para ${emailUsuario}.</div>`;
                 return;
             }
 
@@ -333,23 +418,29 @@
                 asistente: vozSeleccionadaNombre
             };
 
+            if (Object.values(fields).some(val => !val)) {
+                return alert("Por favor, rellena todos los campos operacionales y selecciona una voz.");
+            }
+
             try {
-                const res = await fetch(`${BACKEND_URL}/update-retell-bot`, {
+                const res = await fetch(`${BACKEND_URL}/update-asistente`, {
                     method: "POST",
                     headers: { "Content-Type": "application/json" },
                     body: JSON.stringify(fields)
                 });
+
                 const data = await res.json();
+
                 if (data.status === "success" && data.bot) {
-                    alert("¡Asistente actualizado con éxito!");
+                    alert("¡Asistente reconfigurado y actualizado con éxito en la IA!");
                     listaBots = listaBots.map(b => b.agent_id === fields.agent_id ? data.bot : b);
                     cerrarEdicion();
                     renderizarTarjetas();
                 } else {
-                    alert("Error al actualizar.");
+                    alert("Error al actualizar: " + (data.detail || "Verifica los datos."));
                 }
             } catch (e) {
-                alert("Error de red.");
+                alert("Error de red al intentar guardar los datos del asistente.");
             }
         }
 
@@ -359,24 +450,31 @@
         }
 
         async function eliminarAsistente(agentId, nombreBot) {
-            const confirmacion = confirm(`¿Estás seguro de que deseas eliminar permanentemente a "${nombreBot}"?`);
+            const confirmacion = confirm(`¿Estás completamente seguro de que deseas eliminar permanentemente a "${nombreBot}"?\nEsta acción es irreversible, dará de baja el bot en Retell AI y liberará su número telefónico.`);
             if (!confirmacion) return;
 
             try {
-                if (botEnEdicion && botEnEdicion.agent_id === agentId) cerrarEdicion();
-                const res = await fetch(`${BACKEND_URL}/delete-retell-bot`, {
+                if (botEnEdicion && botEnEdicion.agent_id === agentId) {
+                    cerrarEdicion();
+                }
+
+                const res = await fetch(`${BACKEND_URL}/delete-asistente`, {
                     method: "POST",
                     headers: { "Content-Type": "application/json" },
                     body: JSON.stringify({ agent_id: agentId })
                 });
+
                 const data = await res.json();
+
                 if (data.status === "success") {
-                    alert("Eliminado correctamente.");
+                    alert("El asistente ha sido eliminado correctamente de todos los sistemas.");
                     listaBots = listaBots.filter(b => b.agent_id !== agentId);
                     renderizarTarjetas();
+                } else {
+                    alert("Error al intentar eliminar el bot: " + (data.detail || "Inténtalo de nuevo."));
                 }
             } catch (error) {
-                console.error(error);
+                alert("Error de red al intentar comunicarse con el servidor para la eliminación.");
             }
         }
     </script>

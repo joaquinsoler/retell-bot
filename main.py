@@ -47,27 +47,30 @@ def get_db_connection():
 
 def init_db():
     """Crea la tabla de asistentes si no existe en PostgreSQL al arrancar"""
-    conn = get_db_connection()
-    cur = conn.cursor()
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS asistentes (
-            id SERIAL PRIMARY KEY,
-            nombre_negocio VARCHAR(255),
-            sector VARCHAR(255),
-            servicios TEXT,
-            horario VARCHAR(255),
-            zona VARCHAR(255),
-            google_calendar_email VARCHAR(255),
-            asistente VARCHAR(255),
-            agent_id VARCHAR(255) UNIQUE,
-            phone_number VARCHAR(255),
-            fecha_creacion TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        );
-    """)
-    conn.commit()
-    cur.close()
-    conn.close()
-    print("✅ Base de datos PostgreSQL inicializada y lista.")
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS asistentes (
+                id SERIAL PRIMARY KEY,
+                nombre_negocio VARCHAR(255),
+                sector VARCHAR(255),
+                servicios TEXT,
+                horario VARCHAR(255),
+                zona VARCHAR(255),
+                google_calendar_email VARCHAR(255),
+                asistente VARCHAR(255),
+                agent_id VARCHAR(255) UNIQUE,
+                phone_number VARCHAR(255),
+                fecha_creacion TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+        """)
+        conn.commit()
+        cur.close()
+        conn.close()
+        print("✅ Base de datos PostgreSQL inicializada y lista.")
+    except Exception as e:
+        print(f"❌ Error crítico inicializando la Base de Datos: {e}")
 
 # Inicializamos la estructura de la base de datos al arrancar el backend
 init_db()
@@ -244,7 +247,7 @@ Cuando un usuario esté interesado en reservar, avanza de manera conversacional,
 3. **Número de Teléfono:** Para asegurar el contacto con el negocio.
 4. **Motivo de la Cita:** Consulta de manera cordial qué servicio de los que ofreces necesita.
 
-Solo cuando tengas recopilados estos 4 datos de forma exitosa, utiliza la herramienta `book_appointment` pasando obligatoriamente el email `{calendar_email}` en el campo `calendar_email`.
+Solo cuando tengas recopilados estos 4 datos de forma exitosa, utiliza la herramienta `book_appointment` pasando obligatoriamente el email `{calendar_email}` in el campo `calendar_email`.
 
 **REGLAS CRÍTICAS DE CONTROL DE ERRORES (Capa de Privacidad de Desarrollo):**
 - NUNCA menciones nombres de variables, formatos de código, mensajes de servidores, ni términos técnicos de software en la llamada (como "error de JSON", "función", "endpoint", "404", "500", "backend", o "respuesta incorrecta"). Está estrictamente prohibido.
@@ -310,11 +313,13 @@ def create_bot_for_client(nombre_negocio, sector, servicios, horario, zona, voic
     return nuevo_bot
 
 
-# ==================== ENLACES MÁGICOS (BREVO SMTP) ====================
+# ==================== ENLACES MÁGICOS (BREVO SMTP SSL) ====================
 def send_magic_link_email(to_email: str, link: str):
-    """Envía de forma segura el enlace mágico a través del servidor SMTP Relay de Brevo"""
+    """Envía el enlace mágico usando SMTP_SSL en el puerto 465 (Evita bloqueos del Firewall de Render)"""
+    print(f"🚀 Iniciando proceso SMTP para enviar correo a {to_email}...")
+    
     if not BREVO_SMTP_USER or not BREVO_SMTP_PASSWORD:
-        print("❌ Error: Las variables BREVO_SMTP_USER o BREVO_SMTP_PASSWORD no están configuradas.")
+        print("❌ ERROR CRÍTICO: BREVO_SMTP_USER o BREVO_SMTP_PASSWORD están vacías en el entorno.")
         return False
 
     msg = MIMEMultipart()
@@ -343,14 +348,19 @@ def send_magic_link_email(to_email: str, link: str):
     msg.attach(MIMEText(html_content, 'html'))
 
     try:
-        with smtplib.SMTP("smtp-relay.brevo.com", 587) as server:
-            server.starttls()
+        print("🔌 Conectando vía SMTP_SSL a Brevo (smtp-relay.brevo.com:465) con timeout de 10 segundos...")
+        with smtplib.SMTP_SSL("smtp-relay.brevo.com", 465, timeout=10) as server:
+            print(f"🔐 Conexión SSL establecida. Autenticando usuario: {BREVO_SMTP_USER}...")
             server.login(BREVO_SMTP_USER, BREVO_SMTP_PASSWORD)
+            print("🛫 Autenticación exitosa. Enviando paquete de datos del email...")
             server.sendmail(BREVO_SMTP_USER, to_email, msg.as_string())
-        print(f"📧 Enlace mágico enviado con éxito a {to_email}")
+        print(f"📧 ¡ÉXITO TOTAL! Enlace mágico enviado correctamente a {to_email}")
         return True
+    except smtplib.SMTPAuthenticationError:
+        print("❌ ERROR SMTP: Falló la autenticación. El usuario o la contraseña SMTP de Brevo son incorrectos.")
+        return False
     except Exception as e:
-        print(f"❌ Error gửi email qua Brevo SMTP: {e}")
+        print(f"❌ ERROR INESPERADO AL ENVIAR CORREO: {e}")
         return False
 
 
@@ -359,25 +369,33 @@ def send_magic_link_email(to_email: str, link: str):
 @app.post("/request-magic-link")
 async def request_magic_link(request: Request):
     """Endpoint para solicitar el envío del Magic Link por email aplicando TRIM e ignorando espacios invisibles"""
+    print("\n--- 📥 NUEVA SOLICITUD DE MAGIC LINK RECIBIDA ---")
     try:
         data = await request.json()
         email = data.get("email", "").strip().lower()
+        print(f"📋 Email saneado recibido en el body: '{email}'")
         
         if not email:
+            print("⚠️ Validación fallida: El campo email está vacío.")
             raise HTTPException(status_code=400, detail="El email es un campo obligatorio.")
             
+        print("🗄️ Conectando a la Base de Datos PostgreSQL para comprobar existencia...")
         conn = get_db_connection()
         cur = conn.cursor()
-        # CORRECCIÓN: TRIM() limpia espacios remanentes al inicio o final en la base de datos
-        cur.execute("SELECT COUNT(*) FROM asistentes WHERE TRIM(LOWER(google_calendar_email)) = TRIM(%s);", (email,))
+        
+        query = "SELECT COUNT(*) FROM asistentes WHERE TRIM(LOWER(google_calendar_email)) = TRIM(%s);"
+        print(f"🔍 Ejecutando Query SQL: {query} con parámetro '{email}'")
+        cur.execute(query, (email,))
         count = cur.fetchone()['count']
         cur.close()
         conn.close()
+        print(f"📊 Coincidencias encontradas en la Base de Datos: {count}")
         
         if count == 0:
+            print(f"❌ Acceso Denegado: El email '{email}' no existe en la base de datos de asistentes.")
             raise HTTPException(status_code=404, detail="Este correo no está vinculado a ningún asistente operativo.")
             
-        # Generar Token JWT temporal válido por 15 minutos (900 segundos)
+        print("🪙 Generando Token firmado JWT (Válido por 15 minutos)...")
         payload = {
             "email": email,
             "exp": datetime.now(ZoneInfo("UTC")).timestamp() + 900
@@ -385,16 +403,22 @@ async def request_magic_link(request: Request):
         token = jwt.encode(payload, JWT_SECRET, algorithm="HS256")
         
         magic_link = f"{FRONTEND_URL}?token={token}"
+        print(f"🔗 URL Mágica Estructurada: {magic_link}")
         
-        if send_magic_link_email(email, magic_link):
+        email_enviado = send_magic_link_email(email, magic_link)
+        
+        if email_enviado:
+            print("✅ Respuesta HTTP 200 enviada con éxito al cliente.")
             return {"status": "success", "message": "Enlace mágico enviado. Revisa tu bandeja de entrada."}
         else:
-            raise HTTPException(status_code=500, detail="No se pudo enviar el email debido a un problema con el proveedor SMTP.")
+            print("❌ El envío falló en el módulo SMTP. Elevando error 500 al cliente.")
+            raise HTTPException(status_code=500, detail="No se pudo procesar el envío de correo. Revisa los logs de autenticación SMTP.")
             
     except HTTPException as he:
         raise he
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        print(f"💥 CRISIS CRÍTICA EN ENDPOINT /request-magic-link: {e}")
+        raise HTTPException(status_code=500, detail=f"Fallo interno en el servidor: {str(e)}")
 
 
 @app.post("/verify-magic-token")
@@ -412,7 +436,6 @@ async def verify_magic_token(request: Request):
         
         conn = get_db_connection()
         cur = conn.cursor()
-        # CORRECCIÓN: Aseguramos también el TRIM en la extracción final de tarjetas
         cur.execute("SELECT * FROM asistentes WHERE TRIM(LOWER(google_calendar_email)) = TRIM(%s) ORDER BY id DESC;", (email,))
         bots = cur.fetchall()
         cur.close()

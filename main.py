@@ -82,9 +82,7 @@ MADRID_TZ = ZoneInfo("Europe/Madrid")
 
 def get_calendar_service():
     credentials_info = json.loads(GOOGLE_CREDENTIALS_JSON)
-    credentials = service_account.Credentials.from_service_account_info(
-        credentials_info, scopes=SCOPES
-    )
+    credentials = service_account.Credentials.from_service_account_info(credentials_info, scopes=SCOPES)
     return build('calendar', 'v3', credentials=credentials, cache_discovery=False)
 
 def ensure_calendar_access(calendar_id: str):
@@ -155,7 +153,7 @@ def create_google_event(calendar_id: str, summary: str, start_time: str, end_tim
         print(f"❌ Error Google Calendar: {e}")
         raise
 
-# ==================== VOICE MAPPING & RETELL ====================
+# ==================== RETELL & VOICE ====================
 VOICE_MAPPING = {
     "Cimo": "11labs-Adrian", "Brynne": "11labs-Brynne", "Chloe": "11labs-Chloe",
     "Kate": "openai-Nova", "Grace": "openai-Shimmer", "Leland": "11labs-Leland",
@@ -178,17 +176,12 @@ def retell_request(method: str, endpoint: str, json_data=None):
         return None
 
 def build_custom_prompt(nombre_negocio, sector, servicios, horario, zona, calendar_email):
-    return f"""Eres la voz y el asistente virtual exclusivo de {nombre_negocio}, un negocio enfocado en el sector de {sector}. Tu objetivo principal es atender a los clientes con la máxima amabilidad, empatía y profesionalidad, ofreciendo una conversación fluida, natural y cercana.
+    return f"""Eres la voz y el asistente virtual exclusivo de {nombre_negocio}, un negocio enfocado en el sector de {sector}. Tu objetivo principal es atender a los clientes con la máxima amabilidad, empatía y profesionalidad.
 
-**ALCANCE DE TUS FUNCIONES (Muy Importante):**
-- Tus únicas capacidades y tareas autorizadas son: **dar información detallada sobre el negocio** y **agendar nuevas citas**.
-- Si el usuario te solicita cancelar, modificar o eliminar una cita, responde educadamente que solo puedes agendar nuevas.
-
-**INFORMACIÓN OPERATIVA:**
-- Ubicación / Zona: {zona}
-- Horario: {horario}
-- Servicios: {servicios}
-- Email Calendar: {calendar_email}"""
+**FUNCIONES:**
+- Dar información del negocio
+- Agendar nuevas citas
+- Si piden cancelar o modificar: explica que solo puedes agendar nuevas."""
 
 def create_bot_for_client(nombre_negocio, sector, servicios, horario, zona, voice_id, calendar_email):
     custom_prompt = build_custom_prompt(nombre_negocio, sector, servicios, horario, zona, calendar_email)
@@ -231,7 +224,6 @@ def create_bot_for_client(nombre_negocio, sector, servicios, horario, zona, voic
 
     agent_id = agent_res["agent_id"]
 
-    # Asignar número libre
     numbers = retell_request("GET", "/v2/list-phone-numbers")
     free_number = None
     if numbers and "items" in numbers:
@@ -257,7 +249,7 @@ def create_bot_for_client(nombre_negocio, sector, servicios, horario, zona, voic
 
     return {"status": "success", "agent_id": agent_id, "phone_number": free_number}
 
-# ==================== MAGIC LINK FUNCTIONS ====================
+# ==================== MAGIC LINK ====================
 def create_magic_token(email: str):
     expire = datetime.utcnow() + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
     data = {"sub": email.lower(), "exp": expire}
@@ -293,7 +285,7 @@ def send_magic_link_email(email: str, magic_link: str):
         print(f"❌ Error Brevo: {e}")
         return False
 
-# ==================== MAGIC LINK ENDPOINTS ====================
+# ==================== ENDPOINTS MAGIC LINK ====================
 class MagicLinkRequest(BaseModel):
     email: str
 
@@ -306,7 +298,7 @@ async def send_magic_link(request: Request):
             raise HTTPException(400, "Email inválido")
 
         token = create_magic_token(email)
-        magic_link = f"https://TU-DOMINIO-AQUÍ.com/editar-asistente?token={token}"  # ← CAMBIA ESTA URL
+        magic_link = f"https://www.dansu.info/blank-4?token={token}"
 
         if send_magic_link_email(email, magic_link):
             return {"status": "success", "message": "Enlace enviado a tu correo"}
@@ -339,7 +331,7 @@ async def verify_magic_token_endpoint(request: Request):
     except Exception as e:
         raise HTTPException(401, "Token inválido")
 
-# ==================== TUS ENDPOINTS ORIGINALES ====================
+# ==================== ENDPOINTS ORIGINALES ====================
 @app.post("/get-user-bots")
 async def get_user_bots(request: Request):
     try:
@@ -370,19 +362,6 @@ async def create_retell_bot_endpoint(request: Request):
         raise HTTPException(500, str(e))
 
 
-@app.post("/update-retell-bot")
-async def update_retell_bot_endpoint(request: Request):
-    # (Pega aquí tu función original completa de update si quieres)
-    # Por ahora devolvemos success básico
-    return {"status": "success", "message": "Actualización pendiente de implementación completa"}
-
-
-@app.post("/delete-retell-bot")
-async def delete_retell_bot_endpoint(request: Request):
-    # (Pega aquí tu función original)
-    return {"status": "success", "message": "Eliminación pendiente"}
-
-
 @app.post("/book-appointment")
 async def book_appointment(request: Request):
     try:
@@ -399,19 +378,6 @@ async def book_appointment(request: Request):
         return {"code": "SUCCESS", "message": "Cita agendada correctamente"}
     except Exception as e:
         return {"code": "ERROR", "message": str(e)}
-
-
-@app.post("/verify-calendar-access")
-async def verify_calendar_access(request: Request):
-    try:
-        data = await request.json()
-        calendar_email = data.get("calendar_email")
-        create_google_event(
-            calendar_email, "Prueba Dansu", "2026-07-01T10:00:00", "2026-07-01T10:30:00", bypass_availability=True
-        )
-        return {"status": "success"}
-    except Exception as e:
-        raise HTTPException(400, str(e))
 
 
 @app.get("/")

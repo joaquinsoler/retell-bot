@@ -1,305 +1,384 @@
-import os
-import json
-import traceback
-from datetime import datetime, timedelta
-from zoneinfo import ZoneInfo
-
-from fastapi import FastAPI, HTTPException, Request
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse
-from pydantic import BaseModel
-
-import requests
-import psycopg2
-from psycopg2.extras import RealDictCursor
-
-from google.oauth2 import service_account
-from googleapiclient.discovery import build
-from googleapiclient.errors import HttpError
-
-from jose import JWTError, jwt
-
-app = FastAPI(title="Dansu Backend - Autenticación por Memoria de IP")
-
-# ==================== VARIABLES DE ENTORNO ====================
-RETELL_API_KEY = os.getenv("RETELL_API_KEY")
-GOOGLE_CREDENTIALS_JSON = os.getenv("GOOGLE_CREDENTIALS")
-DATABASE_URL = os.getenv("DATABASE_URL")
-JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY")
-BREVO_API_KEY = os.getenv("BREVO_API_KEY")
-
-if not all([RETELL_API_KEY, GOOGLE_CREDENTIALS_JSON, DATABASE_URL, JWT_SECRET_KEY]):
-    raise Exception("❌ Faltan variables de entorno críticas para arrancar el servidor.")
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-ALGORITHM = "HS256"
-ACCESS_TOKEN_EXPIRE_MINUTES = 15
-
-# Almacén temporal de sesiones validadas indexadas por IP (IP: {"email": email, "expira": datetime})
-SESIONES_ACTIVAS = {}
-
-# ==================== DB ====================
-def get_db_connection():
-    return psycopg2.connect(DATABASE_URL, cursor_factory=RealDictCursor)
-
-def init_db():
-    conn = get_db_connection()
-    cur = conn.cursor()
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS asistentes (
-            id SERIAL PRIMARY KEY,
-            nombre_negocio VARCHAR(255),
-            sector VARCHAR(255),
-            servicios TEXT,
-            horario VARCHAR(255),
-            zona VARCHAR(255),
-            google_calendar_email VARCHAR(255),
-            asistente VARCHAR(255),
-            agent_id VARCHAR(255) UNIQUE,
-            phone_number VARCHAR(255),
-            fecha_creacion TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        );
-    """)
-    conn.commit()
-    cur.close()
-    conn.close()
-
-init_db()
-
-# ==================== GOOGLE CALENDAR & RETELL DE RESPALDO ====================
-SCOPES = ['https://www.googleapis.com/auth/calendar']
-MADRID_TZ = ZoneInfo("Europe/Madrid")
-
-def get_calendar_service():
-    credentials_info = json.loads(GOOGLE_CREDENTIALS_JSON)
-    return build('calendar', 'v3', credentials=service_account.Credentials.from_service_account_info(credentials_info, scopes=SCOPES), cache_discovery=False)
-
-def ensure_calendar_access(calendar_id: str):
-    try:
-        get_calendar_service().calendarList().insert(body={'id': calendar_id}).execute()
-    except HttpError as e:
-        if e.status_code != 409: print(f"⚠️ Calendar List: {e}")
-
-def normalize_to_madrid_iso(dt_str: str) -> str:
-    if not dt_str: return dt_str
-    dt_str = str(dt_str).strip().replace(" ", "T")
-    try:
-        dt = datetime.fromisoformat(dt_str[:-1]).replace(tzinfo=ZoneInfo("UTC")) if dt_str.endswith("Z") else datetime.fromisoformat(dt_str)
-        if dt.tzinfo is None: dt = dt.replace(tzinfo=MADRID_TZ)
-        return dt.astimezone(MADRID_TZ).isoformat()
-    except: return dt_str
-
-def check_availability(calendar_id: str, start_time: str, end_time: str) -> bool:
-    try:
-        body = {"timeMin": normalize_to_madrid_iso(start_time), "timeMax": normalize_to_madrid_iso(end_time), "timeZone": "Europe/Madrid", "items": [{"id": calendar_id}]}
-        fb = get_calendar_service().freebusy().query(body=body).execute()
-        return len(fb.get("calendars", {}).get(calendar_id, {}).get("busy", [])) == 0
-    except: return True
-
-def create_google_event(calendar_id: str, summary: str, start_time: str, end_time: str, description: str = "", bypass_availability: bool = False):
-    try:
-        ensure_calendar_access(calendar_id)
-        if not bypass_availability and not check_availability(calendar_id, start_time, end_time): raise Exception("Horario ocupado")
-        event = {'summary': summary[:100], 'description': description or "Cita agendada por Dansu AI", 'start': {'dateTime': normalize_to_madrid_iso(start_time), 'timeZone': 'Europe/Madrid'}, 'end': {'dateTime': normalize_to_madrid_iso(end_time), 'timeZone': 'Europe/Madrid'}}
-        return get_calendar_service().events().insert(calendarId=calendar_id, body=event, sendUpdates='none').execute()
-    except Exception as e: print(f"❌ Google Error: {e}"); raise
-
-VOICE_MAPPING = {
-    "Cimo": "11labs-Adrian", "Brynne": "11labs-Brynne", "Chloe": "11labs-Chloe", "Kate": "openai-Nova", "Grace": "openai-Shimmer", 
-    "Leland": "11labs-Leland", "Marissa": "11labs-Marissa", "Lily": "11labs-Lily", "Della": "11labs-Delia", "Nico": "openai-Onyx", 
-    "Rita": "11labs-Rita", "Meritt": "11labs-Meritt", "Willa": "11labs-Willa", "Maren": "11labs-Maren", "Tasmin": "11labs-Tasmin", 
-    "Ashley": "11labs-Ashley", "Andrea": "openai-Alloy", "Claudia": "11labs-Claudia", "Gaby": "11labs-Gaby", "Alejandro": "openai-Echo", "Sloane": "11labs-Sloane"
-}
-
-def create_bot_for_client(nombre_negocio, sector, servicios, horario, zona, voice_id, calendar_email):
-    return {"status": "success", "agent_id": f"agent_{int(datetime.utcnow().timestamp())}", "phone_number": "+34900000000"}
-
-# ==================== TOKENS & EMAIL ====================
-def create_magic_token(email: str):
-    expire = datetime.utcnow() + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
-    return jwt.encode({"sub": email.lower(), "exp": expire}, JWT_SECRET_KEY, algorithm=ALGORITHM)
-
-def verify_magic_token(token: str):
-    try:
-        payload = jwt.decode(token, JWT_SECRET_KEY, algorithms=[ALGORITHM])
-        return payload.get("sub")
-    except JWTError: return None
-
-def send_magic_link_email(email: str, magic_link: str):
-    try:
-        payload = {
-            "sender": {"name": "Dansu AI", "email": "no-reply@dansu.info"},
-            "to": [{"email": email}],
-            "subject": "🔑 Tu enlace de acceso a Dansu AI",
-            "htmlContent": f"""
-                <html>
-                <body style="font-family: sans-serif; padding: 30px; background-color: #f8fafc; color: #1e293b;">
-                    <div style="max-width: 500px; margin: 0 auto; background: white; padding: 30px; border-radius: 16px; border: 1px solid #e2e8f0;">
-                        <h2 style="color: #0f172a; margin-top: 0;">¡Hola!</h2>
-                        <p>Haz clic en el botón inferior para iniciar sesión de forma segura e inmediata en tu panel de control de asistentes:</p>
-                        <div style="text-align: center; margin: 30px 0;">
-                            <a href="{magic_link}" target="_blank" style="background-color: #0078FF; color: white; padding: 14px 28px; text-decoration: none; border-radius: 12px; font-weight: 600; display: inline-block;">Acceder a mi Panel ✨</a>
-                        </div>
-                    </div>
-                </body>
-                </html>
-            """
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Área de Cliente - Dansu AI</title>
+    <style>
+        html, body {
+            font-family: 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+            margin: 0; padding: 15px; background: transparent; color: #333;
+            overflow-y: auto; overflow-x: hidden;
         }
-        r = requests.post("https://api.brevo.com/v3/smtp/email", headers={"api-key": BREVO_API_KEY, "Content-Type": "application/json"}, json=payload, timeout=15)
-        return r.status_code in (200, 201)
-    except: return False
+        .header-nav { display: flex; justify-content: space-between; align-items: center; margin-bottom: 25px; }
+        h2 { color: #111; margin: 0; }
+        .subtitle { color: #666; font-size: 14px; margin-bottom: 25px; }
+        .btn-back-home {
+            display: inline-flex; align-items: center; gap: 8px; padding: 8px 16px;
+            background: #f1f5f9; color: #334155; border: 1px solid #e2e8f0; border-radius: 10px;
+            font-weight: 600; font-size: 13px; text-decoration: none; cursor: pointer; transition: all 0.2s;
+        }
+        .btn-back-home:hover { background: #e2e8f0; color: #0f172a; }
+        .login-box {
+            max-width: 400px; margin: 40px auto; padding: 30px;
+            background: #fff; border: 1px solid #e2e8f0; border-radius: 20px;
+            box-shadow: 0 10px 25px rgba(0,0,0,0.05); text-align: center;
+        }
+        .login-box input {
+            width: 100%; padding: 12px; margin: 15px 0; border: 1px solid #cbd5e1;
+            border-radius: 12px; box-sizing: border-box; font-size: 14px; text-align: center;
+        }
+        .btn-primary {
+            width: 100%; padding: 12px; background: #0078FF; color: white;
+            border: none; border-radius: 12px; font-weight: 600; cursor: pointer; transition: background 0.2s;
+        }
+        .btn-primary:hover { background: #0056B3; }
+        .btn-primary:disabled { background: #94a3b8; cursor: not-allowed; }
+        .panel-container { display: none; }
+        .bots-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 20px; margin-bottom: 30px; }
+        .bot-card { border: 1px solid #e2e8f0; border-radius: 16px; background: #fff; padding: 20px; box-shadow: 0 4px 6px -1px rgba(0,0,0,0.05); position: relative; }
+        .bot-title { font-size: 18px; font-weight: 600; color: #111; margin: 0 0 5px 0; }
+        .bot-sector { font-size: 11px; font-weight: 600; text-transform: uppercase; color: #0078FF; background: #E6F2FF; padding: 3px 8px; border-radius: 20px; display: inline-block; margin-bottom: 15px; }
+        .bot-info { font-size: 13px; color: #555; margin-bottom: 8px; }
+        .bot-info strong { color: #222; }
+        .action-buttons-container { display: flex; gap: 8px; margin-top: 15px; }
+        .btn-manage { flex: 2; padding: 10px; background: #0078FF; color: #fff; border: none; border-radius: 10px; font-weight: 600; cursor: pointer; }
+        .btn-manage:hover { background: #0056B3; }
+        .btn-delete-bot { flex: 1; padding: 10px; background: #ef4444; color: #fff; border: none; border-radius: 10px; font-weight: 600; cursor: pointer; }
+        .btn-delete-bot:hover { background: #b91c1c; }
+        .edit-box { display: none; background: #fff; border: 1px solid #e2e8f0; border-radius: 20px; padding: 25px; box-shadow: 0 20px 25px -5px rgba(0,0,0,0.1); margin-top: 20px; }
+        .form-group { margin-bottom: 15px; }
+        label { display: block; font-weight: 600; font-size: 13px; margin-bottom: 6px; color: #444; }
+        input[type="text"], input[type="email"], textarea { width: 100%; padding: 11px; border: 1px solid #cbd5e1; border-radius: 10px; box-sizing: border-box; font-family: inherit; font-size: 14px; }
+        textarea { resize: vertical; height: 80px; }
+        .slider-container { display: flex; overflow-x: auto; gap: 15px; padding: 10px 5px; scroll-snap-type: x mandatory; scrollbar-width: none; margin-bottom: 20px; }
+        .slider-container::-webkit-scrollbar { display: none; }
+        .card { flex: 0 0 240px; border: 2px solid #e2e8f0; border-radius: 16px; background: #fff; scroll-snap-align: start; }
+        .card.selected { border-color: #0078FF; box-shadow: 0 10px 15px rgba(0,120,255,0.15); }
+        .video-wrapper { height: 130px; background: #000; border-top-left-radius: 14px; border-top-right-radius: 14px; overflow: hidden; }
+        video { width: 100%; height: 100%; object-fit: cover; }
+        .card-info { padding: 12px; text-align: center; }
+        .card-name { font-size: 16px; font-weight: bold; margin-bottom: 8px; }
+        .btn-select { width: 100%; padding: 8px; border: 2px solid #0078FF; background: transparent; color: #0078FF; border-radius: 8px; font-weight: bold; cursor: pointer; font-size: 13px; }
+        .card.selected .btn-select { background: #0078FF; color: white; }
+        .btn-container { display: flex; gap: 10px; margin-top: 20px; }
+        .btn-save { flex: 2; padding: 12px; background: #10B981; color: white; border: none; border-radius: 10px; font-weight: 600; cursor: pointer; }
+        .btn-save:hover { background: #059669; }
+        .btn-cancel { flex: 1; padding: 12px 20px; background: #64748b; color: white; border: none; border-radius: 10px; font-weight: 600; cursor: pointer; }
+        .btn-cancel:hover { background: #475569; }
+        .btn-danger-zone { width: 100%; padding: 12px; background: #ef4444; color: white; border: none; border-radius: 10px; font-weight: 600; cursor: pointer; margin-top: 15px; transition: background 0.2s; }
+        .btn-danger-zone:hover { background: #b91c1c; }
+        .no-bots { text-align: center; color: #94a3b8; padding: 40px 0; font-size: 15px; grid-column: 1 / -1; }
+    </style>
+</head>
+<body>
 
-# ==================== ENDPOINTS DE CONTROL DE ACCESO (ESTRATEGIA REFORZADA IP) ====================
+    <div class="header-nav">
+        <a href="https://dansu.info" target="_top" class="btn-back-home">← Volver a Inicio</a>
+    </div>
 
-@app.post("/request-magic-link")
-async def request_magic_link(request: Request):
-    print("\n--- 📥 SOLICITUD EN /request-magic-link ---")
-    try:
-        data = await request.json()
-        email = data.get("email", "").strip().lower()
-        if not email or "@" not in email: raise HTTPException(400, "Email inválido")
+    <div id="auth-screen" class="login-box">
+        <h3 style="margin-top:0;">Accede a tu Panel</h3>
+        <p id="auth-instruction" style="font-size:13px; color:#666; margin:0;">Introduce el Email de Google Calendar vinculado a tus asistentes. Te enviaremos un enlace mágico de acceso directo a tu correo electrónico.</p>
+        <input type="email" id="auth-email" placeholder="ejemplo@gmail.com" required>
+        <button id="btn-login" class="btn-primary" onclick="solicitarEnlaceMagico()">Recibir Enlace Mágico ✨</button>
+    </div>
 
-        token = create_magic_token(email)
-        magic_link = f"https://retell-bot.onrender.com/redirect-to-wix?token={token}"
+    <div id="main-panel" class="panel-container">
+        <h2>Tus Asistentes Inteligentes</h2>
+        <p class="subtitle">Gestiona, reconfigura y actualiza el comportamiento operativo de tus agentes en tiempo real.</p>
+        <div id="bots-container" class="bots-grid"></div>
 
-        if send_magic_link_email(email, magic_link):
-            return {"status": "success", "message": "Enlace enviado de forma transaccional."}
-        raise HTTPException(500, "Error enviando email.")
-    except Exception as e: raise HTTPException(500, str(e))
+        <div id="edit-panel" class="edit-box">
+            <h3 style="margin-top: 0; color:#111;">⚙️ Editar Parámetros del Asistente</h3>
+            
+            <div class="form-group">
+                <label>Voz del Asistente Virtual</label>
+                <div class="slider-container">
+                    <div class="card" data-voice="Cimo"><div class="video-wrapper"><video controls preload="metadata" playsinline><source src="https://video.wixstatic.com/video/a23405_aeaa8ab0b44f45d7a743cec6f4c52d71/144p/mp4/file.mp4" type="video/mp4"></video></div><div class="card-info"><div class="card-name">Cimo</div><button type="button" class="btn-select" onclick="seleccionarVozEdicion(this)">Seleccionar</button></div></div>
+                    <div class="card" data-voice="Brynne"><div class="video-wrapper"><video controls preload="metadata" playsinline><source src="https://video.wixstatic.com/video/a23405_8d7463b0d217475b854d4348b73225f5/720p/mp4/file.mp4" type="video/mp4"></video></div><div class="card-info"><div class="card-name">Brynne</div><button type="button" class="btn-select" onclick="seleccionarVozEdicion(this)">Seleccionar</button></div></div>
+                    <div class="card" data-voice="Chloe"><div class="video-wrapper"><video controls preload="metadata" playsinline><source src="https://video.wixstatic.com/video/a23405_6dee4ac9168044ca8d33ed61d2e1c82d/480p/mp4/file.mp4" type="video/mp4"></video></div><div class="card-info"><div class="card-name">Chloe</div><button type="button" class="btn-select" onclick="seleccionarVozEdicion(this)">Seleccionar</button></div></div>
+                    <div class="card" data-voice="Kate"><div class="video-wrapper"><video controls preload="metadata" playsinline><source src="https://video.wixstatic.com/video/a23405_3b57c0423f3946c09256f7a7da0f7e12/144p/mp4/file.mp4" type="video/mp4"></video></div><div class="card-info"><div class="card-name">Kate</div><button type="button" class="btn-select" onclick="seleccionarVozEdicion(this)">Seleccionar</button></div></div>
+                    <div class="card" data-voice="Grace"><div class="video-wrapper"><video controls preload="metadata" playsinline><source src="https://video.wixstatic.com/video/a23405_42cd8b8b69054fa48ee2f17a2fb14f07/144p/mp4/file.mp4" type="video/mp4"></video></div><div class="card-info"><div class="card-name">Grace</div><button type="button" class="btn-select" onclick="seleccionarVozEdicion(this)">Seleccionar</button></div></div>
+                    <div class="card" data-voice="Leland"><div class="video-wrapper"><video controls preload="metadata" playsinline><source src="https://video.wixstatic.com/video/a23405_56d5f8b0f9ea471194e84b6ca9dac329/720p/mp4/file.mp4" type="video/mp4"></video></div><div class="card-info"><div class="card-name">Leland</div><button type="button" class="btn-select" onclick="seleccionarVozEdicion(this)">Seleccionar</button></div></div>
+                    <div class="card" data-voice="Marissa"><div class="video-wrapper"><video controls preload="metadata" playsinline><source src="https://video.wixstatic.com/video/a23405_41447efa9e474ae89bd52134a2f6e5fa/480p/mp4/file.mp4" type="video/mp4"></video></div><div class="card-info"><div class="card-name">Marissa</div><button type="button" class="btn-select" onclick="seleccionarVozEdicion(this)">Seleccionar</button></div></div>
+                    <div class="card" data-voice="Lily"><div class="video-wrapper"><video controls preload="metadata" playsinline><source src="https://video.wixstatic.com/video/a23405_2a8ec92d24a44bfe93ab905b79a2bbf8/720p/mp4/file.mp4" type="video/mp4"></video></div><div class="card-info"><div class="card-name">Lily</div><button type="button" class="btn-select" onclick="seleccionarVozEdicion(this)">Seleccionar</button></div></div>
+                    <div class="card" data-voice="Della"><div class="video-wrapper"><video controls preload="metadata" playsinline><source src="https://video.wixstatic.com/video/a23405_36d8c455c4a145618063be0974b049d9/720p/mp4/file.mp4" type="video/mp4"></video></div><div class="card-info"><div class="card-name">Della</div><button type="button" class="btn-select" onclick="seleccionarVozEdicion(this)">Seleccionar</button></div></div>
+                    <div class="card" data-voice="Nico"><div class="video-wrapper"><video controls preload="metadata" playsinline><source src="https://video.wixstatic.com/video/a23405_3959c8fa727040bfbe03f00996bc5bf9/720p/mp4/file.mp4" type="video/mp4"></video></div><div class="card-info"><div class="card-name">Nico</div><button type="button" class="btn-select" onclick="seleccionarVozEdicion(this)">Seleccionar</button></div></div>
+                    <div class="card" data-voice="Rita"><div class="video-wrapper"><video controls preload="metadata" playsinline><source src="https://video.wixstatic.com/video/a23405_0cb800885f9e4e6fb2478f79fbc9b7b9/144p/mp4/file.mp4" type="video/mp4"></video></div><div class="card-info"><div class="card-name">Rita</div><button type="button" class="btn-select" onclick="seleccionarVozEdicion(this)">Seleccionar</button></div></div>
+                    <div class="card" data-voice="Meritt"><div class="video-wrapper"><video controls preload="metadata" playsinline><source src="https://video.wixstatic.com/video/a23405_d994fa4cfc88421c977df76fbf431b9c/720p/mp4/file.mp4" type="video/mp4"></video></div><div class="card-info"><div class="card-name">Meritt</div><button type="button" class="btn-select" onclick="seleccionarVozEdicion(this)">Seleccionar</button></div></div>
+                    <div class="card" data-voice="Willa"><div class="video-wrapper"><video controls preload="metadata" playsinline><source src="https://video.wixstatic.com/video/a23405_bfb69cdb90ec422197be07c8702b87ff/720p/mp4/file.mp4" type="video/mp4"></video></div><div class="card-info"><div class="card-name">Willa</div><button type="button" class="btn-select" onclick="seleccionarVozEdicion(this)">Seleccionar</button></div></div>
+                    <div class="card" data-voice="Maren"><div class="video-wrapper"><video controls preload="metadata" playsinline><source src="https://video.wixstatic.com/video/a23405_4a317769e5bd478fb1f56860d5bfa780/720p/mp4/file.mp4" type="video/mp4"></video></div><div class="card-info"><div class="card-name">Maren</div><button type="button" class="btn-select" onclick="seleccionarVozEdicion(this)">Seleccionar</button></div></div>
+                    <div class="card" data-voice="Tasmin"><div class="video-wrapper"><video controls preload="metadata" playsinline><source src="https://video.wixstatic.com/video/a23405_1cbfa8fb96cd4b5fae563065b7cb3ca4/480p/mp4/file.mp4" type="video/mp4"></video></div><div class="card-info"><div class="card-name">Tasmin</div><button type="button" class="btn-select" onclick="seleccionarVozEdicion(this)">Seleccionar</button></div></div>
+                    <div class="card" data-voice="Ashley"><div class="video-wrapper"><video controls preload="metadata" playsinline><source src="https://video.wixstatic.com/video/a23405_df7179069d2f45fb88b39b56f8f10665/720p/mp4/file.mp4" type="video/mp4"></video></div><div class="card-info"><div class="card-name">Ashley</div><button type="button" class="btn-select" onclick="seleccionarVozEdicion(this)">Seleccionar</button></div></div>
+                    <div class="card" data-voice="Andrea"><div class="video-wrapper"><video controls preload="metadata" playsinline><source src="https://video.wixstatic.com/video/a23405_b66b0393f9e94bf6be76e33ce1d5a3ec/144p/mp4/file.mp4" type="video/mp4"></video></div><div class="card-info"><div class="card-name">Andrea</div><button type="button" class="btn-select" onclick="seleccionarVozEdicion(this)">Seleccionar</button></div></div>
+                    <div class="card" data-voice="Claudia"><div class="video-wrapper"><video controls preload="metadata" playsinline><source src="https://video.wixstatic.com/video/a23405_df2881b76dfc4066af8dbfb5be16ba48/720p/mp4/file.mp4" type="video/mp4"></video></div><div class="card-info"><div class="card-name">Claudia</div><button type="button" class="btn-select" onclick="seleccionarVozEdicion(this)">Seleccionar</button></div></div>
+                    <div class="card" data-voice="Gaby"><div class="video-wrapper"><video controls preload="metadata" playsinline><source src="https://video.wixstatic.com/video/a23405_8f5ba2f89f2d4e1ca91307b22a9477b8/720p/mp4/file.mp4" type="video/mp4"></video></div><div class="card-info"><div class="card-name">Gaby</div><button type="button" class="btn-select" onclick="seleccionarVozEdicion(this)">Seleccionar</button></div></div>
+                    <div class="card" data-voice="Alejandro"><div class="video-wrapper"><video controls preload="metadata" playsinline><source src="https://video.wixstatic.com/video/a23405_fc8890cb5b3d4a23bda783c139c878f2/144p/mp4/file.mp4" type="video/mp4"></video></div><div class="card-info"><div class="card-name">Alejandro</div><button type="button" class="btn-select" onclick="seleccionarVozEdicion(this)">Seleccionar</button></div></div>
+                    <div class="card" data-voice="Sloane"><div class="video-wrapper"><video controls preload="metadata" playsinline><source src="https://video.wixstatic.com/video/a23405_41a384fec030467794cc4d63b27b3726/720p/mp4/file.mp4" type="video/mp4"></video></div><div class="card-info"><div class="card-name">Sloane</div><button type="button" class="btn-select" onclick="seleccionarVozEdicion(this)">Seleccionar</button></div></div>
+                </div>
+            </div>
 
+            <div class="form-group">
+                <label for="edit-nombre">Nombre del Negocio</label>
+                <input type="text" id="edit-nombre" required>
+            </div>
+            <div class="form-group">
+                <label for="edit-sector">Sector de Actividad</label>
+                <input type="text" id="edit-sector" required>
+            </div>
+            <div class="form-group">
+                <label for="edit-servicios">Servicios Disponibles (Separa por comas)</label>
+                <textarea id="edit-servicios" required></textarea>
+            </div>
+            <div class="form-group">
+                <label for="edit-horario">Horario Comercial</label>
+                <input type="text" id="edit-horario" required>
+            </div>
+            <div class="form-group">
+                <label for="edit-zona">Zona de Ubicación</label>
+                <input type="text" id="edit-zona" required>
+            </div>
+            <div class="form-group">
+                <label for="edit-calendar">Email de Google Calendar (Donde se agendará)</label>
+                <input type="email" id="edit-calendar" required>
+            </div>
 
-@app.get("/redirect-to-wix", response_class=HTMLResponse)
-async def redirect_to_wix(token: str, request: Request):
-    """
-    PASO CLAVE: El usuario pulsa el enlace en Gmail y llega aquí. 
-    Verificamos el token, y en vez de pasárselo a Wix, asociamos su email con su dirección IP actual.
-    """
-    print(f"\n--- 🔀 PUENTE POR IP ACTIVADO ---")
-    email = verify_magic_token(token)
-    
-    if not email:
-        return "<html><body><h3>❌ El enlace es inválido o ha caducado. Por favor, solicita uno nuevo.</h3></body></html>"
-    
-    # Extraer la IP real del cliente detrás del proxy de Render/Cloudflare
-    client_ip = request.headers.get("x-forwarded-for", request.client.host).split(",")[0].strip()
-    
-    # Registramos que esta IP tiene autorización para entrar con este email durante 5 minutos
-    SESIONES_ACTIVAS[client_ip] = {
-        "email": email,
-        "expira": datetime.utcnow() + timedelta(minutes=5)
-    }
-    print(f"✅ IP {client_ip} emparejada temporalmente con {email}")
+            <div class="btn-container">
+                <button class="btn-save" onclick="guardarCambios()">Guardar Configuración 💾</button>
+                <button class="btn-cancel" onclick="cerrarEdicion()">Cancelar</button>
+            </div>
 
-    # Redirigimos al usuario a Wix completamente limpio de parámetros.
-    wix_url = "https://www.dansu.info/blank-4"
-    return f"""
-    <html>
-        <head><meta http-equiv="refresh" content="0;url={wix_url}"></head>
-        <body style="font-family:sans-serif; text-align:center; padding-top:50px;">
-            <h3>Verificación completada con éxito. Cargando tu panel... 🚀</h3>
-        </body>
-    </html>
-    """
+            <button class="btn-danger-zone" id="btn-eliminar-global" onclick="ejecutarEliminacionDesdeForm()">
+                ⚠️ Eliminar este Asistente Permanentemente
+            </button>
+        </div>
+    </div>
 
+    <script>
+        const BACKEND_URL = "https://retell-bot.onrender.com"; 
+        let emailUsuario = "";
+        let listaBots = [];
+        let botEnEdicion = null;
+        let vozSeleccionadaNombre = "";
 
-@app.get("/check-session")
-async def check_session(request: Request):
-    """
-    El iFrame de Wix llamará silenciosamente aquí nada más cargar. 
-    Comprobamos si su IP se acaba de validar en el correo.
-    """
-    client_ip = request.headers.get("x-forwarded-for", request.client.host).split(",")[0].strip()
-    print(f"🔍 iFrame de Wix consultando sesión activa para la IP: {client_ip}")
-    
-    sesion = SESIONES_ACTIVAS.get(client_ip)
-    if not sesion:
-        return {"status": "no_session"}
-    
-    if datetime.utcnow() > sesion["expira"]:
-        del SESIONES_ACTIVAS[client_ip]
-        return {"status": "no_session"}
-        
-    email = sesion["email"]
-    # Consumimos la sesión para que nadie más desde esa IP pueda reutilizarla
-    del SESIONES_ACTIVAS[client_ip]
-    
-    print(f"🎯 ¡Sesión recuperada e inyectada con éxito a Wix para: {email}!")
-    
-    # Devolvemos de forma directa los bots asignados a este email
-    conn = get_db_connection()
-    cur = conn.cursor()
-    cur.execute("SELECT * FROM asistentes WHERE google_calendar_email = %s ORDER BY id DESC;", (email,))
-    bots = cur.fetchall()
-    cur.close()
-    conn.close()
-    
-    return {"status": "success", "email": email, "bots": bots}
+        // ==================== ESTRATEGIA DE AUTENTICACIÓN INVISIBLE POR COMPROBACIÓN DE IP ====================
+        window.onload = async function() {
+            console.log("🚀 Frontend cargado. Consultando estado de sesión invisible por IP...");
+            
+            // Ponemos la interfaz en modo comprobación temporal por si acaso hay una sesión activa
+            document.getElementById('auth-instruction').innerText = "⏳ Sincronizando de forma segura tus credenciales de acceso...";
+            document.getElementById('auth-email').style.display = 'none';
+            document.getElementById('btn-login').style.display = 'none';
+            
+            try {
+                // El iFrame le pregunta a Render si su IP se acaba de validar en el correo electrónico
+                const res = await fetch(`${BACKEND_URL}/check-session`);
+                const data = await res.json();
+                console.log("📥 Resultado de sesión por IP:", data);
 
-# ==================== RESTO DE ENDPOINTS ORIGINALES MANTENIDOS ====================
+                if (res.ok && data.status === "success") {
+                    // ¡BINGO! Render validó su IP. Iniciamos sesión automáticamente
+                    emailUsuario = data.email;
+                    listaBots = data.bots;
+                    
+                    document.getElementById('auth-screen').style.display = 'none';
+                    document.getElementById('main-panel').style.display = 'block';
+                    renderizarTarjetas();
+                } else {
+                    // No hay sesión activa para esta IP. Devolvemos el login manual
+                    console.log("🔍 No hay sesión activa por IP. Restaurando login manual.");
+                    restaurarPantallaLogin();
+                }
+            } catch (error) {
+                console.error("❌ Error verificando sesión invisible:", error);
+                restaurarPantallaLogin();
+            }
+        };
 
-@app.post("/verify-magic-token")
-async def verify_magic_token_endpoint(request: Request):
-    # Lo mantenemos por retrocompatibilidad por si hiciese falta
-    data = await request.json()
-    email = verify_magic_token(data.get("token"))
-    if not email: raise HTTPException(401, "Token caducado")
-    conn = get_db_connection()
-    cur = conn.cursor()
-    cur.execute("SELECT * FROM asistentes WHERE google_calendar_email = %s ORDER BY id DESC;", (email,))
-    bots = cur.fetchall()
-    cur.close()
-    conn.close()
-    return {"status": "success", "email": email, "bots": bots}
+        function restaurarPantallaLogin() {
+            document.getElementById('auth-instruction').innerText = "Introduce el Email de Google Calendar vinculado a tus asistentes. Te enviaremos un enlace mágico de acceso directo a tu correo electrónico.";
+            document.getElementById('auth-email').style.display = 'block';
+            document.getElementById('btn-login').style.display = 'block';
+            document.getElementById('btn-login').innerText = "Recibir Enlace Mágico ✨";
+            document.getElementById('btn-login').disabled = false;
+        }
 
-@app.post("/update-retell-bot")
-async def update_retell_bot_endpoint(request: Request):
-    data = await request.json()
-    conn = get_db_connection()
-    cur = conn.cursor()
-    cur.execute("""
-        UPDATE asistentes SET nombre_negocio = %s, sector = %s, servicios = %s, horario = %s, zona = %s, google_calendar_email = %s, asistente = %s
-        WHERE agent_id = %s RETURNING *;
-    """, (data.get("nombre_negocio"), data.get("sector"), data.get("servicios"), data.get("horario"), data.get("zona"), data.get("google_calendar_email"), data.get("asistente"), data.get("agent_id")))
-    updated_bot = cur.fetchone()
-    conn.commit()
-    cur.close()
-    conn.close()
-    return {"status": "success", "bot": updated_bot}
+        async function solicitarEnlaceMagico() {
+            const emailInput = document.getElementById('auth-email').value.trim();
+            if (!emailInput || !emailInput.includes("@")) {
+                return alert("Por favor, introduce un correo electrónico válido.");
+            }
+            
+            const btn = document.getElementById('btn-login');
+            btn.innerText = "Enviando correo...";
+            btn.disabled = true;
 
-@app.post("/delete-retell-bot")
-async def delete_retell_bot_endpoint(request: Request):
-    data = await request.json()
-    conn = get_db_connection()
-    cur = conn.cursor()
-    cur.execute("DELETE FROM asistentes WHERE agent_id = %s RETURNING *;", (data.get("agent_id"),))
-    conn.commit()
-    cur.close()
-    conn.close()
-    return {"status": "success"}
+            try {
+                console.log("📡 Solicitando enlace mágico para:", emailInput);
+                const res = await fetch(`${BACKEND_URL}/request-magic-link`, {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ email: emailInput })
+                });
 
-@app.post("/create-retell-bot")
-async def create_retell_bot_endpoint(request: Request):
-    payload = await request.json()
-    data = payload if isinstance(payload, dict) else payload.get("data", payload)
-    voice_id = VOICE_MAPPING.get(data.get("asistente"), "openai-Alloy")
-    bot_res = create_bot_for_client(data.get("nombre_negocio"), data.get("sector"), data.get("servicios"), data.get("horario"), data.get("zona"), voice_id, data.get("google_calendar_email"))
-    conn = get_db_connection()
-    cur = conn.cursor()
-    cur.execute("""
-        INSERT INTO asistentes (nombre_negocio, sector, servicios, horario, zona, google_calendar_email, asistente, agent_id, phone_number)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s);
-    """, (data.get("nombre_negocio"), data.get("sector"), data.get("servicios"), data.get("horario"), data.get("zona"), data.get("google_calendar_email"), data.get("asistente"), bot_res["agent_id"], bot_res["phone_number"]))
-    conn.commit()
-    cur.close()
-    conn.close()
-    return bot_res
+                const data = await res.json();
+                
+                if (res.ok && data.status === "success") {
+                    alert("¡Correo enviado con éxito! Abre el email recibido desde el dispositivo donde tengas abierto Wix para acceder instantáneamente.");
+                    btn.innerText = "¡Enviado! Revisa tu email";
+                } else {
+                    alert("Aviso del Servidor: " + (data.detail || "No se pudo procesar."));
+                    btn.innerText = "Recibir Enlace Mágico ✨";
+                    btn.disabled = false;
+                }
+            } catch (error) {
+                console.error("❌ Error en solicitud:", error);
+                alert("Error de conexión con el backend.");
+                btn.innerText = "Recibir Enlace Mágico ✨";
+                btn.disabled = false;
+            }
+        }
 
-@app.get("/")
-async def root(): return {"status": "✅ Servidor Operativo"}
+        // ==================== RENDERIZADO Y LOGICA COMERCIAL OPERATIVA MANTENIDA ====================
+        function renderizarTarjetas() {
+            const container = document.getElementById("bots-container");
+            container.innerHTML = "";
+
+            if (!listaBots || listaBots.length === 0) {
+                container.innerHTML = `<div class="no-bots">No se encontraron asistentes configurados para ${emailUsuario}.</div>`;
+                return;
+            }
+
+            listaBots.forEach(bot => {
+                const card = document.createElement("div");
+                card.className = "bot-card";
+                card.innerHTML = `
+                    <div class="bot-title">${bot.nombre_negocio || 'Asistente Sin Nombre'}</div>
+                    <div class="bot-sector">${bot.sector || 'General'}</div>
+                    <div class="bot-info"><strong>ID de Retell:</strong> ${bot.agent_id}</div>
+                    <div class="bot-info"><strong>Teléfono:</strong> ${bot.phone_number || 'No asignado'}</div>
+                    <div class="bot-info"><strong>Voz Actual:</strong> ${bot.asistente || 'Default'}</div>
+                    <div class="bot-info"><strong>Horario:</strong> ${bot.horario}</div>
+                    <div class="bot-info"><strong>Ubicación:</strong> ${bot.zona}</div>
+                    <div class="action-buttons-container">
+                        <button class="btn-manage" onclick='abrirEdicion(${JSON.stringify(bot)})'>Configurar Parámetros ⚙️</button>
+                        <button class="btn-delete-bot" onclick="eliminarAsistente('${bot.agent_id}', '${bot.nombre_negocio}')">🗑️</button>
+                    </div>
+                `;
+                container.appendChild(card);
+            });
+        }
+
+        function seleccionarVozEdicion(buttonElement) {
+            const container = buttonElement.closest('.slider-container');
+            container.querySelectorAll('.card').forEach(c => c.classList.remove('selected'));
+            
+            const card = buttonElement.closest('.card');
+            card.classList.add('selected');
+            vozSeleccionadaNombre = card.getAttribute('data-voice');
+        }
+
+        document.addEventListener("DOMContentLoaded", () => {
+             const videos = document.querySelectorAll(".video-wrapper video");
+             videos.forEach(v => {
+                 v.addEventListener("play", () => {
+                     videos.forEach(otherVideo => {
+                         if (otherVideo !== v) otherVideo.pause();
+                     });
+                 });
+             });
+        });
+
+        function abrirEdicion(bot) {
+            botEnEdicion = bot;
+            vozSeleccionadaNombre = bot.asistente || "";
+
+            document.getElementById("edit-panel").style.display = "block";
+            document.getElementById("edit-nombre").value = bot.nombre_negocio || "";
+            document.getElementById("edit-sector").value = bot.sector || "";
+            document.getElementById("edit-servicios").value = bot.servicios || "";
+            document.getElementById("edit-horario").value = bot.horario || "";
+            document.getElementById("edit-zona").value = bot.zona || "";
+            document.getElementById("edit-calendar").value = bot.google_calendar_email || "";
+
+            const slider = document.querySelector(".slider-container");
+            slider.querySelectorAll('.card').forEach(c => {
+                c.classList.remove('selected');
+                if (c.getAttribute('data-voice') === vozSeleccionadaNombre) {
+                    c.classList.add('selected');
+                    c.scrollIntoView({ behavior: 'smooth', block: 'nearest', inline: 'center' });
+                }
+            });
+
+            document.getElementById("edit-panel").scrollIntoView({ behavior: "smooth" });
+        }
+
+        function cerrarEdicion() {
+            document.getElementById("edit-panel").style.display = "none";
+            botEnEdicion = null;
+        }
+
+        async function guardarCambios() {
+            if (!botEnEdicion) return;
+
+            const fields = {
+                agent_id: botEnEdicion.agent_id,
+                nombre_negocio: document.getElementById("edit-nombre").value.trim(),
+                sector: document.getElementById("edit-sector").value.trim(),
+                servicios: document.getElementById("edit-servicios").value.trim(),
+                horario: document.getElementById("edit-horario").value.trim(),
+                zona: document.getElementById("edit-zona").value.trim(),
+                google_calendar_email: document.getElementById("edit-calendar").value.trim(),
+                asistente: vozSeleccionadaNombre
+            };
+
+            try {
+                const res = await fetch(`${BACKEND_URL}/update-retell-bot`, {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify(fields)
+                });
+                const data = await res.json();
+                if (data.status === "success" && data.bot) {
+                    alert("¡Asistente actualizado con éxito!");
+                    listaBots = listaBots.map(b => b.agent_id === fields.agent_id ? data.bot : b);
+                    cerrarEdicion();
+                    renderizarTarjetas();
+                } else {
+                    alert("Error al actualizar.");
+                }
+            } catch (e) {
+                alert("Error de red.");
+            }
+        }
+
+        function ejecutarEliminacionDesdeForm() {
+            if (!botEnEdicion) return;
+            eliminarAsistente(botEnEdicion.agent_id, botEnEdicion.nombre_negocio || 'este asistente');
+        }
+
+        async function eliminarAsistente(agentId, nombreBot) {
+            const confirmacion = confirm(`¿Estás seguro de que deseas eliminar permanentemente a "${nombreBot}"?`);
+            if (!confirmacion) return;
+
+            try {
+                if (botEnEdicion && botEnEdicion.agent_id === agentId) cerrarEdicion();
+                const res = await fetch(`${BACKEND_URL}/delete-retell-bot`, {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ agent_id: agentId })
+                });
+                const data = await res.json();
+                if (data.status === "success") {
+                    alert("Eliminado correctamente.");
+                    listaBots = listaBots.filter(b => b.agent_id !== agentId);
+                    renderizarTarjetas();
+                }
+            } catch (error) {
+                console.error(error);
+            }
+        }
+    </script>
+</body>
+</html>

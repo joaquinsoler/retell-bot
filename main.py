@@ -3,8 +3,6 @@ import json
 import smtplib
 from datetime import datetime
 from zoneinfo import ZoneInfo  # Gestión nativa y precisa de zonas horarias en Python 3.9+
-from email.mime.text import MIMEText
-from email.mime.multipart import MIMEMultipart
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 import requests
@@ -23,9 +21,9 @@ RETELL_API_KEY = os.getenv("RETELL_API_KEY")
 GOOGLE_CREDENTIALS_JSON = os.getenv("GOOGLE_CREDENTIALS")
 DATABASE_URL = os.getenv("DATABASE_URL")
 
-# Variables de entorno para enlaces mágicos vía Brevo
+# Variables de entorno para enlaces mágicos vía Brevo API
 BREVO_SMTP_USER = os.getenv("BREVO_SMTP_USER")
-BREVO_SMTP_PASSWORD = os.getenv("BREVO_SMTP_PASSWORD")
+BREVO_SMTP_PASSWORD = os.getenv("BREVO_SMTP_PASSWORD")  # Funciona como API Key de Brevo
 JWT_SECRET = os.getenv("JWT_SECRET", "una-clave-secreta-por-defecto-cambiala-en-render")
 FRONTEND_URL = os.getenv("FRONTEND_URL", "https://dansu.info")
 
@@ -227,7 +225,7 @@ Tu objetivo principal es atender a los clientes con la máxima amabilidad, empat
 **ALCANCE DE TUS FUNCIONES (Muy Importante):**
 - Tus únicas capacidades y tareas autorizadas son: **dar información detallada sobre el negocio** y **agendar nuevas citas**.
 - Si el usuario te solicita cancelar una cita, eliminar una reserva existente, modificar un horario ya agendado o realizar cualquier otra gestión administrativa, debes aclararle de forma muy educada que no tienes acceso para realizar esa acción.
-Responde con un tono comercial impecable explicando tus límites. (Ej: *"Actualmente solo puedo facilitarte información y agendar nuevas citas en el sistema. Para cancelar o modificar una reserva que ya tienes, te sugiero ponerte en contacto directamente con nuestro equipo técnico o de atención humana a través de nuestros canales habituales, y ellos lo resolverán encantados."*).
+Responde con un tono comercial impecable explicando tus límites. (Ej: *"Actualmente solo puedo facilitarte información y agendar nuevas citas en el sistema. Para cancelar o modificar una reserva que ya tienes, te sugeriero ponerte en contacto directamente con nuestro equipo técnico o de atención humana a través de nuestros canales habituales, y ellos lo resolverán encantados."*).
 
 **TU PERSONALIDAD Y TONO REQUERIDO:**
 - Habla con calidez, usando frases cortas y claras para que la llamada sea cómoda.
@@ -247,7 +245,7 @@ Cuando un usuario esté interesado en reservar, avanza de manera conversacional,
 3. **Número de Teléfono:** Para asegurar el contacto con el negocio.
 4. **Motivo de la Cita:** Consulta de manera cordial qué servicio de los que ofreces necesita.
 
-Solo cuando tengas recopilados estos 4 datos de forma exitosa, utiliza la herramienta `book_appointment` pasando obligatoriamente el email `{calendar_email}` in el campo `calendar_email`.
+Solo cuando tengas recopilados estos 4 datos de forma exitosa, utiliza la herramienta `book_appointment` pasando obligatoriamente el email `{calendar_email}` en el campo `calendar_email`.
 
 **REGLAS CRÍTICAS DE CONTROL DE ERRORES (Capa de Privacidad de Desarrollo):**
 - NUNCA menciones nombres de variables, formatos de código, mensajes de servidores, ni términos técnicos de software en la llamada (como "error de JSON", "función", "endpoint", "404", "500", "backend", o "respuesta incorrecta"). Está estrictamente prohibido.
@@ -313,54 +311,67 @@ def create_bot_for_client(nombre_negocio, sector, servicios, horario, zona, voic
     return nuevo_bot
 
 
-# ==================== ENLACES MÁGICOS (BREVO SMTP SSL) ====================
+# ==================== ENLACES MÁGICOS (BREVO API HTTP) ====================
 def send_magic_link_email(to_email: str, link: str):
-    """Envía el enlace mágico usando SMTP_SSL en el puerto 465 (Evita bloqueos del Firewall de Render)"""
-    print(f"🚀 Iniciando proceso SMTP para enviar correo a {to_email}...")
+    """Envía el enlace mágico mediante la API HTTP de Brevo por el puerto web 443 (Garantiza el bypass de bloqueos en Render)"""
+    print(f"🚀 Iniciando proceso de envío por API HTTP de Brevo a {to_email}...")
     
     if not BREVO_SMTP_USER or not BREVO_SMTP_PASSWORD:
-        print("❌ ERROR CRÍTICO: BREVO_SMTP_USER o BREVO_SMTP_PASSWORD están vacías en el entorno.")
+        print("❌ ERROR CONFIGURACIÓN: BREVO_SMTP_USER o BREVO_SMTP_PASSWORD no están configuradas.")
         return False
 
-    msg = MIMEMultipart()
-    msg['From'] = f"Dansu AI <{BREVO_SMTP_USER}>"
-    msg['To'] = to_email
-    msg['Subject'] = "✨ Tu enlace mágico de acceso - Dansu AI"
-
-    html_content = f"""
-    <html>
-        <body style="font-family: Arial, sans-serif; line-height: 1.6; color: #333;">
-            <div style="max-width: 500px; margin: 0 auto; padding: 25px; border: 1px solid #e2e8f0; border-radius: 16px; box-shadow: 0 4px 10px rgba(0,0,0,0.03);">
-                <h2 style="color: #0078FF; text-align: center; margin-bottom: 20px;">Acceso al Panel de Control</h2>
-                <p>Hola,</p>
-                <p>Has solicitado entrar a tu Área de Gestión de Asistentes en Dansu AI. Haz clic en el botón inferior para iniciar sesión automáticamente de forma segura. Este enlace caducará en 15 minutos.</p>
-                <div style="text-align: center; margin: 35px 0;">
-                    <a href="{link}" style="background-color: #0078FF; color: white; padding: 14px 28px; text-decoration: none; font-weight: bold; border-radius: 10px; display: inline-block;">Entrar al Panel Directamente</a>
+    url = "https://api.brevo.com/v3/smtp/email"
+    headers = {
+        "accept": "application/json",
+        "api-key": BREVO_SMTP_PASSWORD,  # La contraseña SMTP y la API Key son idénticas en Brevo
+        "content-type": "application/json"
+    }
+    
+    payload = {
+        "sender": {
+            "name": "Dansu AI",
+            "email": BREVO_SMTP_USER
+        },
+        "to": [
+            {
+                "email": to_email
+            }
+        ],
+        "subject": "✨ Tu enlace mágico de acceso - Dansu AI",
+        "htmlContent": f"""
+        <html>
+            <body style="font-family: Arial, sans-serif; line-height: 1.6; color: #333;">
+                <div style="max-width: 500px; margin: 0 auto; padding: 25px; border: 1px solid #e2e8f0; border-radius: 16px; box-shadow: 0 4px 10px rgba(0,0,0,0.03);">
+                    <h2 style="color: #0078FF; text-align: center; margin-bottom: 20px;">Acceso al Panel de Control</h2>
+                    <p>Hola,</p>
+                    <p>Has solicitado entrar a tu Área de Gestión de Asistentes en Dansu AI. Haz clic en el botón inferior para iniciar sesión automáticamente de forma segura. Este enlace caducará en 15 minutos.</p>
+                    <div style="text-align: center; margin: 35px 0;">
+                        <a href="{link}" style="background-color: #0078FF; color: white; padding: 14px 28px; text-decoration: none; font-weight: bold; border-radius: 10px; display: inline-block;">Entrar al Panel Directamente</a>
+                    </div>
+                    <p style="font-size: 12px; color: #666; margin-top: 25px;">Si el botón no responde, puedes copiar y pegar el siguiente enlace en tu navegador habitual:</p>
+                    <p style="font-size: 11px; color: #0078FF; word-break: break-all;"><a href="{link}">{link}</a></p>
+                    <hr style="border: 0; border-top: 1px solid #e2e8f0; margin-top: 30px;">
+                    <p style="font-size: 11px; color: #999; text-align: center;">Si tú no has iniciado esta acción, puedes ignorar este correo tranquilamente.</p>
                 </div>
-                <p style="font-size: 12px; color: #666; margin-top: 25px;">Si el botón no responde, puedes copiar y pegar el siguiente enlace en tu navegador habitual:</p>
-                <p style="font-size: 11px; color: #0078FF; word-break: break-all;"><a href="{link}">{link}</a></p>
-                <hr style="border: 0; border-top: 1px solid #e2e8f0; margin-top: 30px;">
-                <p style="font-size: 11px; color: #999; text-align: center;">Si tú no has iniciado esta acción, puedes ignorar este correo tranquilamente.</p>
-            </div>
-        </body>
-    </html>
-    """
-    msg.attach(MIMEText(html_content, 'html'))
+            </body>
+        </html>
+        """
+    }
 
     try:
-        print("🔌 Conectando vía SMTP_SSL a Brevo (smtp-relay.brevo.com:465) con timeout de 10 segundos...")
-        with smtplib.SMTP_SSL("smtp-relay.brevo.com", 465, timeout=10) as server:
-            print(f"🔐 Conexión SSL establecida. Autenticando usuario: {BREVO_SMTP_USER}...")
-            server.login(BREVO_SMTP_USER, BREVO_SMTP_PASSWORD)
-            print("🛫 Autenticación exitosa. Enviando paquete de datos del email...")
-            server.sendmail(BREVO_SMTP_USER, to_email, msg.as_string())
-        print(f"📧 ¡ÉXITO TOTAL! Enlace mágico enviado correctamente a {to_email}")
-        return True
-    except smtplib.SMTPAuthenticationError:
-        print("❌ ERROR SMTP: Falló la autenticación. El usuario o la contraseña SMTP de Brevo son incorrectos.")
-        return False
+        print("🌐 Realizando llamada POST HTTPS a api.brevo.com por puerto web seguro...")
+        response = requests.post(url, headers=headers, json=payload, timeout=10)
+        print(f"📊 Respuesta de la API de Brevo: Código {response.status_code}")
+        
+        if response.status_code in [200, 201, 202]:
+            print(f"📧 ¡ÉXITO TOTAL VÍA API! Correo enviado con éxito a {to_email}")
+            return True
+        else:
+            print(f"❌ Brevo API rechazó la petición: {response.text}")
+            return False
+            
     except Exception as e:
-        print(f"❌ ERROR INESPERADO AL ENVIAR CORREO: {e}")
+        print(f"❌ Error excepcional llamando a la API de Brevo: {e}")
         return False
 
 
@@ -411,8 +422,8 @@ async def request_magic_link(request: Request):
             print("✅ Respuesta HTTP 200 enviada con éxito al cliente.")
             return {"status": "success", "message": "Enlace mágico enviado. Revisa tu bandeja de entrada."}
         else:
-            print("❌ El envío falló en el módulo SMTP. Elevando error 500 al cliente.")
-            raise HTTPException(status_code=500, detail="No se pudo procesar el envío de correo. Revisa los logs de autenticación SMTP.")
+            print("❌ El envío falló en el módulo de la API. Elevando error 500 al cliente.")
+            raise HTTPException(status_code=500, detail="No se pudo procesar el envío de correo. Revisa las claves de tu proveedor Brevo.")
             
     except HTTPException as he:
         raise he

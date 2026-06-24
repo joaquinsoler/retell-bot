@@ -1,9 +1,10 @@
 import os
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo  # Gestión nativa y precisa de zonas horarias en Python 3.9+
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import HTMLResponse
 import requests
 import psycopg2  # Conector nativo de PostgreSQL
 from psycopg2.extras import RealDictCursor
@@ -12,15 +13,26 @@ from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
-app = FastAPI(title="Dansu Backend Completo")
+from jose import JWTError, jwt  # Añadido para el manejo seguro de tokens del Magic Link
+
+app = FastAPI(title="Dansu Backend Completo con Magic Link")
 
 # ==================== VARIABLES DE ENTORNO ====================
 RETELL_API_KEY = os.getenv("RETELL_API_KEY")
 GOOGLE_CREDENTIALS_JSON = os.getenv("GOOGLE_CREDENTIALS")
 DATABASE_URL = os.getenv("DATABASE_URL")
+JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY")
+BREVO_API_KEY = os.getenv("BREVO_API_KEY")
 
-if not RETELL_API_KEY or not GOOGLE_CREDENTIALS_JSON or not DATABASE_URL:
-    raise Exception("Faltan variables de entorno críticas (RETELL_API_KEY, GOOGLE_CREDENTIALS o DATABASE_URL)")
+if not all([RETELL_API_KEY, GOOGLE_CREDENTIALS_JSON, DATABASE_URL, JWT_SECRET_KEY, BREVO_API_KEY]):
+    raise Exception("Faltan variables de entorno críticas (RETELL_API_KEY, GOOGLE_CREDENTIALS, DATABASE_URL, JWT_SECRET_KEY o BREVO_API_KEY)")
+
+# Configuración JWT
+ALGORITHM = "HS256"
+ACCESS_TOKEN_EXPIRE_MINUTES = 15
+
+# Almacén temporal de sesiones validadas indexadas por IP (IP: {"email": email, "expira": datetime})
+SESIONES_ACTIVAS = {}
 
 # ==================== CORS ====================
 app.add_middleware(
@@ -194,7 +206,7 @@ def retell_request(method: str, endpoint: str, json_data=None):
         return None
 
 def build_custom_prompt(nombre_negocio, sector, servicios, horario, zona, calendar_email):
-    return f"""Eres la voz y el asistente virtual exclusivo de {nombre_negocio}, un negocio enfocado en el sector de {sector}. Tu objetivo principal es atender a los clientes con la máxima amabilidad, empatía y profesionalidad, ofreciendo una conversación fluida, natural y cercana.
+    return f"""Eres la voz y el asistente virtual exclusivo de {nombre_negocio}, un negocio enfocado en el sector de {sector}. Tu objetivo principal es atender a los clientes con la máxima amabilidad, empatía y profesionalidad, offering una conversación fluida, natural y cercana.
 
 **ALCANCE DE TUS FUNCIONES (Muy Importante):**
 - Tus únicas capacidades y tareas autorizadas son: **dar información detallada sobre el negocio** y **agendar nuevas citas**.
@@ -294,7 +306,114 @@ def create_bot_for_client(nombre_negocio, sector, servicios, horario, zona, voic
     return {"status": "success", "agent_id": agent_id, "phone_number": free_number}
 
 
-# ==================== ENDPOINTS ÁREA DE CLIENTE ====================
+# ==================== UTILS TOKENS & EMAIL (MAGIC LINK) ====================
+def create_magic_token(email: str):
+    expire = datetime.utcnow() + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    return jwt.encode({"sub": email.lower(), "exp": expire}, JWT_SECRET_KEY, algorithm=ALGORITHM)
+
+def verify_magic_token(token: str):
+    try:
+        payload = jwt.decode(token, JWT_SECRET_KEY, algorithms=[ALGORITHM])
+        return payload.get("sub")
+    except JWTError:
+        return None
+
+def send_magic_link_email(email: str, magic_link: str):
+    try:
+        payload = {
+            "sender": {"name": "Dansu AI", "email": "no-reply@dansu.info"},
+            "to": [{"email": email}],
+            "subject": "🔑 Tu enlace de acceso a Dansu AI",
+            "htmlContent": f"""
+                <html>
+                <body style="font-family: sans-serif; padding: 30px; background-color: #f8fafc; color: #1e293b;">
+                    <div style="max-width: 500px; margin: 0 auto; background: white; padding: 30px; border-radius: 16px; border: 1px solid #e2e8f0;">
+                        <h2 style="color: #0f172a; margin-top: 0;">¡Hola!</h2>
+                        <p>Haz clic en el botón inferior para iniciar sesión de forma segura e inmediata en tu panel de control de asistentes:</p>
+                        <div style="text-align: center; margin: 30px 0;">
+                            <a href="{magic_link}" target="_blank" style="background-color: #0078FF; color: white; padding: 14px 28px; text-decoration: none; border-radius: 12px; font-weight: 600; display: inline-block;">Acceder a mi Panel ✨</a>
+                        </div>
+                    </div>
+                </body>
+                </html>
+            """
+        }
+        r = requests.post("https://api.brevo.com/v3/smtp/email", headers={"api-key": BREVO_API_KEY, "Content-Type": "application/json"}, json=payload, timeout=15)
+        return r.status_code in (200, 201)
+    except Exception:
+        return False
+
+
+# ==================== ENDPOINTS DE AUTENTICACIÓN (MAGIC LINK POR IP) ====================
+
+@app.post("/request-magic-link")
+async def request_magic_link(request: Request):
+    try:
+        data = await request.json()
+        email = data.get("email", "").strip().lower()
+        if not email or "@" not in email:
+            raise HTTPException(400, "Email inválido")
+
+        token = create_magic_token(email)
+        magic_link = f"https://retell-bot.onrender.com/redirect-to-wix?token={token}"
+
+        if send_magic_link_email(email, magic_link):
+            return {"status": "success", "message": "Enlace enviado de forma transaccional."}
+        raise HTTPException(500, "Error enviando email.")
+    except Exception as e:
+        raise HTTPException(500, str(e))
+
+
+@app.get("/redirect-to-wix", response_class=HTMLResponse)
+async def redirect_to_wix(token: str, request: Request):
+    email = verify_magic_token(token)
+    if not email:
+        return "<html><body><h3>❌ El enlace es inválido o ha caducado. Por favor, solicita uno nuevo.</h3></body></html>"
+    
+    client_ip = request.headers.get("x-forwarded-for", request.client.host).split(",")[0].strip()
+    
+    SESIONES_ACTIVAS[client_ip] = {
+        "email": email,
+        "expira": datetime.utcnow() + timedelta(minutes=5)
+    }
+    
+    wix_url = "https://www.dansu.info/blank-4"
+    return f"""
+    <html>
+        <head><meta http-equiv="refresh" content="0;url={wix_url}"></head>
+        <body style="font-family:sans-serif; text-align:center; padding-top:50px;">
+            <h3>Verificación completada con éxito. Cargando tu panel... 🚀</h3>
+        </body>
+    </html>
+    """
+
+
+@app.get("/check-session")
+async def check_session(request: Request):
+    client_ip = request.headers.get("x-forwarded-for", request.client.host).split(",")[0].strip()
+    sesion = SESIONES_ACTIVAS.get(client_ip)
+    
+    if not sesion:
+        return {"status": "no_session"}
+    
+    if datetime.utcnow() > sesion["expira"]:
+        del SESIONES_ACTIVAS[client_ip]
+        return {"status": "no_session"}
+        
+    email = sesion["email"]
+    del SESIONES_ACTIVAS[client_ip]  # Consumo de un solo uso por seguridad
+    
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM asistentes WHERE google_calendar_email = %s ORDER BY id DESC;", (email,))
+    bots = cur.fetchall()
+    cur.close()
+    conn.close()
+    
+    return {"status": "success", "email": email, "bots": bots}
+
+
+# ==================== ENDPOINTS ÁREA DE CLIENTE (ORIGINALES MANTENIDOS) ====================
 @app.post("/get-user-bots")
 async def get_user_bots(request: Request):
     try:
@@ -313,11 +432,6 @@ async def get_user_bots(request: Request):
 
 @app.post("/update-retell-bot")
 async def update_retell_bot_endpoint(request: Request):
-    """
-    Actualiza la configuración del asistente en PostgreSQL y sincroniza forzosamente
-    el prompt operativo JUNTO con el esquema de herramientas funcionales en Retell AI 
-    para mantener intacto el sistema de validación de huecos libres de Google Calendar.
-    """
     try:
         data = await request.json()
         agent_id = data.get("agent_id")
@@ -332,7 +446,6 @@ async def update_retell_bot_endpoint(request: Request):
         if not agent_id:
             raise HTTPException(status_code=400, detail="Falta el agent_id")
 
-        # 1. Recuperar información del agente en Retell AI para extraer el llm_id
         agent_info = retell_request("GET", f"/get-agent/{agent_id}")
         if not agent_info or "response_engine" not in agent_info:
             raise HTTPException(status_code=404, detail="No se encontró el agente en Retell AI")
@@ -341,10 +454,8 @@ async def update_retell_bot_endpoint(request: Request):
         if not llm_id:
             raise HTTPException(status_code=400, detail="El agente no dispone de un motor LLM vinculado")
 
-        # 2. Re-generar el prompt comercial del asistente
         nuevo_prompt = build_custom_prompt(nombre_negocio, sector, servicios, horario, zona, calendar_email)
 
-        # 3. SOLUCIÓN COMPLETA: Forzar el refresco de las herramientas junto al prompt para que Retell compile el control de errores
         llm_update = retell_request("PATCH", f"/update-retell-llm/{llm_id}", {
             "general_prompt": nuevo_prompt,
             "general_tools": [{
@@ -370,7 +481,6 @@ async def update_retell_bot_endpoint(request: Request):
         if not llm_update:
             raise HTTPException(status_code=500, detail="Error al sincronizar cambios y herramientas funcionales con el motor de Retell AI")
 
-        # 4. Sincronizar el cambio de voz si se ha editado
         voice_id_tecnico = VOICE_MAPPING.get(asistente_nombre)
         if voice_id_tecnico:
             retell_request("PATCH", f"/update-agent/{agent_id}", {
@@ -380,7 +490,6 @@ async def update_retell_bot_endpoint(request: Request):
         else:
             voice_id_tecnico = agent_info.get("voice_id")
 
-        # 5. Guardar permanentemente en PostgreSQL
         conn = get_db_connection()
         cur = conn.cursor()
         cur.execute("""
@@ -456,7 +565,7 @@ async def delete_retell_bot_endpoint(request: Request):
             raise HTTPException(status_code=500, detail=f"Fallo total e irrecuperable en DB: {str(db_err)}")
 
 
-# ==================== ENDPOINTS GENERALES ====================
+# ==================== ENDPOINTS GENERALES ORIGINALES ====================
 @app.post("/book-appointment")
 @app.post("/book-appointment/")
 async def book_appointment(request: Request):

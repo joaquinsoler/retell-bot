@@ -15,7 +15,7 @@ from googleapiclient.errors import HttpError
 
 from jose import JWTError, jwt
 
-app = FastAPI(title="Dansu Backend - Corrección Mínima")
+app = FastAPI(title="Dansu Backend - Versión Final Equilibrada")
 
 # ==================== VARIABLES DE ENTORNO ====================
 RETELL_API_KEY = os.getenv("RETELL_API_KEY")
@@ -94,9 +94,9 @@ def ensure_calendar_access(calendar_id: str):
         else:
             print(f"⚠️ Error suscripción {e.status_code}: {e}")
 
-# ==================== FUNCIÓN MEJORADA (SOLO ESTO CAMBIA) ====================
+# ==================== FUNCIONES MEJORADAS (SOLO ESTAS 3) ====================
 def normalize_to_madrid_iso(dt_str: str) -> str:
-    """Versión robusta que maneja mejor los formatos que genera el LLM"""
+    """Versión robusta con fallback (soluciona llamadas simultáneas)"""
     if not dt_str:
         return dt_str
     
@@ -115,7 +115,6 @@ def normalize_to_madrid_iso(dt_str: str) -> str:
         return dt_madrid.isoformat()
     except Exception as e:
         print(f"⚠️ Error parseando tiempo '{original}': {e}")
-        # Fallback seguro: hora actual + 2 horas
         fallback = (datetime.now(MADRID_TZ) + timedelta(hours=2)).isoformat()
         print(f"Usando fallback: {fallback}")
         return fallback
@@ -145,7 +144,7 @@ def check_availability(calendar_id: str, start_time: str, end_time: str) -> bool
         return True
     except Exception as e:
         print(f"⚠️ Error FreeBusy: {e}")
-        return False   # Cambiado a False por seguridad (antes era True)
+        return False
 
 def create_google_event(calendar_id: str, summary: str, start_time: str, end_time: str, description: str = "", bypass_availability: bool = False):
     try:
@@ -181,8 +180,7 @@ def create_google_event(calendar_id: str, summary: str, start_time: str, end_tim
         print(f"❌ Error Google Calendar: {e}")
         raise
 
-# ==================== RESTO DEL CÓDIGO ORIGINAL (SIN CAMBIOS) ====================
-
+# ==================== VOICE MAPPING & RETELL UTILS ====================
 VOICE_MAPPING = {
     "Cimo": "11labs-Adrian", "Brynne": "11labs-Brynne", "Chloe": "11labs-Chloe",
     "Kate": "openai-Nova", "Grace": "openai-Shimmer", "Leland": "11labs-Leland",
@@ -209,7 +207,7 @@ def build_custom_prompt(nombre_negocio, sector, servicios, horario, zona, calend
 
 **ALCANCE DE TUS FUNCIONES (Muy Importante):**
 - Tus únicas capacidades y tareas autorizadas son: **dar información detallada sobre el negocio** y **agendar nuevas citas**.
-- Si el usuario te solicita cancelar una cita, eliminar una reserva existente, modificar un horario ya agendado o realizar cualquier otra gestión administrativa, debes aclararle de forma muy educada que no tienes acceso para realizar esa acción. Responde con un tono comercial impecable explicando tus límites.
+- Si el usuario te solicita cancelar una cita, eliminar una reserva existente, modificar un horario ya agendado o realizar cualquier otra gestión administrativa, debes aclararle de forma muy educada que no tienes acceso para realizar esa acción. Responde con un tono comercial impecable explicando tus límites. (Ej: *"Actualmente solo puedo facilitarte información y agendar nuevas citas en el sistema. Para cancelar o modificar una reserva que ya tienes, te sugiero ponerte en contacto directamente con nuestro equipo técnico o de atención humana a través de nuestros canales habituales, y ellos lo resolverán encantados."*).
 
 **TU PERSONALIDAD Y TONO REQUERIDO:**
 - Habla con calidez, usando frases cortas y claras para que la llamada sea cómoda. Escucha activamente.
@@ -224,15 +222,15 @@ def build_custom_prompt(nombre_negocio, sector, servicios, horario, zona, calend
 **FLUJO NATURAL PARA RECOGER DATOS Y AGENDAR CITA:**
 Cuando un usuario esté interesado en reservar, avanza de manera conversacional, preguntando los datos uno a uno (nunca todos de golpe en una sola frase):
 1. **Día y Hora:** Propón o confirma el momento de la cita según las preferencias del cliente.
-2. **Nombre Completo:** Solicitado con educación.
+2. **Nombre Completo:** Solicitado con educación (Ej: "¿Me indicas tu nombre completo, por favor?").
 3. **Número de Teléfono:** Para asegurar el contacto con el negocio.
-4. **Motivo de la Cita:** Consulta de manera cordial qué servicio necesita.
+4. **Motivo de la Cita:** Consulta de manera cordial qué servicio de los que ofreces necesita.
 
 Solo cuando tengas recopilados estos 4 datos de forma exitosa, utiliza la herramienta `book_appointment` pasando obligatoriamente el email `{calendar_email}` en el campo `calendar_email`.
 
-**REGLAS CRÍTICAS DE CONTROL DE ERRORES:**
-- NUNCA menciones nombres de variables, formatos de código, mensajes de servidores, ni términos técnicos de software en la llamada.
-- Si la herramienta `book_appointment` te devuelve un fallo o indica que el hueco está ocupado, actúa como un comercial humano resolutivo y amable. Gestiona la situación diciendo algo como: 
+**REGLAS CRÍTICAS DE CONTROL DE ERRORES (Capa de Privacidad de Desarrollo):**
+- NUNCA menciones nombres de variables, formatos de código, mensajes de servidores, ni términos técnicos de software en la llamada (como "error de JSON", "función", "endpoint", "404", "500", "backend", o "respuesta incorrecta"). Está estrictamente prohibido.
+- Si la herramienta `book_appointment` te devuelve un fallo, un error del sistema o indica que el hueco está ocupado, actúa como un comercial humano resolutivo y amable. Gestiona la situación diciendo algo como: 
   *"Disculpa las molestias, parece que este horario concreto acaba de ocuparse o no está disponible en nuestra agenda en este instante. Déjame revisar... ¿Te vendría bien intentar en otro tramo horario o preferirías mirar otro día?"*
 - Si experimentas algún problema técnico interno con las herramientas, mantén la calma, discúlpate amablemente por la pequeña pausa y reconduce la llamada ofreciéndote a tomar nota manualmente o pedirle que lo intente en unos instantes, garantizando siempre una experiencia de atención al cliente excelente."""
 
@@ -302,7 +300,7 @@ def create_bot_for_client(nombre_negocio, sector, servicios, horario, zona, voic
 
     return {"status": "success", "agent_id": agent_id, "phone_number": free_number}
 
-# ==================== MAGIC LINK (ORIGINAL) ====================
+# ==================== MAGIC LINK ====================
 def create_magic_token(email: str):
     expire = datetime.utcnow() + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
     return jwt.encode({"sub": email.lower(), "exp": expire}, JWT_SECRET_KEY, algorithm=ALGORITHM)
@@ -339,7 +337,7 @@ def send_magic_link_email(email: str, magic_link: str):
     except Exception:
         return False
 
-# ==================== ENDPOINTS (ORIGINALES) ====================
+# ==================== ENDPOINTS ====================
 @app.post("/request-magic-link")
 async def request_magic_link(request: Request):
     try:

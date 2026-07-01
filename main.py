@@ -15,8 +15,9 @@ from googleapiclient.errors import HttpError
 
 from jose import JWTError, jwt
 
-app = FastAPI(title="Dansu Backend - Versión que Funciona")
+app = FastAPI(title="Dansu Backend - Corregido")
 
+# ==================== VARIABLES DE ENTORNO ====================
 RETELL_API_KEY = os.getenv("RETELL_API_KEY")
 GOOGLE_CREDENTIALS_JSON = os.getenv("GOOGLE_CREDENTIALS")
 DATABASE_URL = os.getenv("DATABASE_URL")
@@ -67,7 +68,7 @@ def init_db():
 
 init_db()
 
-# ==================== GOOGLE CALENDAR (MEJORADO) ====================
+# ==================== GOOGLE CALENDAR ====================
 SCOPES = ['https://www.googleapis.com/auth/calendar']
 
 def get_calendar_service():
@@ -84,14 +85,16 @@ def ensure_calendar_access(calendar_id: str):
             print(f"⚠️ ensure_calendar_access: {e}")
 
 def normalize_to_madrid_iso(dt_str: str) -> str:
+    """Parsing robusto que maneja formatos ISO, relativos y con errores"""
     if not dt_str:
         return (datetime.now(MADRID_TZ) + timedelta(hours=2)).isoformat()
     
     original = str(dt_str).strip()
-    print(f"[TIME] Input: {original}")
+    print(f"[TIME] Input recibido: {original}")
     
     try:
         cleaned = original.replace(" ", "T").rstrip("Z")
+        
         if "T" in cleaned:
             dt = datetime.fromisoformat(cleaned)
         else:
@@ -104,12 +107,15 @@ def normalize_to_madrid_iso(dt_str: str) -> str:
             dt = dt.replace(tzinfo=MADRID_TZ)
         
         result = dt.astimezone(MADRID_TZ).isoformat()
-        print(f"[TIME] OK: {result}")
+        print(f"[TIME] Normalizado correctamente: {result}")
         return result
+    
     except Exception as e:
-        print(f"[TIME] Fallo: {e}")
-        fallback = (datetime.now(MADRID_TZ) + timedelta(hours=2)).isoformat()
-        return fallback
+        print(f"[TIME] Parsing falló para '{original}': {e}")
+        now = datetime.now(MADRID_TZ)
+        fallback = now.replace(minute=0, second=0, microsecond=0) + timedelta(hours=2)
+        print(f"[TIME] Usando fallback seguro: {fallback.isoformat()}")
+        return fallback.isoformat()
 
 def check_availability(calendar_id: str, start_time: str, end_time: str) -> bool:
     try:
@@ -128,11 +134,12 @@ def check_availability(calendar_id: str, start_time: str, end_time: str) -> bool
         busy = freebusy.get("calendars", {}).get(calendar_id, {}).get("busy", [])
         
         if busy:
-            print(f"[AVAIL] Ocupado")
+            print(f"[AVAIL] Ocupado: {busy}")
             return False
+        print("[AVAIL] Libre")
         return True
     except Exception as e:
-        print(f"[AVAIL] Error: {e}")
+        print(f"[AVAIL] Error FreeBusy: {e}")
         return False
 
 def create_google_event(calendar_id: str, summary: str, start_time: str, end_time: str, description: str = "", bypass_availability: bool = False):
@@ -142,8 +149,8 @@ def create_google_event(calendar_id: str, summary: str, start_time: str, end_tim
         iso_end = normalize_to_madrid_iso(end_time)
         
         if not bypass_availability and not check_availability(calendar_id, iso_start, iso_end):
-            raise Exception("El horario ya no está disponible.")
-        
+            raise Exception("El horario ya no está disponible o fue reservado recientemente.")
+
         service = get_calendar_service()
         event = {
             'summary': summary[:100],
@@ -154,11 +161,11 @@ def create_google_event(calendar_id: str, summary: str, start_time: str, end_tim
         }
         
         created = service.events().insert(calendarId=calendar_id, body=event, sendUpdates='none').execute()
-        print(f"[CALENDAR] Creado: {created.get('htmlLink')}")
+        print(f"[CALENDAR] Evento creado correctamente: {created.get('htmlLink')}")
         return created
     except HttpError as e:
         if e.status_code == 409:
-            raise Exception("Conflicto: ya reservado.")
+            raise Exception("Conflicto de horario: ya fue reservado.")
         raise
     except Exception as e:
         print(f"[CALENDAR] Error: {e}")
@@ -208,6 +215,7 @@ IMPORTANTE: Cuando uses la herramienta book_appointment, SIEMPRE envía start_ti
 
 Si la herramienta devuelve error de horario ocupado, responde amablemente ofreciendo alternativas."""
 
+# ==================== CREACIÓN DE BOT ====================
 def create_bot_for_client(nombre_negocio, sector, servicios, horario, zona, voice_id, calendar_email):
     custom_prompt = build_custom_prompt(nombre_negocio, sector, servicios, horario, zona, calendar_email)
 
@@ -302,7 +310,9 @@ def send_magic_link_email(email: str, magic_link: str):
                 </body></html>
             """
         }
-        r = requests.post("https://api.brevo.com/v3/smtp/email", headers={"api-key": BREVO_API_KEY, "Content-Type": "application/json"}, json=payload, timeout=15)
+        r = requests.post("https://api.brevo.com/v3/smtp/email", 
+                         headers={"api-key": BREVO_API_KEY, "Content-Type": "application/json"}, 
+                         json=payload, timeout=15)
         return r.status_code in (200, 201)
     except:
         return False
@@ -343,7 +353,6 @@ async def check_session(request: Request):
         return {"status": "no_session"}
     
     email = sesion["email"]
-    
     conn = get_db_connection()
     cur = conn.cursor()
     cur.execute("SELECT * FROM asistentes WHERE google_calendar_email = %s ORDER BY fecha_creacion DESC;", (email,))
@@ -353,111 +362,15 @@ async def check_session(request: Request):
     
     return {"status": "success", "email": email, "bots": [dict(b) for b in bots]}
 
-@app.post("/get-user-bots")
-async def get_user_bots(request: Request):
-    data = await request.json()
-    email = data.get("email", "").strip()
-    conn = get_db_connection()
-    cur = conn.cursor()
-    cur.execute("SELECT * FROM asistentes WHERE google_calendar_email = %s ORDER BY id DESC;", (email,))
-    bots = cur.fetchall()
-    cur.close()
-    conn.close()
-    return {"status": "success", "bots": bots}
-
-@app.post("/update-retell-bot")
-async def update_retell_bot_endpoint(request: Request):
-    data = await request.json()
-    agent_id = data.get("agent_id")
-    nombre_negocio = data.get("nombre_negocio")
-    sector = data.get("sector")
-    servicios = data.get("servicios")
-    horario = data.get("horario")
-    zona = data.get("zona")
-    calendar_email = data.get("google_calendar_email")
-    asistente_nombre = data.get("asistente")
-
-    if not agent_id:
-        raise HTTPException(status_code=400, detail="Falta el agent_id")
-
-    agent_info = retell_request("GET", f"/get-agent/{agent_id}")
-    if not agent_info or "response_engine" not in agent_info:
-        raise HTTPException(status_code=404, detail="Agente no encontrado")
-
-    llm_id = agent_info["response_engine"].get("llm_id")
-    if not llm_id:
-        raise HTTPException(status_code=400, detail="No tiene LLM")
-
-    nuevo_prompt = build_custom_prompt(nombre_negocio, sector, servicios, horario, zona, calendar_email)
-
-    retell_request("PATCH", f"/update-retell-llm/{llm_id}", {
-        "general_prompt": nuevo_prompt,
-        "general_tools": [{
-            "type": "custom",
-            "name": "book_appointment",
-            "description": "Agenda cita.",
-            "url": "https://retell-bot.onrender.com/book-appointment",
-            "method": "POST",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "calendar_email": {"type": "string"},
-                    "summary": {"type": "string"},
-                    "start_time": {"type": "string"},
-                    "end_time": {"type": "string"},
-                    "description": {"type": "string"}
-                },
-                "required": ["calendar_email", "summary", "start_time", "end_time"]
-            }
-        }]
-    })
-
-    voice_id_tecnico = VOICE_MAPPING.get(asistente_nombre)
-    if voice_id_tecnico:
-        retell_request("PATCH", f"/update-agent/{agent_id}", {"voice_id": voice_id_tecnico})
-
-    conn = get_db_connection()
-    cur = conn.cursor()
-    cur.execute("""
-        UPDATE asistentes 
-        SET nombre_negocio=%s, sector=%s, servicios=%s, horario=%s, zona=%s, google_calendar_email=%s, asistente=%s
-        WHERE agent_id=%s
-    """, (nombre_negocio, sector, servicios, horario, zona, calendar_email, voice_id_tecnico, agent_id))
-    conn.commit()
-    cur.close()
-    conn.close()
-
-    return {"status": "success"}
-
-@app.post("/delete-retell-bot")
-async def delete_retell_bot_endpoint(request: Request):
-    data = await request.json()
-    agent_id = data.get("agent_id")
-    if not agent_id:
-        raise HTTPException(status_code=400, detail="Falta agent_id")
-
-    agent_info = retell_request("GET", f"/get-agent/{agent_id}")
-    if agent_info:
-        llm_id = agent_info.get("response_engine", {}).get("llm_id")
-        try:
-            numbers_res = retell_request("GET", "/v2/list-phone-numbers")
-            if numbers_res and "items" in numbers_res:
-                for phone in numbers_res["items"]:
-                    if any(a.get("agent_id") == agent_id for a in phone.get("inbound_agents", [])):
-                        retell_request("PATCH", f"/update-phone-number/{phone['phone_number']}", {"inbound_agents": []})
-        except:
-            pass
-        retell_request("DELETE", f"/delete-agent/{agent_id}")
-        if llm_id:
-            retell_request("DELETE", f"/delete-retell-llm/{llm_id}")
-
-    conn = get_db_connection()
-    cur = conn.cursor()
-    cur.execute("DELETE FROM asistentes WHERE agent_id = %s;", (agent_id,))
-    conn.commit()
-    cur.close()
-    conn.close()
-    return {"status": "success"}
+@app.post("/create-retell-bot")
+async def create_retell_bot_endpoint(request: Request):
+    payload = await request.json()
+    data = payload if isinstance(payload, dict) else payload.get("data", payload)
+    voice_id = VOICE_MAPPING.get(data.get("asistente"), "openai-Alloy")
+    return create_bot_for_client(
+        data.get("nombre_negocio"), data.get("sector"), data.get("servicios"),
+        data.get("horario"), data.get("zona"), voice_id, data.get("google_calendar_email")
+    )
 
 @app.post("/book-appointment")
 @app.post("/book-appointment/")
@@ -482,32 +395,9 @@ async def book_appointment(request: Request):
         print(f"[BOOK] Error: {e}")
         return {"code": "ERROR", "message": str(e)}
 
-@app.post("/verify-calendar-access")
-async def verify_calendar_access(request: Request):
-    data = await request.json()
-    calendar_email = data.get("calendar_email")
-    create_google_event(
-        calendar_email,
-        "Prueba de conexión - Dansu",
-        "2026-07-02T10:00:00+02:00",
-        "2026-07-02T10:30:00+02:00",
-        bypass_availability=True
-    )
-    return {"status": "success"}
-
-@app.post("/create-retell-bot")
-async def create_retell_bot_endpoint(request: Request):
-    payload = await request.json()
-    data = payload if isinstance(payload, dict) else payload.get("data", payload)
-    voice_id = VOICE_MAPPING.get(data.get("asistente"), "openai-Alloy")
-    return create_bot_for_client(
-        data.get("nombre_negocio"), data.get("sector"), data.get("servicios"),
-        data.get("horario"), data.get("zona"), voice_id, data.get("google_calendar_email")
-    )
-
 @app.get("/")
 async def root():
-    return {"status": "OK"}
+    return {"status": "Dansu Backend Corregido - OK"}
 
 if __name__ == "__main__":
     import uvicorn

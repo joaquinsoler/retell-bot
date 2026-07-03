@@ -208,7 +208,7 @@ def retell_request(method: str, endpoint: str, json_data=None):
         logger.error(f"❌ Error de comunicación con Retell: {e}", exc_info=True)
         return None
 
-# ==================== CONSTRUCTOR DEL PROMPT DINÁMICO REFACTORIZADO ====================
+# ==================== CONSTRUCTOR DEL PROMPT DINÁMICO MODIFICADO (OPCIÓN 1) ====================
 def build_custom_prompt(nombre_negocio, sector, servicios, horario, zona, calendar_email, idioma="es", datos_reserva="Nombre completo, Número de teléfono, Motivo de la cita"):
     # Mapeo conversacional claro del idioma configurado
     idiomas_legibles = {
@@ -218,8 +218,23 @@ def build_custom_prompt(nombre_negocio, sector, servicios, horario, zona, calend
     }
     idioma_atencion = idiomas_legibles.get(str(idioma).strip().lower(), "Español de España (es-ES)")
 
+    # Captura dinámica del tiempo preciso en la zona del negocio (España/Madrid) en el momento del envío
+    ahora_madrid = datetime.now(MADRID_TZ)
+    
+    # Formateamos los días de la semana y meses de forma explícita y clara en castellano
+    dias_semana = {0: "Lunes", 1: "Martes", 2: "Miércoles", 3: "Jueves", 4: "Viernes", 5: "Sábado", 6: "Domingo"}
+    meses_año = {1: "Enero", 2: "Febrero", 3: "Marzo", 4: "Abril", 5: "Mayo", 6: "Junio", 7: "Julio", 8: "Agosto", 9: "Septiembre", 10: "Octubre", 11: "Noviembre", 12: "Diciembre"}
+    
+    fecha_legible = f"{dias_semana[ahora_madrid.weekday()]}, {ahora_madrid.day} de {meses_año[ahora_madrid.month]} de {ahora_madrid.year}"
+    hora_legible = ahora_madrid.strftime("%H:%M")
+
     return f"""Eres la voz y el asistente virtual exclusivo de {nombre_negocio}, un negocio enfocado en el sector de {sector}.
 Tu objetivo principal es atender a los clientes con la máxima amabilidad, empatía y profesionalidad, offering una conversación fluida, natural y cercana.
+
+**REFERENCIA TEMPORAL OBLIGATORIA (MUY IMPORTANTE):**
+- La fecha de hoy es: **{fecha_legible}**.
+- La hora actual es: **{hora_legible}** (Zona horaria: Europe/Madrid).
+Utiliza esta referencia exacta para interpretar correctamente términos relativos que use el usuario como "hoy", "mañana", "esta tarde", "el próximo lunes" o "ayer", calculando los días en función de este marco.
 
 **CONFIGURACIÓN OBLIGATORIA DE IDIOMA:**
 - Debes interactuar, responder, saludar y hablar COMPLETAMENTE en el idioma: **{idioma_atencion}**. Toda la llamada debe seguir este idioma de forma estricta.
@@ -260,7 +275,6 @@ Gestiona la situación diciendo algo como:
 def create_bot_for_client(nombre_negocio, sector, servicios, horario, zona, voice_id, calendar_email, idioma="es", datos_reserva="Nombre completo, Número de teléfono, Motivo de la cita"):
     custom_prompt = build_custom_prompt(nombre_negocio, sector, servicios, horario, zona, calendar_email, idioma, datos_reserva)
 
-    # Convertimos los códigos de idioma estándar al formato de Retell
     retell_language_mapping = {"es": "es-ES", "en": "en-US", "ca": "ca-ES"}
     lang_retell = retell_language_mapping.get(str(idioma).strip().lower(), "es-ES")
 
@@ -465,14 +479,14 @@ async def get_user_bots(request: Request):
         bots = cur.fetchall()
         return {"status": "success", "bots": bots}
     except Exception as e:
-        logger.error(f"Error obteniendo bots del usuario: {e}", exc_info=True)
+        logger.error(f"Error obtaining bots del usuario: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
     finally:
         if 'cur' in locals(): cur.close()
         if 'conn' in locals(): conn.close()
 
 
-# ==================== ENDPOINT DE ACTUALIZACIÓN (UPDATE) MODIFICADO ====================
+# ==================== ENDPOINT DE ACTUALIZACIÓN (UPDATE) ====================
 @app.post("/update-retell-bot")
 async def update_retell_bot_endpoint(request: Request):
     try:
@@ -486,7 +500,6 @@ async def update_retell_bot_endpoint(request: Request):
         calendar_email = data.get("google_calendar_email")
         asistente_nombre = data.get("asistente")
         
-        # Recepción de las dos nuevas variables desde el formulario dinámico de Wix
         idioma = data.get("idioma", "es")
         datos_reserva = data.get("datos_reserva", "Nombre completo, Número de teléfono, Motivo de la cita")
 
@@ -503,7 +516,6 @@ async def update_retell_bot_endpoint(request: Request):
         if not llm_id:
             raise HTTPException(status_code=400, detail="El agente no dispone de un motor LLM vinculado")
 
-        # Reconstrucción del prompt integrando los dos nuevos parámetros respetando el esqueleto nativo
         nuevo_prompt = build_custom_prompt(nombre_negocio, sector, servicios, horario, zona, calendar_email, idioma, datos_reserva)
 
         llm_update = retell_request("PATCH", f"/update-retell-llm/{llm_id}", {
@@ -533,7 +545,6 @@ async def update_retell_bot_endpoint(request: Request):
 
         voice_id_tecnico = VOICE_MAPPING.get(asistente_nombre)
         
-        # Ajustamos también el idioma a nivel de agente en Retell de forma dinámica
         retell_language_mapping = {"es": "es-ES", "en": "en-US", "ca": "ca-ES"}
         lang_retell = retell_language_mapping.get(str(idioma).strip().lower(), "es-ES")
 
@@ -546,7 +557,6 @@ async def update_retell_bot_endpoint(request: Request):
         if not voice_id_tecnico:
             voice_id_tecnico = agent_info.get("voice_id")
 
-        # Sincronizamos la persistencia en PostgreSQL con los campos añadidos
         conn = get_db_connection()
         cur = conn.cursor()
         cur.execute("""
@@ -670,7 +680,6 @@ async def create_retell_bot_endpoint(request: Request):
         data = payload if isinstance(payload, dict) else payload.get("data", payload)
         voice_id = VOICE_MAPPING.get(data.get("asistente"), "openai-Alloy")
         
-        # Inyección de los dos nuevos campos opcionales también en el pipeline de creación inicial
         idioma = data.get("idioma", "es")
         datos_reserva = data.get("datos_reserva", "Nombre completo, Número de teléfono, Motivo de la cita")
 

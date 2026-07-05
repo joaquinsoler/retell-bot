@@ -2,25 +2,25 @@ import os
 import json
 import logging
 from datetime import datetime, timedelta
-from zoneinfo import ZoneInfo
+from zoneinfo import ZoneInfo  # Gestión nativa y precisa de zonas horarias en Python 3.9+
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
 import requests
-import psycopg2
+import psycopg2  # Conector nativo de PostgreSQL
 from psycopg2.extras import RealDictCursor
 
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
-from jose import JWTError, jwt
+from jose import JWTError, jwt  # Manejo seguro de tokens del Magic Link
 
 # ==================== CONFIGURACIÓN DE LOGS PARA RENDER ====================
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s - %(message)s",
-    handlers=[logging.StreamHandler()]
+    handlers=[logging.StreamHandler()]  # Envía los logs directamente a la consola de Render
 )
 logger = logging.getLogger("DansuAI-Backend")
 
@@ -37,9 +37,11 @@ if not all([RETELL_API_KEY, GOOGLE_CREDENTIALS_JSON, DATABASE_URL, JWT_SECRET_KE
     logger.critical("Faltan variables de entorno críticas en el despliegue.")
     raise Exception("Faltan variables de entorno críticas (RETELL_API_KEY, GOOGLE_CREDENTIALS, DATABASE_URL, JWT_SECRET_KEY o BREVO_API_KEY)")
 
+# Configuración JWT
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 15
 
+# Almacén temporal de sesiones validadas indexadas por IP (IP: {"email": email, "expira": datetime})
 SESIONES_ACTIVAS = {}
 
 # ==================== CORS ====================
@@ -56,6 +58,7 @@ def get_db_connection():
     return psycopg2.connect(DATABASE_URL, cursor_factory=RealDictCursor)
 
 def init_db():
+    """Crea o actualiza la tabla de asistentes en PostgreSQL al arrancar"""
     conn = get_db_connection()
     cur = conn.cursor()
     try:
@@ -76,6 +79,7 @@ def init_db():
                 fecha_creacion TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
         """)
+        # Migraciones automáticas por si la tabla ya existía sin estas columnas
         cur.execute("ALTER TABLE asistentes ADD COLUMN IF NOT EXISTS idioma VARCHAR(50) DEFAULT 'es';")
         cur.execute("ALTER TABLE asistentes ADD COLUMN IF NOT EXISTS datos_reserva TEXT DEFAULT 'Nombre completo, Número de teléfono, Motivo de la cita';")
         conn.commit()
@@ -86,21 +90,25 @@ def init_db():
         cur.close()
         conn.close()
 
+# Inicializamos la estructura de la base de datos al arrancar el backend
 init_db()
 
 # ==================== GOOGLE CALENDAR ====================
 SCOPES = ['https://www.googleapis.com/auth/calendar']
-MADRID_TZ = ZoneInfo("Europe/Madrid")
+MADRID_TZ = ZoneInfo("Europe/Madrid")  # Huso horario de referencia absoluto para el negocio
 
 def get_calendar_service():
     credentials_info = json.loads(GOOGLE_CREDENTIALS_JSON)
-    credentials = service_account.Credentials.from_service_account_info(credentials_info, scopes=SCOPES)
+    credentials = service_account.Credentials.from_service_account_info(
+        credentials_info, scopes=SCOPES
+    )
     credentials = credentials.with_scopes(SCOPES)
     if hasattr(credentials, 'with_subject'):
         credentials = credentials.with_subject(None)
     if hasattr(credentials, '_regional_access_boundary'):
         credentials._regional_access_boundary = None
     return build('calendar', 'v3', credentials=credentials, cache_discovery=False)
+
 
 def ensure_calendar_access(calendar_id: str):
     try:
@@ -112,6 +120,7 @@ def ensure_calendar_access(calendar_id: str):
             logger.info(f"ℹ️ Ya suscrito: {calendar_id}")
         else:
             logger.error(f"⚠️ Error suscripción {e.status_code}: {e}")
+
 
 def normalize_to_madrid_iso(dt_str: str) -> str:
     if not dt_str:
@@ -128,6 +137,7 @@ def normalize_to_madrid_iso(dt_str: str) -> str:
             return dt_str
     dt_madrid = dt.astimezone(MADRID_TZ)
     return dt_madrid.isoformat()
+
 
 def check_availability(calendar_id: str, start_time: str, end_time: str) -> bool:
     try:
@@ -152,6 +162,7 @@ def check_availability(calendar_id: str, start_time: str, end_time: str) -> bool
         logger.error(f"⚠️ Error al comprobar disponibilidad con FreeBusy: {e}", exc_info=True)
         return True
 
+
 def create_google_event(calendar_id: str, summary: str, start_time: str, end_time: str, description: str = "", bypass_availability: bool = False):
     try:
         ensure_calendar_access(calendar_id)
@@ -173,6 +184,7 @@ def create_google_event(calendar_id: str, summary: str, start_time: str, end_tim
     except Exception as e:
         logger.error(f"❌ Error Google Calendar: {e}", exc_info=True)
         raise
+
 
 # ==================== VOICE MAPPING & RETELL UTILS ====================
 VOICE_MAPPING = {
@@ -196,10 +208,10 @@ def retell_request(method: str, endpoint: str, json_data=None):
         logger.error(f"❌ Error de comunicación con Retell: {e}", exc_info=True)
         return None
 
-# ==================== CONSTRUCTOR DEL PROMPT DINÁMICO (MODIFICADO) ====================
+# ==================== CONSTRUCTOR DEL PROMPT DINÁMICO MODIFICADO (OPCIÓN 1) ====================
 def build_custom_prompt(nombre_negocio, sector, servicios, horario, zona, calendar_email, idioma="es", 
                         datos_reserva="Nombre completo, Número de teléfono, Motivo de la cita"):
-    
+    # Mapeo conversacional claro del idioma configurado
     idiomas_legibles = {
         "es": "Español de España (es-ES)",
         "en": "Inglés (en-US)",
@@ -207,34 +219,18 @@ def build_custom_prompt(nombre_negocio, sector, servicios, horario, zona, calend
     }
     idioma_atencion = idiomas_legibles.get(str(idioma).strip().lower(), "Español de España (es-ES)")
 
+    # Captura dinámica del tiempo preciso en la zona del negocio (España/Madrid) en el momento del envío
     ahora_madrid = datetime.now(MADRID_TZ)
     
+    # Formateamos los días de la semana y meses de forma explícita y clara en castellano
     dias_semana = {0: "Lunes", 1: "Martes", 2: "Miércoles", 3: "Jueves", 4: "Viernes", 5: "Sábado", 6: "Domingo"}
     meses_año = {1: "Enero", 2: "Febrero", 3: "Marzo", 4: "Abril", 5: "Mayo", 6: "Junio", 7: "Julio", 8: "Agosto", 9: "Septiembre", 10: "Octubre", 11: "Noviembre", 12: "Diciembre"}
     
     fecha_legible = f"{dias_semana[ahora_madrid.weekday()]}, {ahora_madrid.day} de {meses_año[ahora_madrid.month]} de {ahora_madrid.year}"
     hora_legible = ahora_madrid.strftime("%H:%M")
 
-    # ==================== LÓGICA DE DATOS OBLIGATORIOS (NOMBRE + TELÉFONO SIEMPRE) ====================
-    datos_lista = [x.strip() for x in (datos_reserva or "").split(",") if x.strip()]
-    
-    obligatorios = ["Nombre completo", "Número de teléfono"]
-    final_lista = []
-    
-    # Añadimos primero Nombre y Teléfono (sin duplicados)
-    for ob in obligatorios:
-        if not any(ob.lower() == d.lower() for d in final_lista):
-            final_lista.append(ob)
-    
-    # Añadimos el resto de campos del formulario (sin duplicar nombre ni teléfono)
-    for d in datos_lista:
-        if not any(d.lower() == f.lower() for f in final_lista):
-            final_lista.append(d)
-    
-    datos_reserva_final = ", ".join(final_lista)
-
     return f"""Eres la voz y el asistente virtual exclusivo de {nombre_negocio}, un negocio enfocado en el sector de {sector}.
-Tu objetivo principal es atender a los clientes con la máxima amabilidad, empatía y profesionalidad, ofreciendo una conversación fluida, natural y cercana.
+Tu objetivo principal es atender a los clientes con la máxima amabilidad, empatía y profesionalidad, offering una conversación fluida, natural y cercana.
 **REFERENCIA TEMPORAL OBLIGATORIA (MUY IMPORTANTE):**
 - La fecha de hoy es: **{fecha_legible}**.
 - La hora actual es: **{hora_legible}** (Zona horaria: Europe/Madrid).
@@ -257,18 +253,10 @@ Escucha activamente.
 - Email del Google Calendar institucional: {calendar_email}
 
 **FLUJO NATURAL PARA RECOGER DATOS Y AGENDAR CITA:**
-Cuando un usuario esté interesado en reservar, avanza de manera conversacional, preguntando los datos **uno a uno** (nunca todos de golpe en una sola frase).
-
-**ORDEN OBLIGATORIO DE PREGUNTAS:**
-1. **Nombre completo** del cliente.
-2. **Número de teléfono** del cliente.
-3. **Día y Hora** de la cita (propón opciones según las preferencias del cliente y la disponibilidad).
-4. **Resto de datos requeridos por el negocio** (si los hay y aún no los has recogido).
-
-Los datos que **siempre** debes tener recopilados antes de agendar son: **{datos_reserva_final}**.
-
-Solo cuando tengas recopilados la **Fecha/Hora**, el **Nombre completo**, el **Número de teléfono** y **todos los datos requeridos** (**{datos_reserva_final}**) de forma exitosa, utiliza la herramienta `book_appointment` pasando obligatoriamente el email `{calendar_email}` en el campo `calendar_email`.
-
+Cuando un usuario esté interesado en reservar, avanza de manera conversacional, preguntando los datos uno a uno (nunca todos de golpe en una sola frase):
+1. **Día y Hora:** Propón o confirma el momento de la cita según las preferencias del cliente.
+2. **Información Requerida del Cliente:** Para formalizar y confirmar la reserva, debes pedirle de forma educada y uno a uno los siguientes datos estipulados por el negocio: **{datos_reserva}**.
+Solo cuando tengas recopilados la Fecha/Hora y todos los datos requeridos (**{datos_reserva}**) de forma exitosa, utiliza la herramienta `book_appointment` pasando obligatoriamente el email `{calendar_email}` en el campo `calendar_email`.
 **REGLAS CRÍTICAS DE CONTROL DE ERRORES (Capa de Privacidad de Desarrollo):**
 - NUNCA menciones nombres de variables, formatos de código, mensajes de servidores, ni términos técnicos de software en la llamada (como "error de JSON", "función", "endpoint", "404", "500", "backend", o "respuesta incorrecta").
 Está estrictamente prohibido.
@@ -276,6 +264,7 @@ Está estrictamente prohibido.
 Gestiona la situación diciendo algo como: 
   *"Disculpa las molestias, parece que este horario concreto acaba de ocuparse o no está disponible en nuestra agenda en este instante. Déjame revisar... ¿Te vendría bien intentar en otro tramo horario o preferirías mirar otro día?"*
 - Si experimentas algún problema técnico interno con las herramientas, mantén la calma, discúlpate amablemente por la pequeña pausa y reconduce la llamada ofreciéndote a tomar nota manualmente o pedirle que lo intente en unos instantes, garantizando siempre una experiencia de atención al cliente excelente."""
+
 
 # ==================== LÓGICA DE CREACIÓN ====================
 def create_bot_for_client(nombre_negocio, sector, servicios, horario, zona, voice_id, calendar_email, 
@@ -356,6 +345,7 @@ def create_bot_for_client(nombre_negocio, sector, servicios, horario, zona, voic
 
     return {"status": "success", "agent_id": agent_id, "phone_number": free_number}
 
+
 # ==================== UTILS TOKENS & EMAIL (MAGIC LINK) ====================
 def create_magic_token(email: str):
     expire = datetime.utcnow() + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
@@ -395,6 +385,7 @@ def send_magic_link_email(email: str, magic_link: str):
         logger.error(f"Fallo enviando email con Brevo a {email}: {e}", exc_info=True)
         return False
 
+
 # ==================== ENDPOINTS DE AUTENTICACIÓN ====================
 @app.post("/request-magic-link")
 async def request_magic_link(request: Request):
@@ -414,6 +405,7 @@ async def request_magic_link(request: Request):
     except Exception as e:
         logger.error(f"Error en request-magic-link: {e}", exc_info=True)
         raise HTTPException(500, str(e))
+
 
 @app.get("/redirect-to-wix", response_class=HTMLResponse)
 async def redirect_to_wix(token: str, request: Request):
@@ -440,6 +432,7 @@ async def redirect_to_wix(token: str, request: Request):
     </html>
     """
 
+
 @app.get("/check-session")
 async def check_session(request: Request):
     client_ip = request.headers.get("x-forwarded-for", request.client.host).split(",")[0].strip()
@@ -454,7 +447,7 @@ async def check_session(request: Request):
         return {"status": "no_session"}
         
     email = sesion["email"]
-    del SESIONES_ACTIVAS[client_ip]
+    del SESIONES_ACTIVAS[client_ip]  # Consumo de un solo uso por seguridad
     
     try:
         conn = get_db_connection()
@@ -469,6 +462,7 @@ async def check_session(request: Request):
     finally:
         cur.close()
         conn.close()
+
 
 @app.post("/get-user-bots")
 async def get_user_bots(request: Request):
@@ -486,6 +480,7 @@ async def get_user_bots(request: Request):
     finally:
         if 'cur' in locals(): cur.close()
         if 'conn' in locals(): conn.close()
+
 
 # ==================== ENDPOINT DE ACTUALIZACIÓN (UPDATE) ====================
 @app.post("/update-retell-bot")
@@ -576,6 +571,7 @@ async def update_retell_bot_endpoint(request: Request):
         if 'cur' in locals(): cur.close()
         if 'conn' in locals(): conn.close()
 
+
 @app.post("/delete-retell-bot")
 async def delete_retell_bot_endpoint(request: Request):
     try:
@@ -631,6 +627,7 @@ async def delete_retell_bot_endpoint(request: Request):
         if 'cur' in locals(): cur.close()
         if 'conn' in locals(): conn.close()
 
+
 # ==================== ENDPOINTS GENERALES ORIGINALES ====================
 @app.post("/book-appointment")
 @app.post("/book-appointment/")
@@ -652,6 +649,7 @@ async def book_appointment(request: Request):
         logger.error(f"❌ ERROR EN BOOK-APPOINTMENT: {e}", exc_info=True)
         return {"code": "ERROR", "message": str(e)}
 
+
 @app.post("/verify-calendar-access")
 @app.post("/verify-calendar-access/")
 async def verify_calendar_access(request: Request):
@@ -669,6 +667,7 @@ async def verify_calendar_access(request: Request):
     except Exception as e:
         logger.error(f"Error en verify-calendar-access: {e}", exc_info=True)
         raise HTTPException(status_code=400, detail=str(e))
+
 
 @app.post("/create-retell-bot")
 async def create_retell_bot_endpoint(request: Request):
@@ -689,9 +688,11 @@ async def create_retell_bot_endpoint(request: Request):
         logger.error(f"Error en create-retell-bot: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
+
 @app.get("/")
 async def root():
     return {"status": "Dansu Backend Completo OK"}
+
 
 if __name__ == "__main__":
     import uvicorn

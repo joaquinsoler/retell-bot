@@ -251,7 +251,7 @@ Escucha activamente.
 **INFORMACIÓN OPERATIVA DEL NEGOCIO (Estrictamente real, nunca inventes datos):**
 - Ubicación / Zona de servicio: {zona}
 - Horario comercial: {horario}
-- Duración asignada para cada cita: {duracion_cita} minutos. Ten en cuenta esta duración a nivel informativo si el cliente te pregunta cuánto tardará la sesión o el servicio.
+- Duración promedio de una cita: El servicio dura aproximadamente {duracion_cita} minutos.
 - Servicios ofrecidos: {servicios}
 - Email del Google Calendar institucional: {calendar_email}
 
@@ -295,7 +295,7 @@ def create_bot_for_client(nombre_negocio, sector, servicios, horario, zona, voic
                 "properties": {
                     "calendar_email": {"type": "string"},
                     "summary": {"type": "string"},
-                    "start_time": {"type": "string", "description": "Formato ISO de inicio de la cita (Europe/Madrid)"},
+                    "start_time": {"type": "string"},
                     "description": {"type": "string"},
                     "datos_cliente_recolectados": {
                         "type": "string",
@@ -420,7 +420,7 @@ async def request_magic_link(request: Request):
 @app.get("/redirect-to-wix", response_class=HTMLResponse)
 async def redirect_to_wix(token: str, request: Request):
     email = verify_magic_token(token)
-    if (!email):
+    if not email:
         logger.warning("Intento de acceso con Token caducado o corrupto.")
         return "<html><body><h3>❌ El enlace es inválido o ha caducado. Por favor, solicita uno nuevo.</h3></body></html>"
     
@@ -509,7 +509,6 @@ async def update_retell_bot_endpoint(request: Request):
         idioma = data.get("idioma", "es")
         datos_reserva = data.get("datos_reserva", data.get("informacion_cita", "Nombre completo, Número de teléfono, Motivo de la cita"))
         
-        # Obtenemos la duración de la cita (por defecto 30 si no viene especificada)
         try:
             duracion_cita = int(data.get("duracion_cita", 30))
         except:
@@ -543,7 +542,7 @@ async def update_retell_bot_endpoint(request: Request):
                     "properties": {
                         "calendar_email": {"type": "string"},
                         "summary": {"type": "string"},
-                        "start_time": {"type": "string", "description": "Formato ISO de inicio de la cita (Europe/Madrid)"},
+                        "start_time": {"type": "string"},
                         "description": {"type": "string"},
                         "datos_cliente_recolectados": {
                             "type": "string",
@@ -660,7 +659,7 @@ async def book_appointment(request: Request):
         start_time_str = args.get("start_time")
 
         # Obtenemos la duración asignada al bot buscando por su email de Google Calendar
-        duracion_minutos = 30  # Valor por defecto seguro
+        duracion_minutos = 30  # Fallback por defecto seguro
         conn = get_db_connection()
         cur = conn.cursor()
         try:
@@ -676,9 +675,7 @@ async def book_appointment(request: Request):
 
         # Calculamos dinámicamente el end_time sumando los minutos correspondientes al start_time
         try:
-            # Reemplazamos espacios por 'T' por si acaso
             clean_start = str(start_time_str).strip().replace(" ", "T")
-            # Parseamos el formato ISO de la fecha (manejando el sufijo Z u offsets si existen)
             if clean_start.endswith("Z"):
                 start_dt = datetime.fromisoformat(clean_start[:-1]).replace(tzinfo=ZoneInfo("UTC"))
             else:
@@ -689,8 +686,8 @@ async def book_appointment(request: Request):
             end_dt = start_dt + timedelta(minutes=duracion_minutos)
             end_time_str = end_dt.isoformat()
         except Exception as e_time:
-            logger.error(f"⚠️ Error calculando el tiempo exacto. Usando fallback de +30min: {e_time}")
-            end_time_str = start_time_str  # El normalizador de Google Calendar lo procesará como fallback si falla
+            logger.error(f"⚠️ Error calculando el tiempo exacto de finalización: {e_time}")
+            end_time_str = start_time_str
 
         # Extraemos los datos estructurados que el bot recopiló del cliente
         datos_cliente = args.get("datos_cliente_recolectados", "")
@@ -744,7 +741,6 @@ async def create_retell_bot_endpoint(request: Request):
         idioma = data.get("idioma", "es")
         datos_reserva = data.get("informacion_cita", data.get("datos_reserva", "Nombre completo, Número de teléfono, Motivo de la cita"))
         
-        # Obtenemos la duración de la cita (por defecto 30 si no viene especificada)
         try:
             duracion_cita = int(data.get("duracion_cita", 30))
         except:

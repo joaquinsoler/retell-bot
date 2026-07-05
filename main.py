@@ -69,6 +69,7 @@ def init_db():
                 sector VARCHAR(255),
                 servicios TEXT,
                 horario VARCHAR(255),
+                duracion_cita INT DEFAULT 30,
                 zona VARCHAR(255),
                 google_calendar_email VARCHAR(255),
                 asistente VARCHAR(255),
@@ -82,6 +83,7 @@ def init_db():
         # Migraciones automáticas por si la tabla ya existía sin estas columnas
         cur.execute("ALTER TABLE asistentes ADD COLUMN IF NOT EXISTS idioma VARCHAR(50) DEFAULT 'es';")
         cur.execute("ALTER TABLE asistentes ADD COLUMN IF NOT EXISTS datos_reserva TEXT DEFAULT 'Nombre completo, Número de teléfono, Motivo de la cita';")
+        cur.execute("ALTER TABLE asistentes ADD COLUMN IF NOT EXISTS duracion_cita INT DEFAULT 30;")
         conn.commit()
         logger.info("✅ Base de datos PostgreSQL inicializada, verificada y lista.")
     except Exception as e:
@@ -210,7 +212,7 @@ def retell_request(method: str, endpoint: str, json_data=None):
 
 # ==================== CONSTRUCTOR DEL PROMPT DINÁMICO MODIFICADO (OPCIÓN 1) ====================
 def build_custom_prompt(nombre_negocio, sector, servicios, horario, zona, calendar_email, idioma="es", 
-                        datos_reserva="Nombre completo, Número de teléfono, Motivo de la cita"):
+                        datos_reserva="Nombre completo, Número de teléfono, Motivo de la cita", duracion_cita=30):
     # Mapeo conversacional claro del idioma configurado
     idiomas_legibles = {
         "es": "Español de España (es-ES)",
@@ -249,17 +251,18 @@ Escucha activamente.
 **INFORMACIÓN OPERATIVA DEL NEGOCIO (Estrictamente real, nunca inventes datos):**
 - Ubicación / Zona de servicio: {zona}
 - Horario comercial: {horario}
+- Duración asignada para cada cita: {duracion_cita} minutos. Ten en cuenta esta duración a nivel informativo si el cliente te pregunta cuánto tardará la sesión o el servicio.
 - Servicios ofrecidos: {servicios}
 - Email del Google Calendar institucional: {calendar_email}
 
 **FLUJO NATURAL PARA RECOGER DATOS Y AGENDAR CITA:**
 Cuando un usuario esté interesado en reservar, avanza de manera conversacional, preguntando los datos uno a uno (nunca todos de golpe en una sola frase):
 1. **Día y Hora:** Propón o confirma el momento de la cita según las preferencias del cliente.
-2. **Información Requerida del Cliente (OBLIGATORIA):** Para formalizar y confirmar la reserva, debes pedirle de forma obligatoria, educada y uno a uno los siguientes datos estipulados de manera estricta por el negocio: **{datos_reserva}**. 
+2. **Información Requerida del Cliente (OBLIGATORIA):** Para formalizar y confirmar la reserva, debes pedirle de forma obligatoria, educada y uno a uno los siguientes datos estipulados de manera estricta por el negocio: **{datos_reserva}**.
 No omitas ninguno. Insiste amablemente si el usuario olvida proveer alguno de ellos.
-
-Solo cuando tengas recopilados la Fecha/Hora y todos los datos requeridos extra listados en (**{datos_reserva}**) de forma exitosa, utiliza la herramienta `book_appointment`. 
-Debes pasar obligatoriamente el email `{calendar_email}` en el campo `calendar_email`. En el campo `datos_cliente_recolectados`, debes redactar de manera clara y estructurada los datos que el cliente te ha proporcionado en la conversación (por ejemplo: "Nombre: Juan Pérez, Teléfono: 611223344...").
+Solo cuando tengas recopilados la Fecha/Hora y todos los datos requeridos extra listados en (**{datos_reserva}**) de forma exitosa, utiliza la herramienta `book_appointment`.
+Debes pasar obligatoriamente el email `{calendar_email}` en el campo `calendar_email`.
+En el campo `datos_cliente_recolectados`, debes redactar de manera clara y estructurada los datos que el cliente te ha proporcionado en la conversación (por ejemplo: "Nombre: Juan Pérez, Teléfono: 611223344...").
 
 **REGLAS CRÍTICAS DE CONTROL DE ERRORES (Capa de Privacidad de Desarrollo):**
 - NUNCA menciones nombres de variables, formatos de código, mensajes de servidores, ni términos técnicos de software en la llamada (como "error de JSON", "función", "endpoint", "404", "500", "backend", o "respuesta incorrecta").
@@ -272,8 +275,8 @@ Gestiona la situación diciendo algo como:
 
 # ==================== LÓGICA DE CREACIÓN ====================
 def create_bot_for_client(nombre_negocio, sector, servicios, horario, zona, voice_id, calendar_email, 
-                          idioma="es", datos_reserva="Nombre completo, Número de teléfono, Motivo de la cita"):
-    custom_prompt = build_custom_prompt(nombre_negocio, sector, servicios, horario, zona, calendar_email, idioma, datos_reserva)
+                          idioma="es", datos_reserva="Nombre completo, Número de teléfono, Motivo de la cita", duracion_cita=30):
+    custom_prompt = build_custom_prompt(nombre_negocio, sector, servicios, horario, zona, calendar_email, idioma, datos_reserva, duracion_cita)
 
     retell_language_mapping = {"es": "es-ES", "en": "en-US", "ca": "ca-ES"}
     lang_retell = retell_language_mapping.get(str(idioma).strip().lower(), "es-ES")
@@ -292,15 +295,14 @@ def create_bot_for_client(nombre_negocio, sector, servicios, horario, zona, voic
                 "properties": {
                     "calendar_email": {"type": "string"},
                     "summary": {"type": "string"},
-                    "start_time": {"type": "string"},
-                    "end_time": {"type": "string"},
+                    "start_time": {"type": "string", "description": "Formato ISO de inicio de la cita (Europe/Madrid)"},
                     "description": {"type": "string"},
                     "datos_cliente_recolectados": {
                         "type": "string",
                         "description": "Todos los datos requeridos por el negocio que han sido recolectados conversacionalmente del cliente (ej: Nombre completo, Teléfono, etc.)"
                     }
                 },
-                "required": ["calendar_email", "summary", "start_time", "end_time", "datos_cliente_recolectados"]
+                "required": ["calendar_email", "summary", "start_time", "datos_cliente_recolectados"]
             }
         }]
     })
@@ -339,9 +341,9 @@ def create_bot_for_client(nombre_negocio, sector, servicios, horario, zona, voic
     cur = conn.cursor()
     try:
         cur.execute("""
-            INSERT INTO asistentes (nombre_negocio, sector, servicios, horario, zona, google_calendar_email, asistente, agent_id, phone_number, idioma, datos_reserva)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s);
-        """, (nombre_negocio, sector, servicios, horario, zona, calendar_email, voice_id, agent_id, free_number, idioma, datos_reserva))
+            INSERT INTO asistentes (nombre_negocio, sector, servicios, horario, duracion_cita, zona, google_calendar_email, asistente, agent_id, phone_number, idioma, datos_reserva)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s);
+        """, (nombre_negocio, sector, servicios, horario, duracion_cita, zona, calendar_email, voice_id, agent_id, free_number, idioma, datos_reserva))
         conn.commit()
         logger.info(f"✅ Bot {agent_id} registrado exitosamente en la base de datos.")
     except Exception as e:
@@ -418,7 +420,7 @@ async def request_magic_link(request: Request):
 @app.get("/redirect-to-wix", response_class=HTMLResponse)
 async def redirect_to_wix(token: str, request: Request):
     email = verify_magic_token(token)
-    if not email:
+    if (!email):
         logger.warning("Intento de acceso con Token caducado o corrupto.")
         return "<html><body><h3>❌ El enlace es inválido o ha caducado. Por favor, solicita uno nuevo.</h3></body></html>"
     
@@ -506,8 +508,14 @@ async def update_retell_bot_endpoint(request: Request):
         
         idioma = data.get("idioma", "es")
         datos_reserva = data.get("datos_reserva", data.get("informacion_cita", "Nombre completo, Número de teléfono, Motivo de la cita"))
+        
+        # Obtenemos la duración de la cita (por defecto 30 si no viene especificada)
+        try:
+            duracion_cita = int(data.get("duracion_cita", 30))
+        except:
+            duracion_cita = 30
 
-        logger.info(f"Actualizando Bot ID: {agent_id} | Idioma: {idioma} | Datos Reserva: {datos_reserva}")
+        logger.info(f"Actualizando Bot ID: {agent_id} | Idioma: {idioma} | Datos Reserva: {datos_reserva} | Duración: {duracion_cita}")
 
         if not agent_id:
             raise HTTPException(status_code=400, detail="Falta el agent_id")
@@ -520,7 +528,7 @@ async def update_retell_bot_endpoint(request: Request):
         if not llm_id:
             raise HTTPException(status_code=400, detail="El agente no dispone de un motor LLM vinculado")
 
-        nuevo_prompt = build_custom_prompt(nombre_negocio, sector, servicios, horario, zona, calendar_email, idioma, datos_reserva)
+        nuevo_prompt = build_custom_prompt(nombre_negocio, sector, servicios, horario, zona, calendar_email, idioma, datos_reserva, duracion_cita)
 
         llm_update = retell_request("PATCH", f"/update-retell-llm/{llm_id}", {
             "general_prompt": nuevo_prompt,
@@ -535,15 +543,14 @@ async def update_retell_bot_endpoint(request: Request):
                     "properties": {
                         "calendar_email": {"type": "string"},
                         "summary": {"type": "string"},
-                        "start_time": {"type": "string"},
-                        "end_time": {"type": "string"},
+                        "start_time": {"type": "string", "description": "Formato ISO de inicio de la cita (Europe/Madrid)"},
                         "description": {"type": "string"},
                         "datos_cliente_recolectados": {
                             "type": "string",
                             "description": "Todos los datos requeridos por el negocio que han sido recolectados conversacionalmente del cliente (ej: Nombre completo, Teléfono, etc.)"
                         }
                     },
-                    "required": ["calendar_email", "summary", "start_time", "end_time", "datos_cliente_recolectados"]
+                    "required": ["calendar_email", "summary", "start_time", "datos_cliente_recolectados"]
                 }
             }]
         })
@@ -569,9 +576,9 @@ async def update_retell_bot_endpoint(request: Request):
         cur = conn.cursor()
         cur.execute("""
             UPDATE asistentes 
-            SET nombre_negocio = %s, sector = %s, servicios = %s, horario = %s, zona = %s, google_calendar_email = %s, asistente = %s, idioma = %s, datos_reserva = %s
+            SET nombre_negocio = %s, sector = %s, servicios = %s, horario = %s, duracion_cita = %s, zona = %s, google_calendar_email = %s, asistente = %s, idioma = %s, datos_reserva = %s
             WHERE agent_id = %s;
-        """, (nombre_negocio, sector, servicios, horario, zona, calendar_email, voice_id_tecnico, idioma, datos_reserva, agent_id))
+        """, (nombre_negocio, sector, servicios, horario, duracion_cita, zona, calendar_email, voice_id_tecnico, idioma, datos_reserva, agent_id))
         conn.commit()
         
         logger.info(f"✅ Registro persistente actualizado en DB para el bot: {agent_id}")
@@ -649,6 +656,42 @@ async def book_appointment(request: Request):
         data = json.loads(raw_body) if raw_body else {}
         args = data.get("args", data)
 
+        calendar_email = args.get("calendar_email")
+        start_time_str = args.get("start_time")
+
+        # Obtenemos la duración asignada al bot buscando por su email de Google Calendar
+        duracion_minutos = 30  # Valor por defecto seguro
+        conn = get_db_connection()
+        cur = conn.cursor()
+        try:
+            cur.execute("SELECT duracion_cita FROM asistentes WHERE google_calendar_email = %s ORDER BY id DESC LIMIT 1;", (calendar_email,))
+            row = cur.fetchone()
+            if row and row.get("duracion_cita"):
+                duracion_minutos = int(row["duracion_cita"])
+        except Exception as e_db:
+            logger.error(f"⚠️ Error al consultar duración de cita en base de datos: {e_db}")
+        finally:
+            cur.close()
+            conn.close()
+
+        # Calculamos dinámicamente el end_time sumando los minutos correspondientes al start_time
+        try:
+            # Reemplazamos espacios por 'T' por si acaso
+            clean_start = str(start_time_str).strip().replace(" ", "T")
+            # Parseamos el formato ISO de la fecha (manejando el sufijo Z u offsets si existen)
+            if clean_start.endswith("Z"):
+                start_dt = datetime.fromisoformat(clean_start[:-1]).replace(tzinfo=ZoneInfo("UTC"))
+            else:
+                start_dt = datetime.fromisoformat(clean_start)
+                if start_dt.tzinfo is None:
+                    start_dt = start_dt.replace(tzinfo=MADRID_TZ)
+            
+            end_dt = start_dt + timedelta(minutes=duracion_minutos)
+            end_time_str = end_dt.isoformat()
+        except Exception as e_time:
+            logger.error(f"⚠️ Error calculando el tiempo exacto. Usando fallback de +30min: {e_time}")
+            end_time_str = start_time_str  # El normalizador de Google Calendar lo procesará como fallback si falla
+
         # Extraemos los datos estructurados que el bot recopiló del cliente
         datos_cliente = args.get("datos_cliente_recolectados", "")
         
@@ -660,10 +703,10 @@ async def book_appointment(request: Request):
             descripcion_final += args.get("description", "")
 
         create_google_event(
-            args.get("calendar_email"),
+            calendar_email,
             args.get("summary"),
-            args.get("start_time"),
-            args.get("end_time"),
+            start_time_str,
+            end_time_str,
             descripcion_final
         )
         return {"code": "SUCCESS", "message": "Cita agendada correctamente"}
@@ -699,13 +742,18 @@ async def create_retell_bot_endpoint(request: Request):
         voice_id = VOICE_MAPPING.get(data.get("asistente"), "openai-Alloy")
         
         idioma = data.get("idioma", "es")
-        # Aquí corregimos el problema: mapeamos 'informacion_cita' enviada desde el HTML original de creación
         datos_reserva = data.get("informacion_cita", data.get("datos_reserva", "Nombre completo, Número de teléfono, Motivo de la cita"))
+        
+        # Obtenemos la duración de la cita (por defecto 30 si no viene especificada)
+        try:
+            duracion_cita = int(data.get("duracion_cita", 30))
+        except:
+            duracion_cita = 30
 
         return create_bot_for_client(
             data.get("nombre_negocio"), data.get("sector"), data.get("servicios"),
             data.get("horario"), data.get("zona"), voice_id, data.get("google_calendar_email"),
-            idioma, datos_reserva
+            idioma, datos_reserva, duracion_cita
         )
     except Exception as e:
         logger.error(f"Error en create-retell-bot: {e}", exc_info=True)

@@ -209,7 +209,8 @@ def retell_request(method: str, endpoint: str, json_data=None):
         return None
 
 # ==================== CONSTRUCTOR DEL PROMPT DINÁMICO MODIFICADO (OPCIÓN 1) ====================
-def build_custom_prompt(nombre_negocio, sector, servicios, horario, zona, calendar_email, idioma="es", datos_reserva="Nombre completo, Número de teléfono, Motivo de la cita"):
+def build_custom_prompt(nombre_negocio, sector, servicios, horario, zona, calendar_email, idioma="es", 
+                        datos_reserva="Nombre completo, Número de teléfono, Motivo de la cita"):
     # Mapeo conversacional claro del idioma configurado
     idiomas_legibles = {
         "es": "Español de España (es-ES)",
@@ -230,25 +231,21 @@ def build_custom_prompt(nombre_negocio, sector, servicios, horario, zona, calend
 
     return f"""Eres la voz y el asistente virtual exclusivo de {nombre_negocio}, un negocio enfocado en el sector de {sector}.
 Tu objetivo principal es atender a los clientes con la máxima amabilidad, empatía y profesionalidad, offering una conversación fluida, natural y cercana.
-
 **REFERENCIA TEMPORAL OBLIGATORIA (MUY IMPORTANTE):**
 - La fecha de hoy es: **{fecha_legible}**.
 - La hora actual es: **{hora_legible}** (Zona horaria: Europe/Madrid).
 Utiliza esta referencia exacta para interpretar correctamente términos relativos que use el usuario como "hoy", "mañana", "esta tarde", "el próximo lunes" o "ayer", calculando los días en función de este marco.
-
 **CONFIGURACIÓN OBLIGATORIA DE IDIOMA:**
-- Debes interactuar, responder, saludar y hablar COMPLETAMENTE en el idioma: **{idioma_atencion}**. Toda la llamada debe seguir este idioma de forma estricta.
-
+- Debes interactuar, responder, saludar y hablar COMPLETAMENTE en el idioma: **{idioma_atencion}**.
+Toda la llamada debe seguir este idioma de forma estricta.
 **ALCANCE DE TUS FUNCIONES (Muy Importante):**
 - Tus únicas capacidades y tareas autorizadas son: **dar información detallada sobre el negocio** y **agendar nuevas citas**.
 - Si el usuario te solicita cancelar una cita, eliminar una reserva existente, modificar un horario ya agendado o realizar cualquier otra gestión administrativa, debes aclararle de forma muy educada que no tienes acceso para realizar esa acción.
 Responde con un tono comercial impecable explicando tus límites. (Ej: *"Actualmente solo puedo facilitarte información y agendar nuevas citas en el sistema. Para cancelar o modificar una reserva que ya tienes, te sugiero ponerte en contacto directamente con nuestro equipo técnico o de atención humana a través de nuestros canales habituales, y ellos lo resolverán encantados."*).
-
 **TU PERSONALIDAD Y TONO REQUERIDO:**
 - Habla con calidez, usando frases cortas y claras para que la llamada sea cómoda.
 Escucha activamente.
 - Muéstrate siempre servicial, educado y con un trato comercial impecable.
-
 **INFORMACIÓN OPERATIVA DEL NEGOCIO (Estrictamente real, nunca inventes datos):**
 - Ubicación / Zona de servicio: {zona}
 - Horario comercial: {horario}
@@ -259,9 +256,7 @@ Escucha activamente.
 Cuando un usuario esté interesado en reservar, avanza de manera conversacional, preguntando los datos uno a uno (nunca todos de golpe en una sola frase):
 1. **Día y Hora:** Propón o confirma el momento de la cita según las preferencias del cliente.
 2. **Información Requerida del Cliente:** Para formalizar y confirmar la reserva, debes pedirle de forma educada y uno a uno los siguientes datos estipulados por el negocio: **{datos_reserva}**.
-
 Solo cuando tengas recopilados la Fecha/Hora y todos los datos requeridos (**{datos_reserva}**) de forma exitosa, utiliza la herramienta `book_appointment` pasando obligatoriamente el email `{calendar_email}` en el campo `calendar_email`.
-
 **REGLAS CRÍTICAS DE CONTROL DE ERRORES (Capa de Privacidad de Desarrollo):**
 - NUNCA menciones nombres de variables, formatos de código, mensajes de servidores, ni términos técnicos de software en la llamada (como "error de JSON", "función", "endpoint", "404", "500", "backend", o "respuesta incorrecta").
 Está estrictamente prohibido.
@@ -272,7 +267,8 @@ Gestiona la situación diciendo algo como:
 
 
 # ==================== LÓGICA DE CREACIÓN ====================
-def create_bot_for_client(nombre_negocio, sector, servicios, horario, zona, voice_id, calendar_email, idioma="es", datos_reserva="Nombre completo, Número de teléfono, Motivo de la cita"):
+def create_bot_for_client(nombre_negocio, sector, servicios, horario, zona, voice_id, calendar_email, 
+                          idioma="es", datos_reserva="Nombre completo, Número de teléfono, Motivo de la cita"):
     custom_prompt = build_custom_prompt(nombre_negocio, sector, servicios, horario, zona, calendar_email, idioma, datos_reserva)
 
     retell_language_mapping = {"es": "es-ES", "en": "en-US", "ca": "ca-ES"}
@@ -597,7 +593,7 @@ async def delete_retell_bot_endpoint(request: Request):
                         agents = phone.get("inbound_agents", [])
                         if any(a.get("agent_id") == agent_id for a in agents):
                             retell_request("PATCH", f"/update-phone-number/{phone['phone_number']}", {
-                                "inbound_agents": []
+                               "inbound_agents": []
                             })
                             logger.info(f"ℹ️ Número {phone['phone_number']} liberado exitosamente.")
             except Exception as e_phone:

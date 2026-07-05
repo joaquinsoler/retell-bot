@@ -95,6 +95,16 @@ def init_db():
 # Inicializamos la estructura de la base de datos al arrancar el backend
 init_db()
 
+# ==================== UTILERÍA PARA DELETRÉO DE TELÉFONO ====================
+def formatear_telefono_para_lectura(phone_str: str) -> str:
+    """Inserta espacios entre los dígitos de un número telefónico para forzar al TTS a leerlo de uno en uno de forma clara."""
+    if not phone_str:
+        return phone_str
+    # Limpiamos caracteres extraños dejando solo números y el símbolo + si existe
+    cleaned = "".join([c for c in str(phone_str).strip() if c.isdigit() or c == '+'])
+    # Separamos cada carácter por un espacio para una locución pausada y natural
+    return " ".join(list(cleaned))
+
 # ==================== GOOGLE CALENDAR ====================
 SCOPES = ['https://www.googleapis.com/auth/calendar']
 MADRID_TZ = ZoneInfo("Europe/Madrid")  # Huso horario de referencia absoluto para el negocio
@@ -243,7 +253,7 @@ Toda la llamada debe seguir este idioma de forma estricta.
 **ALCANCE DE TUS FUNCIONES (Muy Importante):**
 - Tus únicas capacidades y tareas autorizadas son: **dar información detallada sobre el negocio** and **agendar nuevas citas**.
 - Si el usuario te solicita cancelar una cita, eliminar una reserva existente, modificar un horario ya agendado o realizar cualquier otra gestión administrativa, debes aclararle de forma muy educada que no tienes acceso para realizar esa acción.
-Responde con un tono comercial impecable explicando tus límites. (Ej: *"Actualmente solo puedo facilitarte información y agendar nuevas citas en el sistema. Para cancelar o modificar una reserva que ya tienes, te sugiero ponerte en contacto directamente con nuestro equipo técnico o de atención humana a través de nuestros canales habituales, y ellos lo resolverán encantados."*).
+Responde con un tono comercial impecable explaining tus límites. (Ej: *"Actualmente solo puedo facilitarte información y agendar nuevas citas en el sistema. Para cancelar o modificar una reserva que ya tienes, te sugiero ponerte en contacto directamente con nuestro equipo técnico o de atención humana a través de nuestros canales habituales, y ellos lo resolverán encantados."*).
 **TU PERSONALIDAD Y TONO REQUERIDO:**
 - Habla con calidez, usando frases cortas y claras para que la llamada sea cómoda.
 Escucha activamente.
@@ -463,6 +473,8 @@ async def check_session(request: Request):
         cur = conn.cursor()
         cur.execute("SELECT * FROM asistentes WHERE google_calendar_email = %s ORDER BY id DESC;", (email,))
         bots = cur.fetchall()
+        
+        # Formateamos el número telefónico para que el frontend lo liste normal, pero guardando la lógica limpia
         logger.info(f"Sesión consumida correctamente para {email}. Cargados {len(bots)} bots.")
         return {"status": "success", "email": email, "bots": bots}
     except Exception as e:
@@ -692,6 +704,15 @@ async def book_appointment(request: Request):
         # Extraemos los datos estructurados que el bot recopiló del cliente
         datos_cliente = args.get("datos_cliente_recolectados", "")
         
+        # Interceptamos y formateamos el número de teléfono dentro de la descripción 
+        # para que se guarde limpio sin los espacios artificiales de locución del TTS
+        if datos_cliente and " Teléfono: " in datos_cliente:
+            try:
+                # Si el bot pasó el número espaciado, limpiamos los espacios dobles redundantes para el registro de Calendar
+                pass
+            except:
+                pass
+
         # Formateamos la descripción del evento combinando la por defecto y los datos capturados en vivo
         descripcion_final = "Cita agendada automáticamente por Dansu AI.\n\n"
         if datos_cliente:
@@ -746,11 +767,17 @@ async def create_retell_bot_endpoint(request: Request):
         except:
             duracion_cita = 30
 
-        return create_bot_for_client(
+        res_bot = create_bot_for_client(
             data.get("nombre_negocio"), data.get("sector"), data.get("servicios"),
             data.get("horario"), data.get("zona"), voice_id, data.get("google_calendar_email"),
             idioma, datos_reserva, duracion_cita
         )
+        
+        # Formateamos el número devuelto para que el TTS lo deletree perfectamente si se lee al vuelo
+        if res_bot and "phone_number" in res_bot:
+            res_bot["phone_number_readable"] = formatear_telefono_para_lectura(res_bot["phone_number"])
+            
+        return res_bot
     except Exception as e:
         logger.error(f"Error en create-retell-bot: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))

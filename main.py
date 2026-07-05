@@ -210,9 +210,9 @@ def retell_request(method: str, endpoint: str, json_data=None):
         logger.error(f"❌ Error de comunicación con Retell: {e}", exc_info=True)
         return None
 
-# ==================== CONSTRUCTOR DEL PROMPT DINÁMICO MODIFICADO (OPCIÓN 1) ====================
+# ==================== CONSTRUCTOR DEL PROMPT DINÁMICO ORIGINAL ESTABLE ====================
 def build_custom_prompt(nombre_negocio, sector, servicios, horario, zona, calendar_email, idioma="es", 
-                        datos_reserva="Nombre completo, Número de teléfono, Motivo de la cita", duracion_cita=30):
+                        datos_reserva="Nombre completo, Número de teléfono, Motivo de la cita"):
     # Mapeo conversacional claro del idioma configurado
     idiomas_legibles = {
         "es": "Español de España (es-ES)",
@@ -241,7 +241,7 @@ Utiliza esta referencia exacta para interpretar correctamente términos relativo
 - Debes interactuar, responder, saludo y hablar COMPLETAMENTE en el idioma: **{idioma_atencion}**.
 Toda la llamada debe seguir este idioma de forma estricta.
 **ALCANCE DE TUS FUNCIONES (Muy Importante):**
-- Tus únicas capacidades y tareas autorizadas son: **dar información detallada sobre el negocio** y **agendar nuevas citas**.
+- Tus únicas capacidades y tareas autorizadas son: **dar información detallada sobre el negocio** and **agendar nuevas citas**.
 - Si el usuario te solicita cancelar una cita, eliminar una reserva existente, modificar un horario ya agendado o realizar cualquier otra gestión administrativa, debes aclararle de forma muy educada que no tienes acceso para realizar esa acción.
 Responde con un tono comercial impecable explicando tus límites. (Ej: *"Actualmente solo puedo facilitarte información y agendar nuevas citas en el sistema. Para cancelar o modificar una reserva que ya tienes, te sugiero ponerte en contacto directamente con nuestro equipo técnico o de atención humana a través de nuestros canales habituales, y ellos lo resolverán encantados."*).
 **TU PERSONALIDAD Y TONO REQUERIDO:**
@@ -251,7 +251,6 @@ Escucha activamente.
 **INFORMACIÓN OPERATIVA DEL NEGOCIO (Estrictamente real, nunca inventes datos):**
 - Ubicación / Zona de servicio: {zona}
 - Horario comercial: {horario}
-- Duración promedio de una cita: El servicio dura aproximadamente {duracion_cita} minutos.
 - Servicios ofrecidos: {servicios}
 - Email del Google Calendar institucional: {calendar_email}
 
@@ -263,7 +262,6 @@ No omitas ninguno. Insiste amablemente si el usuario olvida proveer alguno de el
 Solo cuando tengas recopilados la Fecha/Hora y todos los datos requeridos extra listados en (**{datos_reserva}**) de forma exitosa, utiliza la herramienta `book_appointment`.
 Debes pasar obligatoriamente el email `{calendar_email}` en el campo `calendar_email`.
 En el campo `datos_cliente_recolectados`, debes redactar de manera clara y estructurada los datos que el cliente te ha proporcionado en la conversación (por ejemplo: "Nombre: Juan Pérez, Teléfono: 611223344...").
-
 **REGLAS CRÍTICAS DE CONTROL DE ERRORES (Capa de Privacidad de Desarrollo):**
 - NUNCA menciones nombres de variables, formatos de código, mensajes de servidores, ni términos técnicos de software en la llamada (como "error de JSON", "función", "endpoint", "404", "500", "backend", o "respuesta incorrecta").
 Está estrictamente prohibido.
@@ -276,7 +274,7 @@ Gestiona la situación diciendo algo como:
 # ==================== LÓGICA DE CREACIÓN ====================
 def create_bot_for_client(nombre_negocio, sector, servicios, horario, zona, voice_id, calendar_email, 
                           idioma="es", datos_reserva="Nombre completo, Número de teléfono, Motivo de la cita", duracion_cita=30):
-    custom_prompt = build_custom_prompt(nombre_negocio, sector, servicios, horario, zona, calendar_email, idioma, datos_reserva, duracion_cita)
+    custom_prompt = build_custom_prompt(nombre_negocio, sector, servicios, horario, zona, calendar_email, idioma, datos_reserva)
 
     retell_language_mapping = {"es": "es-ES", "en": "en-US", "ca": "ca-ES"}
     lang_retell = retell_language_mapping.get(str(idioma).strip().lower(), "es-ES")
@@ -296,13 +294,14 @@ def create_bot_for_client(nombre_negocio, sector, servicios, horario, zona, voic
                     "calendar_email": {"type": "string"},
                     "summary": {"type": "string"},
                     "start_time": {"type": "string"},
+                    "end_time": {"type": "string"},
                     "description": {"type": "string"},
                     "datos_cliente_recolectados": {
                         "type": "string",
                         "description": "Todos los datos requeridos por el negocio que han sido recolectados conversacionalmente del cliente (ej: Nombre completo, Teléfono, etc.)"
                     }
                 },
-                "required": ["calendar_email", "summary", "start_time", "datos_cliente_recolectados"]
+                "required": ["calendar_email", "summary", "start_time", "end_time", "datos_cliente_recolectados"]
             }
         }]
     })
@@ -527,7 +526,7 @@ async def update_retell_bot_endpoint(request: Request):
         if not llm_id:
             raise HTTPException(status_code=400, detail="El agente no dispone de un motor LLM vinculado")
 
-        nuevo_prompt = build_custom_prompt(nombre_negocio, sector, servicios, horario, zona, calendar_email, idioma, datos_reserva, duracion_cita)
+        nuevo_prompt = build_custom_prompt(nombre_negocio, sector, servicios, horario, zona, calendar_email, idioma, datos_reserva)
 
         llm_update = retell_request("PATCH", f"/update-retell-llm/{llm_id}", {
             "general_prompt": nuevo_prompt,
@@ -543,13 +542,14 @@ async def update_retell_bot_endpoint(request: Request):
                         "calendar_email": {"type": "string"},
                         "summary": {"type": "string"},
                         "start_time": {"type": "string"},
+                        "end_time": {"type": "string"},
                         "description": {"type": "string"},
                         "datos_cliente_recolectados": {
                             "type": "string",
                             "description": "Todos los datos requeridos por el negocio que han sido recolectados conversacionalmente del cliente (ej: Nombre completo, Teléfono, etc.)"
                         }
                     },
-                    "required": ["calendar_email", "summary", "start_time", "datos_cliente_recolectados"]
+                    "required": ["calendar_email", "summary", "start_time", "end_time", "datos_cliente_recolectados"]
                 }
             }]
         })
@@ -658,8 +658,8 @@ async def book_appointment(request: Request):
         calendar_email = args.get("calendar_email")
         start_time_str = args.get("start_time")
 
-        # Obtenemos la duración asignada al bot buscando por su email de Google Calendar
-        duracion_minutos = 30  # Fallback por defecto seguro
+        # Obtenemos la duración real asignada al bot buscando por su email de Google Calendar
+        duracion_minutos = 30  # Fallback seguro
         conn = get_db_connection()
         cur = conn.cursor()
         try:
@@ -673,7 +673,7 @@ async def book_appointment(request: Request):
             cur.close()
             conn.close()
 
-        # Calculamos dinámicamente el end_time sumando los minutos correspondientes al start_time
+        # Calculamos y forzamos el end_time exacto del lado del servidor usando la configuración de la DB
         try:
             clean_start = str(start_time_str).strip().replace(" ", "T")
             if clean_start.endswith("Z"):
@@ -686,8 +686,8 @@ async def book_appointment(request: Request):
             end_dt = start_dt + timedelta(minutes=duracion_minutos)
             end_time_str = end_dt.isoformat()
         except Exception as e_time:
-            logger.error(f"⚠️ Error calculando el tiempo exacto de finalización: {e_time}")
-            end_time_str = start_time_str
+            logger.error(f"⚠️ Error calculando el tiempo exacto. Usando el de la IA: {e_time}")
+            end_time_str = args.get("end_time")  # Fallback al cálculo de la IA si el parseo falla
 
         # Extraemos los datos estructurados que el bot recopiló del cliente
         datos_cliente = args.get("datos_cliente_recolectados", "")

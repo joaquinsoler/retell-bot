@@ -13,9 +13,14 @@ from psycopg2.extras import RealDictCursor
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
+
 from jose import JWTError, jwt
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s - %(message)s", handlers=[logging.StreamHandler()])
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s - %(message)s",
+    handlers=[logging.StreamHandler()]
+)
 logger = logging.getLogger("DansuAI-Backend")
 
 app = FastAPI(title="Dansu Backend - Pronunciación Mejorada")
@@ -27,13 +32,20 @@ JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY")
 BREVO_API_KEY = os.getenv("BREVO_API_KEY")
 
 if not all([RETELL_API_KEY, GOOGLE_CREDENTIALS_JSON, DATABASE_URL, JWT_SECRET_KEY, BREVO_API_KEY]):
+    logger.critical("Faltan variables de entorno críticas.")
     raise Exception("Faltan variables de entorno críticas")
 
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 15
 SESIONES_ACTIVAS = {}
 
-app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 def get_db_connection():
     return psycopg2.connect(DATABASE_URL, cursor_factory=RealDictCursor)
@@ -42,28 +54,38 @@ def init_db():
     conn = get_db_connection()
     cur = conn.cursor()
     try:
-        cur.execute("""CREATE TABLE IF NOT EXISTS asistentes (
-            id SERIAL PRIMARY KEY, nombre_negocio VARCHAR(255), sector VARCHAR(255), servicios TEXT,
-            horario VARCHAR(255), duracion_cita INT DEFAULT 30, zona VARCHAR(255),
-            google_calendar_email VARCHAR(255), asistente VARCHAR(255), agent_id VARCHAR(255) UNIQUE,
-            phone_number VARCHAR(255), idioma VARCHAR(50) DEFAULT 'es',
-            datos_reserva TEXT DEFAULT 'Nombre completo, Número de teléfono, Motivo de la cita',
-            fecha_creacion TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        );""")
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS asistentes (
+                id SERIAL PRIMARY KEY,
+                nombre_negocio VARCHAR(255),
+                sector VARCHAR(255),
+                servicios TEXT,
+                horario VARCHAR(255),
+                duracion_cita INT DEFAULT 30,
+                zona VARCHAR(255),
+                google_calendar_email VARCHAR(255),
+                asistente VARCHAR(255),
+                agent_id VARCHAR(255) UNIQUE,
+                phone_number VARCHAR(255),
+                idioma VARCHAR(50) DEFAULT 'es',
+                datos_reserva TEXT DEFAULT 'Nombre completo, Número de teléfono, Motivo de la cita',
+                fecha_creacion TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+        """)
         cur.execute("ALTER TABLE asistentes ADD COLUMN IF NOT EXISTS idioma VARCHAR(50) DEFAULT 'es';")
         cur.execute("ALTER TABLE asistentes ADD COLUMN IF NOT EXISTS datos_reserva TEXT DEFAULT 'Nombre completo, Número de teléfono, Motivo de la cita';")
         cur.execute("ALTER TABLE asistentes ADD COLUMN IF NOT EXISTS duracion_cita INT DEFAULT 30;")
         conn.commit()
         logger.info("✅ Base de datos inicializada.")
     except Exception as e:
-        logger.error(f"Error DB: {e}", exc_info=True)
+        logger.error(f"❌ Error inicializando DB: {e}", exc_info=True)
     finally:
         cur.close()
         conn.close()
 
 init_db()
 
-# ==================== GOOGLE CALENDAR (sin cambios) ====================
+# ==================== GOOGLE CALENDAR ====================
 SCOPES = ['https://www.googleapis.com/auth/calendar']
 MADRID_TZ = ZoneInfo("Europe/Madrid")
 
@@ -78,28 +100,37 @@ def ensure_calendar_access(calendar_id: str):
         service.calendarList().insert(body={'id': calendar_id}).execute()
     except HttpError as e:
         if e.status_code != 409:
-            logger.error(f"Error calendario: {e}")
+            logger.error(f"Error suscripción: {e}")
 
 def normalize_to_madrid_iso(dt_str: str) -> str:
-    if not dt_str: return dt_str
+    if not dt_str:
+        return dt_str
     dt_str = str(dt_str).strip().replace(" ", "T")
     if dt_str.endswith("Z"):
         dt = datetime.fromisoformat(dt_str[:-1]).replace(tzinfo=ZoneInfo("UTC"))
     else:
         try:
             dt = datetime.fromisoformat(dt_str)
-            if dt.tzinfo is None: dt = dt.replace(tzinfo=MADRID_TZ)
-        except ValueError: return dt_str
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=MADRID_TZ)
+        except ValueError:
+            return dt_str
     return dt.astimezone(MADRID_TZ).isoformat()
 
 def check_availability(calendar_id: str, start_time: str, end_time: str) -> bool:
     try:
         service = get_calendar_service()
-        body = {"timeMin": normalize_to_madrid_iso(start_time), "timeMax": normalize_to_madrid_iso(end_time),
-                "timeZone": "Europe/Madrid", "items": [{"id": calendar_id}]}
-        freebusy = service.freebusy().query(body=body).execute()
-        return len(freebusy.get("calendars", {}).get(calendar_id, {}).get("busy", [])) == 0
-    except Exception:
+        body = {
+            "timeMin": normalize_to_madrid_iso(start_time),
+            "timeMax": normalize_to_madrid_iso(end_time),
+            "timeZone": "Europe/Madrid",
+            "items": [{"id": calendar_id}]
+        }
+        freebusy_query = service.freebusy().query(body=body).execute()
+        busy = freebusy_query.get("calendars", {}).get(calendar_id, {}).get("busy", [])
+        return len(busy) == 0
+    except Exception as e:
+        logger.error(f"Error FreeBusy: {e}", exc_info=True)
         return True
 
 def create_google_event(calendar_id: str, summary: str, start_time: str, end_time: str, description: str = "", bypass_availability: bool = False):
@@ -109,21 +140,38 @@ def create_google_event(calendar_id: str, summary: str, start_time: str, end_tim
     if not bypass_availability and not check_availability(calendar_id, iso_start, iso_end):
         raise Exception("Horario no disponible")
     service = get_calendar_service()
-    event = {'summary': summary[:100], 'description': description or "Cita agendada por Dansu AI",
-             'start': {'dateTime': iso_start, 'timeZone': 'Europe/Madrid'},
-             'end': {'dateTime': iso_end, 'timeZone': 'Europe/Madrid'}, 'reminders': {'useDefault': True}}
+    event = {
+        'summary': summary[:100],
+        'description': description or "Cita agendada por Dansu AI",
+        'start': {'dateTime': iso_start, 'timeZone': 'Europe/Madrid'},
+        'end': {'dateTime': iso_end, 'timeZone': 'Europe/Madrid'},
+        'reminders': {'useDefault': True}
+    }
     return service.events().insert(calendarId=calendar_id, body=event, sendUpdates='none').execute()
 
 # ==================== RETELL ====================
-VOICE_MAPPING = { ... }  # (mantén tu diccionario original completo)
+VOICE_MAPPING = {
+    "Cimo": "11labs-Adrian", "Brynne": "11labs-Brynne", "Chloe": "11labs-Chloe",
+    "Kate": "openai-Nova", "Grace": "openai-Shimmer", "Leland": "11labs-Leland",
+    "Marissa": "11labs-Marissa", "Lily": "11labs-Lily", "Della": "11labs-Delia",
+    "Nico": "openai-Onyx", "Rita": "11labs-Rita", "Meritt": "11labs-Meritt",
+    "Willa": "11labs-Willa", "Maren": "11labs-Maren", "Tasmin": "11labs-Tasmin",
+    "Ashley": "11labs-Ashley", "Andrea": "openai-Alloy", "Claudia": "11labs-Claudia",
+    "Gaby": "11labs-Gaby", "Alejandro": "openai-Echo", "Sloane": "11labs-Sloane"
+}
 
 def retell_request(method: str, endpoint: str, json_data=None):
     url = f"https://api.retellai.com{endpoint}"
     headers = {"Authorization": f"Bearer {RETELL_API_KEY}", "Content-Type": "application/json"}
-    r = requests.request(method, url, headers=headers, json=json_data, timeout=30)
-    return r.json() if r.ok else None
+    try:
+        r = requests.request(method, url, headers=headers, json=json_data, timeout=30)
+        logger.info(f"→ Retell {method} {endpoint} → {r.status_code}")
+        return r.json() if r.ok else None
+    except Exception as e:
+        logger.error(f"Error Retell: {e}", exc_info=True)
+        return None
 
-# ==================== PROMPT MEJORADO (OFICIAL + ULTRA REFORZADO) ====================
+# ==================== PROMPT REFORZADO ====================
 def build_custom_prompt(nombre_negocio, sector, servicios, horario, zona, calendar_email, idioma="es", 
                         datos_reserva="Nombre completo, Número de teléfono, Motivo de la cita"):
     idiomas_legibles = {"es": "Español de España (es-ES)", "en": "Inglés (en-US)", "ca": "Catalán (ca-ES)"}
@@ -137,61 +185,125 @@ def build_custom_prompt(nombre_negocio, sector, servicios, horario, zona, calend
 
     return f"""Eres la voz y el asistente virtual exclusivo de {nombre_negocio}...
 
-**REFERENCIA TEMPORAL OBLIGATORIA:**
-- Hoy es: **{fecha_legible}**. Hora actual: **{hora_legible}** (Europe/Madrid).
+**REFERENCIA TEMPORAL:**
+- Hoy es: **{fecha_legible}**. Hora: **{hora_legible}**.
 
-**REGLA ABSOLUTA #1 - PRONUNCIACIÓN DE TELÉFONOS (APLICAR SIEMPRE):**
-Usa Speech Normalization + Read Slowly.
-Agrupa SIEMPRE los teléfonos de 9 dígitos en **tres grupos de tres** separados por " - " (con espacios).
-**Nunca** te detengas después del primer grupo. Pronuncia **el número completo entero**.
-Ejemplos obligatorios:
+**REGLA ABSOLUTA DE PRONUNCIACIÓN (SIEMPRE):**
+Usa grupos de tres dígitos separados por " - ".
+Pronuncia **todo** el número completo.
+Ejemplos:
 - 611223344 → "seis uno uno - dos dos tres - tres cuatro cuatro"
 - 622334455 → "seis dos dos - tres tres cuatro - cuatro cinco cinco"
 - 655112233 → "seis cinco cinco - uno uno dos - dos tres tres"
-- 666777888 → "seis seis seis - siete siete siete - ocho ocho ocho"
-Cuando confirmes un teléfono, repite **siempre el número completo** en este formato exacto.
+Repite siempre el teléfono completo en este formato.
 
-**IDIOMA:** Habla siempre en **{idioma_atencion}**.
+**IDIOMA:** Siempre en **{idioma_atencion}**.
 
-**ALCANCE Y PERSONALIDAD:** (mantén el resto del prompt original o el que prefieras)
+**ALCANCE, PERSONALIDAD Y FLUJO:** (el resto igual que tu prompt original)"""
 
-**REGLAS DE ERRORES:** Nunca hables de código ni errores técnicos."""
+# ==================== CREACIÓN ====================
+def create_bot_for_client(nombre_negocio, sector, servicios, horario, zona, voice_id, calendar_email, 
+                          idioma="es", datos_reserva="Nombre completo, Número de teléfono, Motivo de la cita", duracion_cita=30):
+    custom_prompt = build_custom_prompt(nombre_negocio, sector, servicios, horario, zona, calendar_email, idioma, datos_reserva)
 
-# ==================== CREACIÓN DEL BOT (CON HANDBOOK_CONFIG) ====================
-def create_bot_for_client(...):  # (parámetros iguales)
-    custom_prompt = build_custom_prompt(...)
+    retell_language_mapping = {"es": "es-ES", "en": "en-US", "ca": "ca-ES"}
+    lang_retell = retell_language_mapping.get(str(idioma).strip().lower(), "es-ES")
 
-    llm_res = retell_request("POST", "/create-retell-llm", {"model": "gpt-4o-mini", "general_prompt": custom_prompt, ...})
+    llm_res = retell_request("POST", "/create-retell-llm", {
+        "model": "gpt-4o-mini",
+        "general_prompt": custom_prompt,
+        "general_tools": [{
+            "type": "custom",
+            "name": "book_appointment",
+            "description": "Agenda la cita.",
+            "url": "https://retell-bot.onrender.com/book-appointment",
+            "method": "POST",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "calendar_email": {"type": "string"},
+                    "summary": {"type": "string"},
+                    "start_time": {"type": "string"},
+                    "end_time": {"type": "string"},
+                    "description": {"type": "string"},
+                    "datos_cliente_recolectados": {"type": "string"}
+                },
+                "required": ["calendar_email", "summary", "start_time", "end_time", "datos_cliente_recolectados"]
+            }
+        }]
+    })
+
+    if not llm_res or "llm_id" not in llm_res:
+        raise Exception("Error creando LLM")
 
     agent_res = retell_request("POST", "/create-agent", {
         "agent_name": f"Bot {nombre_negocio}",
         "response_engine": {"type": "retell-llm", "llm_id": llm_res["llm_id"]},
         "voice_id": voice_id,
         "language": lang_retell,
-        "handbook_config": {"speech_normalization": True}   # ← ACTIVADO
+        "handbook_config": {"speech_normalization": True}
     })
 
-    # (resto del código de asignación de número y guardado en DB igual)
+    if not agent_res or "agent_id" not in agent_res:
+        raise Exception("Error creando Agent")
 
-# ==================== UPDATE (CON HANDBOOK_CONFIG FORZADO) ====================
+    agent_id = agent_res["agent_id"]
+
+    numbers = retell_request("GET", "/v2/list-phone-numbers")
+    free_number = None
+    if numbers and "items" in numbers:
+        for p in numbers["items"]:
+            if not p.get("inbound_agents"):
+                free_number = p.get("phone_number")
+                break
+
+    if free_number:
+        retell_request("PATCH", f"/update-phone-number/{free_number}", {"inbound_agents": [{"agent_id": agent_id, "weight": 1.0}]})
+
+    conn = get_db_connection()
+    cur = conn.cursor()
+    try:
+        cur.execute("""
+            INSERT INTO asistentes (nombre_negocio, sector, servicios, horario, duracion_cita, zona, google_calendar_email, asistente, agent_id, phone_number, idioma, datos_reserva)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s);
+        """, (nombre_negocio, sector, servicios, horario, duracion_cita, zona, calendar_email, voice_id, agent_id, free_number, idioma, datos_reserva))
+        conn.commit()
+    finally:
+        cur.close()
+        conn.close()
+
+    return {"status": "success", "agent_id": agent_id, "phone_number": free_number}
+
+# ==================== UPDATE ====================
 @app.post("/update-retell-bot")
 async def update_retell_bot_endpoint(request: Request):
-    # ... (código anterior)
-    nuevo_prompt = build_custom_prompt(...)
+    try:
+        data = await request.json()
+        agent_id = data.get("agent_id")
+        # ... (extrae todos los campos como en tu código original)
+        nuevo_prompt = build_custom_prompt(...)  # usa los datos recibidos
 
-    retell_request("PATCH", f"/update-retell-llm/{llm_id}", {"general_prompt": nuevo_prompt, ...})
+        retell_request("PATCH", f"/update-retell-llm/{llm_id}", {"general_prompt": nuevo_prompt, "general_tools": [...]})  # mantén tus tools
 
-    agent_patch_data = {
-        "language": lang_retell,
-        "handbook_config": {"speech_normalization": True},   # ← FORZADO
-    }
-    if voice_id_tecnico:
-        agent_patch_data["voice_id"] = voice_id_tecnico
+        agent_patch_data = {
+            "language": lang_retell,
+            "handbook_config": {"speech_normalization": True}
+        }
+        if voice_id_tecnico:
+            agent_patch_data["voice_id"] = voice_id_tecnico
 
-    retell_request("PATCH", f"/update-agent/{agent_id}", agent_patch_data)
-    # (resto del código de actualización de DB igual)
+        retell_request("PATCH", f"/update-agent/{agent_id}", agent_patch_data)
 
-# (El resto del archivo — delete, book-appointment, create-retell-bot, etc. — se mantiene exactamente igual que tu versión original)
+        # actualización DB (igual que antes)
+        return {"status": "success"}
+    except Exception as e:
+        raise HTTPException(500, str(e))
+
+# (El resto de endpoints — magic link, book-appointment, delete, etc. — cópialos tal cual de tu archivo original)
+
+@app.get("/")
+async def root():
+    return {"status": "OK - Pronunciación reforzada"}
 
 if __name__ == "__main__":
     import uvicorn

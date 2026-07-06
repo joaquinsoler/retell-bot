@@ -226,15 +226,32 @@ def build_custom_prompt(nombre_negocio, sector, servicios, horario, zona, calend
     meses_año = {1: "Enero", 2: "Febrero", 3: "Marzo", 4: "Abril", 5: "Mayo", 6: "Junio", 7: "Julio", 8: "Agosto", 9: "Septiembre", 10: "Octubre", 11: "Noviembre", 12: "Diciembre"}
     
     fecha_legible = f"{dias_semana[ahora_madrid.weekday()]}, {ahora_madrid.day} de {meses_año[ahora_madrid.month]} de {ahora_madrid.year}"
-    hora_legible = ahora_madrid.strftime("%H:%M")
+    
+    # Conversión fonética nativa de la hora para evitar formatos digitales que rompan el TTS
+    horas_24 = ahora_madrid.hour
+    minutos = ahora_madrid.minute
+    periodo = "de la tarde" if horas_24 >= 12 else "de la mañana"
+    if horas_24 > 20 or horas_24 < 6:
+        periodo = "de la noche"
+    
+    hora_12 = horas_24 % 12
+    if hora_12 == 0:
+        hora_12 = 12
+        
+    texto_hora = f"{hora_12} y {minutos:02d} {periodo}" if minutos > 0 else f"{hora_12} en punto {periodo}"
 
     return f"""Eres la voz y el asistente virtual exclusivo de {nombre_negocio}, un negocio enfocado en el sector de {sector}.
 Tu objetivo principal es atender a los clientes con la máxima amabilidad, empatía y profesionalidad, ofreciendo una conversación fluida, natural y cercana.
 
 **REFERENCIA TEMPORAL OBLIGATORIA (MUY IMPORTANTE):**
 - La fecha de hoy es: **{fecha_legible}**.
-- La hora actual es: **{hora_legible}** (Zona horaria: Europe/Madrid).
+- La hora actual es: **{texto_hora}**.
 Utiliza esta referencia exacta para interpretar correctamente términos relativos que use el usuario como "hoy", "mañana", "esta tarde", "el próximo lunes" o "ayer", calculando los días en función de este marco.
+
+## Guideline for State Numbers, Times & Dates
+When speaking numbers, phone numbers, or times, you MUST transform the format exactly as follows to prevent speech synthesis errors:
+- **Phone Numbers:** Any phone number (like 611223344) must be spelled out digit by digit separated by hyphens in your internal text generation. For example: "6-1-1-2-2-3-3-4-4". Never write them together as a continuous block of numbers.
+- **Times:** For any timestamp or current time, translate it immediately into standard conversational Spanish phrasing. For example, if it is 07:45 PM, say "las siete y cuarenta y cinco de la tarde". Never output raw digital numbers with colons like "19:45" directly into the conversation.
 
 **CONFIGURACIÓN OBLIGATORIA DE IDIOMA:**
 - Debes interactuar, responder, saludar y hablar COMPLETAMENTE en el idioma: **{idioma_atencion}**. Toda la llamada debe seguir este idioma de forma estricta.
@@ -309,7 +326,7 @@ def create_bot_for_client(nombre_negocio, sector, servicios, horario, zona, voic
         logger.error("Fallo crítico: No se pudo obtener llm_id al crear el agente en Retell.")
         raise Exception("Error creando LLM")
 
-    # Eliminado el parámetro "language" para evitar conflictos de normalización de voz en Retell AI
+    # Parámetro "language" omitido por completo para replicar el comportamiento impecable de la versión V3
     agent_res = retell_request("POST", "/create-agent", {
         "agent_name": f"Bot {nombre_negocio}",
         "response_engine": {"type": "retell-llm", "llm_id": llm_res["llm_id"]},
@@ -558,7 +575,7 @@ async def update_retell_bot_endpoint(request: Request):
 
         voice_id_tecnico = VOICE_MAPPING.get(asistente_nombre)
         
-        # Parámetro "language" eliminado del PATCH para mantener la perfecta pronunciación nativa heredada de la V3
+        # Parámetro "language" omitido por completo en el PATCH para prevenir la reactivación del normalizador
         agent_patch_data = {}
         if voice_id_tecnico:
             agent_patch_data["voice_id"] = voice_id_tecnico

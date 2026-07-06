@@ -2,25 +2,25 @@ import os
 import json
 import logging
 from datetime import datetime, timedelta
-from zoneinfo import ZoneInfo  # Gestión nativa y precisa de zonas horarias en Python 3.9+
+from zoneinfo import ZoneInfo
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
 import requests
-import psycopg2  # Conector nativo de PostgreSQL
+import psycopg2
 from psycopg2.extras import RealDictCursor
 
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
-from jose import JWTError, jwt  # Manejo seguro de tokens del Magic Link
+from jose import JWTError, jwt
 
 # ==================== CONFIGURACIÓN DE LOGS PARA RENDER ====================
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s - %(message)s",
-    handlers=[logging.StreamHandler()]  # Envía los logs directamente a la consola de Render
+    handlers=[logging.StreamHandler()]
 )
 logger = logging.getLogger("DansuAI-Backend")
 
@@ -41,7 +41,7 @@ if not all([RETELL_API_KEY, GOOGLE_CREDENTIALS_JSON, DATABASE_URL, JWT_SECRET_KE
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 15
 
-# Almacén temporal de sesiones validadas indexadas por IP (IP: {"email": email, "expira": datetime})
+# Almacén temporal de sesiones validadas indexadas por IP
 SESIONES_ACTIVAS = {}
 
 # ==================== CORS ====================
@@ -80,7 +80,6 @@ def init_db():
                 fecha_creacion TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
         """)
-        # Migraciones automáticas por si la tabla ya existía sin estas columnas
         cur.execute("ALTER TABLE asistentes ADD COLUMN IF NOT EXISTS idioma VARCHAR(50) DEFAULT 'es';")
         cur.execute("ALTER TABLE asistentes ADD COLUMN IF NOT EXISTS datos_reserva TEXT DEFAULT 'Nombre completo, Número de teléfono, Motivo de la cita';")
         cur.execute("ALTER TABLE asistentes ADD COLUMN IF NOT EXISTS duracion_cita INT DEFAULT 30;")
@@ -92,12 +91,11 @@ def init_db():
         cur.close()
         conn.close()
 
-# Inicializamos la estructura de la base de datos al arrancar el backend
 init_db()
 
 # ==================== GOOGLE CALENDAR ====================
 SCOPES = ['https://www.googleapis.com/auth/calendar']
-MADRID_TZ = ZoneInfo("Europe/Madrid")  # Huso horario de referencia absoluto para el negocio
+MADRID_TZ = ZoneInfo("Europe/Madrid")
 
 def get_calendar_service():
     credentials_info = json.loads(GOOGLE_CREDENTIALS_JSON)
@@ -210,7 +208,7 @@ def retell_request(method: str, endpoint: str, json_data=None):
         logger.error(f"❌ Error de comunicación con Retell: {e}", exc_info=True)
         return None
 
-# ==================== CONSTRUCTOR DEL PROMPT DINÁMICO ====================
+# ==================== CONSTRUCTOR DEL PROMPT DINÁMICO (CORREGIDO) ====================
 def build_custom_prompt(nombre_negocio, sector, servicios, horario, zona, calendar_email, idioma="es", 
                         datos_reserva="Nombre completo, Número de teléfono, Motivo de la cita"):
     idiomas_legibles = {
@@ -221,49 +219,37 @@ def build_custom_prompt(nombre_negocio, sector, servicios, horario, zona, calend
     idioma_atencion = idiomas_legibles.get(str(idioma).strip().lower(), "Español de España (es-ES)")
 
     ahora_madrid = datetime.now(MADRID_TZ)
-    
     dias_semana = {0: "Lunes", 1: "Martes", 2: "Miércoles", 3: "Jueves", 4: "Viernes", 5: "Sábado", 6: "Domingo"}
     meses_año = {1: "Enero", 2: "Febrero", 3: "Marzo", 4: "Abril", 5: "Mayo", 6: "Junio", 7: "Julio", 8: "Agosto", 9: "Septiembre", 10: "Octubre", 11: "Noviembre", 12: "Diciembre"}
     
     fecha_legible = f"{dias_semana[ahora_madrid.weekday()]}, {ahora_madrid.day} de {meses_año[ahora_madrid.month]} de {ahora_madrid.year}"
-    
-    # Conversión fonética nativa de la hora para evitar formatos digitales que rompan el TTS
-    horas_24 = ahora_madrid.hour
-    minutos = ahora_madrid.minute
-    periodo = "de la tarde" if horas_24 >= 12 else "de la mañana"
-    if horas_24 > 20 or horas_24 < 6:
-        periodo = "de la noche"
-    
-    hora_12 = horas_24 % 12
-    if hora_12 == 0:
-        hora_12 = 12
-        
-    texto_hora = f"{hora_12} y {minutos:02d} {periodo}" if minutos > 0 else f"{hora_12} en punto {periodo}"
+    hora_legible = ahora_madrid.strftime("%H:%M")
 
     return f"""Eres la voz y el asistente virtual exclusivo de {nombre_negocio}, un negocio enfocado en el sector de {sector}.
 Tu objetivo principal es atender a los clientes con la máxima amabilidad, empatía y profesionalidad, ofreciendo una conversación fluida, natural y cercana.
 
 **REFERENCIA TEMPORAL OBLIGATORIA (MUY IMPORTANTE):**
 - La fecha de hoy es: **{fecha_legible}**.
-- La hora actual es: **{texto_hora}**.
-Utiliza esta referencia exacta para interpretar correctamente términos relativos que use el usuario como "hoy", "mañana", "esta tarde", "el próximo lunes" o "ayer", calculando los días en función de este marco.
-
-## Guideline for State Numbers, Times & Dates
-When speaking numbers, phone numbers, or times, you MUST transform the format exactly as follows to prevent speech synthesis errors:
-- **Phone Numbers:** Any phone number (like 611223344) must be spelled out digit by digit separated by hyphens in your internal text generation. For example: "6-1-1-2-2-3-3-4-4". Never write them together as a continuous block of numbers.
-- **Times:** For any timestamp or current time, translate it immediately into standard conversational Spanish phrasing. For example, if it is 07:45 PM, say "las siete y cuarenta y cinco de la tarde". Never output raw digital numbers with colons like "19:45" directly into the conversation.
+- La hora actual es: **{hora_legible}** (Zona horaria: Europe/Madrid).
+Utiliza esta referencia exacta para interpretar correctamente términos relativos.
 
 **CONFIGURACIÓN OBLIGATORIA DE IDIOMA:**
-- Debes interactuar, responder, saludar y hablar COMPLETAMENTE en el idioma: **{idioma_atencion}**. Toda la llamada debe seguir este idioma de forma estricta.
+- Debes interactuar, responder, saludar y hablar COMPLETAMENTE en el idioma: **{idioma_atencion}**.
+
+**REGLAS DE PRONUNCIACIÓN Y CLARIDAD PARA TTS (CRÍTICO):**
+- Siempre pronuncia números de teléfono **dígito por dígito** con pausas claras: Ejemplo: "611223344" debe decirse como "seis uno uno, dos dos tres, tres tres cuatro cuatro" o "seis uno uno - dos dos tres - tres tres cuatro cuatro".
+- Usa guiones o comas en el texto que generes para forzar pausas naturales en la voz.
+- Para nombres propios (especialmente poco comunes o extranjeros): pronúncialos con cuidado. Si es necesario, deletrea lentamente: "Juan Pérez se escribe J U A N espacio P É R E Z".
+- Fechas: di "el quince de julio de dos mil veintiséis" en lugar de números crudos.
+- Nunca leas números grandes como "seiscientos once mil...". Siempre desglosa dígito a dígito cuando sea información importante (teléfonos, códigos, horarios).
+- Habla más despacio y claramente cuando digas datos de contacto, teléfonos o confirmaciones.
 
 **ALCANCE DE TUS FUNCIONES (Muy Importante):**
 - Tus únicas capacidades y tareas autorizadas son: **dar información detallada sobre el negocio** y **agendar nuevas citas**.
-- Si el usuario te solicita cancelar una cita, eliminar una reserva existente, modificar un horario ya agendado o realizar cualquier otra gestión administrativa, debes aclararle de forma muy educada que no tienes acceso para realizar esa acción.
-Responde con un tono comercial impecable explicando tus límites. (Ej: *"Actualmente solo puedo facilitarte información y agendar nuevas citas en el sistema. Para cancelar o modificar una reserva que ya tienes, te sugiero ponerte en contacto directamente con nuestro equipo técnico o de atención humana a través de nuestros canales habituales, y ellos lo resolverán encantados."*).
+- Si el usuario solicita cancelar, modificar o cualquier otra gestión, responde educadamente que solo puedes agendar nuevas citas e informar.
 
 **TU PERSONALIDAD Y TONO REQUERIDO:**
-- Habla con calidez, usando frases cortas y claras para que la llamada sea cómoda.
-- Escucha activamente.
+- Habla con calidez, usando frases cortas y claras.
 - Muéstrate siempre servicial, educado y con un trato comercial impecable.
 
 **INFORMACIÓN OPERATIVA DEL NEGOCIO (Estrictamente real, nunca inventes datos):**
@@ -273,27 +259,22 @@ Responde con un tono comercial impecable explicando tus límites. (Ej: *"Actualm
 - Email del Google Calendar institucional: {calendar_email}
 
 **FLUJO NATURAL PARA RECOGER DATOS Y AGENDAR CITA:**
-Cuando un usuario esté interesado en reservar, avanza de manera conversacional, preguntando los datos uno a uno (nunca todos de golpe en una sola frase):
-1. **Día y Hora:** Propón o confirma el momento de la cita según las preferencias del cliente.
-2. **Información Requerida del Cliente (OBLIGATORIA):** Para formalizar y confirmar la reserva, debes pedirle de forma obligatoria, educada y uno a uno los siguientes datos estipulados de manera de estricta por el negocio: **{datos_reserva}**.
-No omitas ninguno. Insiste amablemente si el usuario olvida proveer alguno de ellos.
+Cuando un usuario esté interesado en reservar, avanza de manera conversacional, preguntando los datos uno a uno:
+1. **Día y Hora:** Propón o confirma el momento de la cita.
+2. **Información Requerida del Cliente (OBLIGATORIA):** Pide uno a uno: **{datos_reserva}**.
+Solo cuando tengas todo, utiliza la herramienta `book_appointment`.
 
-Solo cuando tengas recopilados la Fecha/Hora y todos los datos requeridos extra listados en (**{datos_reserva}**) de forma exitosa, utiliza la herramienta `book_appointment`.
-Debes pasar obligatoriamente el email `{calendar_email}` en el campo `calendar_email`.
-En el campo `datos_cliente_recolectados`, debes redactar de manera clara y estructurada los datos que el cliente te ha proporcionado en la conversación (por ejemplo: "Nombre: Juan Pérez, Teléfono: 611223344...").
-
-**REGLAS CRÍTICAS DE CONTROL DE ERRORES (Capa de Privacidad de Desarrollo):**
-- NUNCA menciones nombres de variables, formatos de código, mensajes de servidores, ni términos técnicos de software en la llamada (como "error de JSON", "función", "endpoint", "404", "500", "backend", o "respuesta incorrecta"). Está estrictamente prohibido.
-- Si la herramienta `book_appointment` te devuelve un fallo, un error del sistema o indica que el hueco está ocupado, actúa como un comercial humano resolutivo y amable.
-Gestiona la situación diciendo algo como: 
-  *"Disculpa las molestias, parece que este horario concreto acaba de ocuparse o no está disponible en nuestra agenda en este instante. Déjame revisar... ¿Te vendría bien intentar en otro tramo horario o preferirías mirar otro día?"*
-- Si experimentas algún problema técnico interno con las herramientas, mantén la calma, discúlpate amablemente por la pequeña pausa y reconduce la llamada ofreciéndote a tomar nota manualmente o pedirle que lo intente en unos instantes, garantizando siempre una experiencia de atención al cliente excelente."""
-
+**REGLAS CRÍTICAS DE CONTROL DE ERRORES:**
+- NUNCA menciones términos técnicos, variables, errores o código en la llamada.
+- Si hay un error en la herramienta, gestiona la situación de forma amable y resolutiva."""
 
 # ==================== LÓGICA DE CREACIÓN ====================
 def create_bot_for_client(nombre_negocio, sector, servicios, horario, zona, voice_id, calendar_email, 
                           idioma="es", datos_reserva="Nombre completo, Número de teléfono, Motivo de la cita", duracion_cita=30):
     custom_prompt = build_custom_prompt(nombre_negocio, sector, servicios, horario, zona, calendar_email, idioma, datos_reserva)
+
+    retell_language_mapping = {"es": "es-ES", "en": "en-US", "ca": "ca-ES"}
+    lang_retell = retell_language_mapping.get(str(idioma).strip().lower(), "es-ES")
 
     llm_res = retell_request("POST", "/create-retell-llm", {
         "model": "gpt-4o-mini",
@@ -314,7 +295,7 @@ def create_bot_for_client(nombre_negocio, sector, servicios, horario, zona, voic
                     "description": {"type": "string"},
                     "datos_cliente_recolectados": {
                         "type": "string",
-                        "description": "Todos los datos requeridos por el negocio que han sido recolectados en la conversación."
+                        "description": "Todos los datos requeridos por el negocio que han sido recolectados conversacionalmente del cliente (ej: Nombre completo, Teléfono, etc.)"
                     }
                 },
                 "required": ["calendar_email", "summary", "start_time", "end_time", "datos_cliente_recolectados"]
@@ -326,11 +307,11 @@ def create_bot_for_client(nombre_negocio, sector, servicios, horario, zona, voic
         logger.error("Fallo crítico: No se pudo obtener llm_id al crear el agente en Retell.")
         raise Exception("Error creando LLM")
 
-    # Parámetro "language" omitido por completo para replicar el comportamiento impecable de la versión V3
     agent_res = retell_request("POST", "/create-agent", {
         "agent_name": f"Bot {nombre_negocio}",
         "response_engine": {"type": "retell-llm", "llm_id": llm_res["llm_id"]},
-        "voice_id": voice_id
+        "voice_id": voice_id,
+        "language": lang_retell
     })
 
     if not agent_res or "agent_id" not in agent_res:
@@ -472,7 +453,7 @@ async def check_session(request: Request):
         return {"status": "no_session"}
         
     email = sesion["email"]
-    del SESIONES_ACTIVAS[client_ip]  # Consumo de un solo uso por seguridad
+    del SESIONES_ACTIVAS[client_ip]
     
     try:
         conn = get_db_connection()
@@ -562,7 +543,7 @@ async def update_retell_bot_endpoint(request: Request):
                         "description": {"type": "string"},
                         "datos_cliente_recolectados": {
                             "type": "string",
-                            "description": "Todos los datos requeridos por el negocio que han sido recolectados de forma conversacional."
+                            "description": "Todos los datos requeridos por el negocio que han sido recolectados conversacionalmente del cliente (ej: Nombre completo, Teléfono, etc.)"
                         }
                     },
                     "required": ["calendar_email", "summary", "start_time", "end_time", "datos_cliente_recolectados"]
@@ -575,13 +556,14 @@ async def update_retell_bot_endpoint(request: Request):
 
         voice_id_tecnico = VOICE_MAPPING.get(asistente_nombre)
         
-        # Parámetro "language" omitido por completo en el PATCH para prevenir la reactivación del normalizador
-        agent_patch_data = {}
+        retell_language_mapping = {"es": "es-ES", "en": "en-US", "ca": "ca-ES"}
+        lang_retell = retell_language_mapping.get(str(idioma).strip().lower(), "es-ES")
+
+        agent_patch_data = {"language": lang_retell}
         if voice_id_tecnico:
             agent_patch_data["voice_id"] = voice_id_tecnico
             
-        if agent_patch_data:
-            retell_request("PATCH", f"/update-agent/{agent_id}", agent_patch_data)
+        retell_request("PATCH", f"/update-agent/{agent_id}", agent_patch_data)
 
         if not voice_id_tecnico:
             voice_id_tecnico = agent_info.get("voice_id")
@@ -615,7 +597,6 @@ async def delete_retell_bot_endpoint(request: Request):
             raise HTTPException(status_code=400, detail="Falta el parámetro agent_id")
 
         logger.info(f"🗑️ Iniciando borrado adaptativo del agente: {agent_id}")
-        
         agent_info = retell_request("GET", f"/get-agent/{agent_id}")
         
         if agent_info and isinstance(agent_info, dict):
@@ -662,7 +643,7 @@ async def delete_retell_bot_endpoint(request: Request):
         if 'conn' in locals(): conn.close()
 
 
-# ==================== ENDPOINTS GENERALES ORIGINALES ====================
+# ==================== ENDPOINTS GENERALES ====================
 @app.post("/book-appointment")
 @app.post("/book-appointment/")
 async def book_appointment(request: Request):
@@ -674,7 +655,7 @@ async def book_appointment(request: Request):
         calendar_email = args.get("calendar_email")
         start_time_str = args.get("start_time")
 
-        duracion_minutos = 30  # Fallback seguro
+        duracion_minutos = 30
         conn = get_db_connection()
         cur = conn.cursor()
         try:

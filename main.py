@@ -210,10 +210,9 @@ def retell_request(method: str, endpoint: str, json_data=None):
         logger.error(f"❌ Error de comunicación con Retell: {e}", exc_info=True)
         return None
 
-# ==================== CONSTRUCTOR DEL PROMPT DINÁMICO CORREGIDO (SIN SPANGLISH Y FONÉTIKA OPTIMIZADA) ====================
+# ==================== CONSTRUCTOR DEL PROMPT DINÁMICO CORREGIDO (FONÉTICA HI-FI) ====================
 def build_custom_prompt(nombre_negocio, sector, servicios, horario, zona, calendar_email, idioma="es", 
                         datos_reserva="Nombre completo, Número de teléfono, Motivo de la cita"):
-    # Mapeo conversacional claro del idioma configurado
     idiomas_legibles = {
         "es": "Español de España (es-ES)",
         "en": "Inglés (en-US)",
@@ -221,10 +220,8 @@ def build_custom_prompt(nombre_negocio, sector, servicios, horario, zona, calend
     }
     idioma_atencion = idiomas_legibles.get(str(idioma).strip().lower(), "Español de España (es-ES)")
 
-    # Captura dinámica del tiempo preciso en la zona del negocio (España/Madrid) en el momento del envío
     ahora_madrid = datetime.now(MADRID_TZ)
     
-    # Formateamos los días de la semana y meses de forma explícita y clara en castellano
     dias_semana = {0: "Lunes", 1: "Martes", 2: "Miércoles", 3: "Jueves", 4: "Viernes", 5: "Sábado", 6: "Domingo"}
     meses_año = {1: "Enero", 2: "Febrero", 3: "Marzo", 4: "Abril", 5: "Mayo", 6: "Junio", 7: "Julio", 8: "Agosto", 9: "Septiembre", 10: "Octubre", 11: "Noviembre", 12: "Diciembre"}
     
@@ -239,10 +236,16 @@ Tu objetivo principal es atender a los clientes con la máxima amabilidad, empat
 - La hora actual es: **{hora_legible}** (Zona horaria: Europe/Madrid).
 Utiliza esta referencia exacta para interpretar correctamente términos relativos que use el usuario como "hoy", "mañana", "esta tarde", "el próximo lunes" o "ayer", calculando los días en función de este marco.
 
-**CONFIGURACIÓN OBLIGATORIA DE IDIOMA Y REGLAS FONÉTICAS:**
+**CONFIGURACIÓN OBLIGATORIA DE IDIOMA Y REGLAS FONÉTICAS ULTRA ESTRICTAS:**
 - Debes interactuar, responder, saludar y hablar COMPLETAMENTE en el idioma: **{idioma_atencion}**. Toda la llamada debe seguir este idioma de forma estricta.
-- **PRONUNCIACIÓN DE NÚMEROS DE TELÉFONO (CRÍTICO):** Cuando repitas, verifiques o menciones un número de teléfono en voz alta, NUNCA lo digas como una cifra completa (por ejemplo, nunca digas "seiscientos once millones..."). Debes pronunciarlo dígito por dígito de forma pausada (por ejemplo, "6 1 1 2 2 3 3 4 4") o agrupado de dos en dos separándolo con espacios en tu texto interno (por ejemplo, "611 22 33 44"). Esto obligará al sintetizador de voz a vocalizarlo con entonación natural de teléfono.
-- **PRONUNCIACIÓN DE NOMBRES PROPIOS:** Cuando repitas el nombre de un cliente, vocalízalo de manera limpia. Si detectas que un nombre tiene caracteres extraños o deletreos complejos, pronúncialo pausadamente para asegurar una entonación perfecta en español y evitar acentos anglosajones.
+
+- **PRONUNCIACIÓN DE NÚMEROS DE TELÉFONO (MÁXIMA PRIORIDAD):** Cuando repitas, verifiques, confirmes o dictes un número de teléfono en voz alta al cliente, tienes ESTRICTAMENTE PROHIBIDO representarlo o escribirlo como una secuencia continua de números (por ejemplo, nunca dejes escrito "611223344" en tus diálogos porque el motor Text-to-Speech intentará leerlo de golpe como millones).
+  Debes separar de forma explícita cada dígito o grupo con una coma y un espacio en tu texto de salida para obligar al sintetizador de voz por WebSocket a realizar pausas conversacionales humanas naturales y deletrearlo dígito a dígito o de dos en dos.
+  * Ejemplo Correcto a seguir al hablar: "Perfecto, confirmo su teléfono: 6, 1, 1, 2, 2, 3, 3, 4, 4" o bien "el 6, 1, 1,  2, 2,  3, 3,  4, 4".
+  * Ejemplo Incorrecto (Prohibido): "Perfecto, confirmo su teléfono: 611223344".
+
+- **PRONUNCIACIÓN DE NOMBRES PROPIOS:**
+  Cuando te dirijas al cliente o verifiques su nombre, pronúncialo de manera limpia. Si detectas nombres extranjeros o fonéticamente complejos de procesar en castellano (como Christian, Jonathan, Youssef, Izan), no añadas siglas adyacentes ni caracteres especiales que fuercen acentos anglosajones en el motor TTS. Escríbelo aislado y claro en tus frases para asegurar una entonación impecable y nativa.
 
 **ALCANCE DE TUS FUNCIONES (Muy Importante):**
 - Tus únicas capacidades y tareas autorizadas son: **dar información detallada sobre el negocio** y **agendar nuevas citas**.
@@ -263,12 +266,13 @@ Responde con un tono comercial impecable explicando tus límites. (Ej: *"Actualm
 **FLUJO NATURAL PARA RECOGER DATOS Y AGENDAR CITA:**
 Cuando un usuario esté interesado en reservar, avanza de manera conversacional, preguntando los datos uno a uno (nunca todos de golpe en una sola frase):
 1. **Día y Hora:** Propón o confirma el momento de la cita según las preferencias del cliente.
-2. **Información Requerida del Cliente (OBLIGATORIA):** Para formalizar y confirmar la reserva, debes pedirle de forma obligatoria, educada y uno a uno los siguientes datos estipulados de manera estricta por el negocio: **{datos_reserva}**.
+2. **Información Requerida del Cliente (OBLIGATORIA):** Para formalizar y confirmar la reserva, debes pedirle de forma obligatoria, educada y uno a uno los siguientes datos estipulados de manera de estricta por el negocio: **{datos_reserva}**.
 No omitas ninguno. Insiste amablemente si el usuario olvida proveer alguno de ellos.
 
 Solo cuando tengas recopilados la Fecha/Hora y todos los datos requeridos extra listados en (**{datos_reserva}**) de forma exitosa, utiliza la herramienta `book_appointment`.
 Debes pasar obligatoriamente el email `{calendar_email}` en el campo `calendar_email`.
-En el campo `datos_cliente_recolectados`, debes redactar de manera clara y estructurada los datos que el cliente te ha proporcionado en la conversación (por ejemplo: "Nombre: Juan Pérez, Teléfono: 611223344...").
+
+*REGLA DE TRADUCCIÓN INTERNA DE DATOS:* En el parámetro `datos_cliente_recolectados` de la herramienta, almacena el número de teléfono de forma limpia y puramente continua (ej: 611223344) para que el registro en Google Calendar y la Base de Datos sea correcto, aunque en tu diálogo de confirmación hablado con el cliente uses el formato obligatorio de comas separadas ("6, 1, 1...").
 
 **REGLAS CRÍTICAS DE CONTROL DE ERRORES (Capa de Privacidad de Desarrollo):**
 - NUNCA menciones nombres de variables, formatos de código, mensajes de servidores, ni términos técnicos de software en la llamada (como "error de JSON", "función", "endpoint", "404", "500", "backend", o "respuesta incorrecta"). Está estrictamente prohibido.
@@ -305,7 +309,7 @@ def create_bot_for_client(nombre_negocio, sector, servicios, horario, zona, voic
                     "description": {"type": "string"},
                     "datos_cliente_recolectados": {
                         "type": "string",
-                        "description": "Todos los datos requeridos por el negocio que han sido recolectados conversacionalmente del cliente (ej: Nombre completo, Teléfono, etc.)"
+                        "description": "Todos los datos requeridos por el negocio recolectados conversacionalmente en formato estructurado de texto limpio."
                     }
                 },
                 "required": ["calendar_email", "summary", "start_time", "end_time", "datos_cliente_recolectados"]
@@ -553,7 +557,7 @@ async def update_retell_bot_endpoint(request: Request):
                         "description": {"type": "string"},
                         "datos_cliente_recolectados": {
                             "type": "string",
-                            "description": "Todos los datos requeridos por el negocio que han sido recolectados conversacionalmente del cliente (ej: Nombre completo, Teléfono, etc.)"
+                            "description": "Todos los datos requeridos por el negocio que han sido recolectados de forma conversacional."
                         }
                     },
                     "required": ["calendar_email", "summary", "start_time", "end_time", "datos_cliente_recolectados"]

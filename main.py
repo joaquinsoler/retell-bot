@@ -210,7 +210,7 @@ def retell_request(method: str, endpoint: str, json_data=None):
         logger.error(f"❌ Error de comunicación con Retell: {e}", exc_info=True)
         return None
 
-# ==================== CONSTRUCTOR DEL PROMPT DINÁMICO (CORREGIDO) ====================
+# ==================== CONSTRUCTOR DEL PROMPT DINÁMICO (VERSIÓN MEJORADA - PRONUNCIACIÓN ROBUSTA) ====================
 def build_custom_prompt(nombre_negocio, sector, servicios, horario, zona, calendar_email, idioma="es", 
                         datos_reserva="Nombre completo, Número de teléfono, Motivo de la cita"):
     # Mapeo conversacional claro del idioma configurado
@@ -240,24 +240,27 @@ Utiliza esta referencia exacta para interpretar correctamente términos relativo
 **CONFIGURACIÓN OBLIGATORIA DE IDIOMA:**
 - Debes interactuar, responder, saludo y hablar COMPLETAMENTE en el idioma: **{idioma_atencion}**.
 Toda la llamada debe seguir este idioma de forma estricta.
+
+**REGLAS OBLIGATORIAS Y PERMANENTES DE PRONUNCIACIÓN DE NÚMEROS DE TELÉFONO (APLICA EN ABSOLUTAMENTE TODAS LAS OCASIONES - SIN EXCEPCIONES):**
+- **EN CADA MOMENTO** de la conversación en el que debas decir o confirmar un número de teléfono (ya sea al principio, al confirmar datos, al repetir, o en cualquier otro instante), **SIEMPRE** pronúncialo **exclusivamente dígito a dígito**.
+- **NUNCA**, bajo ninguna circunstancia, lo leas como un número cardinal grande. Está estrictamente prohibido.
+- Formato **obligatorio** que debes usar siempre:
+  - Correcto → "seis uno dos tres cuatro cinco seis siete ocho"
+  - Correcto → "seis, uno, dos, tres, cuatro, cinco, seis, siete, ocho"
+  - Correcto → "seis once, veintidós, treinta y tres, cuarenta y cuatro"
+  - Incorrecto (prohibido) → "seiscientos doce millones trescientos cuarenta y cinco mil seiscientos setenta y ocho"
+- Esta regla es **permanente** durante toda la llamada. No la olvides nunca.
+- Cuando confirmes los datos del cliente antes de llamar a la herramienta `book_appointment`, repite el teléfono usando **siempre** este formato dígito a dígito.
+- En `datos_cliente_recolectados` guarda el número tal como te lo dio el cliente.
+
 **ALCANCE DE TUS FUNCIONES (Muy Importante):**
-- Tus únicas capacidades y tareas autorizadas son: **dar información detallaria sobre el negocio** and **agendar nuevas citas**.
+- Tus únicas capacidades y tareas autorizadas son: **dar información detallada sobre el negocio** and **agendar nuevas citas**.
 - Si el usuario te solicita cancelar una cita, eliminar una reserva existente, modificar un horario ya agendado o realizar cualquier otra gestión administrativa, debes aclararle de forma muy educada que no tienes acceso para realizar esa acción.
 Responde con un tono comercial impecable explicando tus límites. (Ej: *"Actualmente solo puedo facilitarte información y agendar nuevas citas en el sistema. Para cancelar o modificar una reserva que ya tienes, te sugiero ponerte en contacto directamente con nuestro equipo técnico o de atención humana a través de nuestros canales habituales, y ellos lo resolverán encantados."*).
 **TU PERSONALIDAD Y TONO REQUERIDO:**
 - Habla con calidez, usando frases cortas y claras para que la llamada sea cómoda.
 Escucha activamente.
 - Muéstrate siempre servicial, educado y con un trato comercial impecable.
-
-**REGLAS OBLIGATORIAS DE PRONUNCIACIÓN DE NÚMEROS DE TELÉFONO (CRÍTICO - MUY IMPORTANTE):**
-- Cuando debas mencionar o confirmar un número de teléfono en voz alta, **NUNCA** lo pronuncies como un número cardinal grande (evita completamente cosas como "seiscientos doce millones...").
-- Siempre pronúncialo **dígito a dígito** o en grupos pequeños de 2-3 dígitos, con pausas claras y naturales.
-- Formatos recomendados y correctos en español:
-  - "seis uno dos tres cuatro cinco seis siete ocho"
-  - "seis, uno, dos, tres, cuatro, cinco, seis, siete, ocho"
-  - "seis once, veintidós, treinta y tres, cuarenta y cuatro" (si el cliente lo dijo agrupado)
-- Cuando repitas o confirmes los datos del cliente antes de usar la herramienta de reserva, **siempre** verbaliza el teléfono usando este estilo claro y natural.
-- En el campo `datos_cliente_recolectados` guarda el número exactamente como te lo dijo el usuario (sin reformatear innecesariamente).
 
 **INFORMACIÓN OPERATIVA DEL NEGOCIO (Estrictamente real, nunca inventes datos):**
 - Ubicación / Zona de servicio: {zona}
@@ -656,7 +659,7 @@ async def delete_retell_bot_endpoint(request: Request):
         if 'conn' in locals(): conn.close()
 
 
-# ==================== ENDPOINTS GENERALES ORIGINALES ====================
+# ==================== ENDPOINTS GENERALES ====================
 @app.post("/book-appointment")
 @app.post("/book-appointment/")
 async def book_appointment(request: Request):
@@ -668,8 +671,7 @@ async def book_appointment(request: Request):
         calendar_email = args.get("calendar_email")
         start_time_str = args.get("start_time")
 
-        # Obtenemos la duración real asignada al bot buscando por su email de Google Calendar
-        duracion_minutos = 30  # Fallback seguro
+        duracion_minutos = 30
         conn = get_db_connection()
         cur = conn.cursor()
         try:
@@ -683,7 +685,6 @@ async def book_appointment(request: Request):
             cur.close()
             conn.close()
 
-        # Calculamos y forzamos el end_time exacto del lado del servidor usando la configuración de la DB
         try:
             clean_start = str(start_time_str).strip().replace(" ", "T")
             if clean_start.endswith("Z"):
@@ -697,12 +698,10 @@ async def book_appointment(request: Request):
             end_time_str = end_dt.isoformat()
         except Exception as e_time:
             logger.error(f"⚠️ Error calculando el tiempo exacto. Usando el de la IA: {e_time}")
-            end_time_str = args.get("end_time")  # Fallback al cálculo de la IA si el parseo falla
+            end_time_str = args.get("end_time")
 
-        # Extraemos los datos estructurados que el bot recopiló del cliente
         datos_cliente = args.get("datos_cliente_recolectados", "")
         
-        # Formateamos la descripción del evento combinando la por defecto y los datos capturados en vivo
         descripcion_final = "Cita agendada automáticamente por Dansu AI.\n\n"
         if datos_cliente:
             descripcion_final += f"📋 DATOS DEL CLIENTE:\n{datos_cliente}"
@@ -768,7 +767,7 @@ async def create_retell_bot_endpoint(request: Request):
 
 @app.get("/")
 async def root():
-    return {"status": "Dansu Backend Completo OK"}
+    return {"status": "Dansu Backend Completo OK - Pronunciación de números mejorada"}
 
 
 if __name__ == "__main__":

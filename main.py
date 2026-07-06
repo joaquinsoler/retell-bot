@@ -210,7 +210,7 @@ def retell_request(method: str, endpoint: str, json_data=None):
         logger.error(f"❌ Error de comunicación con Retell: {e}", exc_info=True)
         return None
 
-# ==================== CONSTRUCTOR DEL PROMPT DINÁMICO CORREGIDO (FONÉTICA HI-FI) ====================
+# ==================== CONSTRUCTOR DEL PROMPT DINÁMICO ====================
 def build_custom_prompt(nombre_negocio, sector, servicios, horario, zona, calendar_email, idioma="es", 
                         datos_reserva="Nombre completo, Número de teléfono, Motivo de la cita"):
     idiomas_legibles = {
@@ -236,16 +236,8 @@ Tu objetivo principal es atender a los clientes con la máxima amabilidad, empat
 - La hora actual es: **{hora_legible}** (Zona horaria: Europe/Madrid).
 Utiliza esta referencia exacta para interpretar correctamente términos relativos que use el usuario como "hoy", "mañana", "esta tarde", "el próximo lunes" o "ayer", calculando los días en función de este marco.
 
-**CONFIGURACIÓN OBLIGATORIA DE IDIOMA Y REGLAS FONÉTICAS ULTRA ESTRICTAS:**
+**CONFIGURACIÓN OBLIGATORIA DE IDIOMA:**
 - Debes interactuar, responder, saludar y hablar COMPLETAMENTE en el idioma: **{idioma_atencion}**. Toda la llamada debe seguir este idioma de forma estricta.
-
-- **PRONUNCIACIÓN DE NÚMEROS DE TELÉFONO (MÁXIMA PRIORIDAD):** Cuando repitas, verifiques, confirmes o dictes un número de teléfono en voz alta al cliente, tienes ESTRICTAMENTE PROHIBIDO representarlo o escribirlo como una secuencia continua de números (por ejemplo, nunca dejes escrito "611223344" en tus diálogos porque el motor Text-to-Speech intentará leerlo de golpe como millones).
-  Debes separar de forma explícita cada dígito o grupo con una coma y un espacio en tu texto de salida para obligar al sintetizador de voz por WebSocket a realizar pausas conversacionales humanas naturales y deletrearlo dígito a dígito o de dos en dos.
-  * Ejemplo Correcto a seguir al hablar: "Perfecto, confirmo su teléfono: 6, 1, 1, 2, 2, 3, 3, 4, 4" o bien "el 6, 1, 1,  2, 2,  3, 3,  4, 4".
-  * Ejemplo Incorrecto (Prohibido): "Perfecto, confirmo su teléfono: 611223344".
-
-- **PRONUNCIACIÓN DE NOMBRES PROPIOS:**
-  Cuando te dirijas al cliente o verifiques su nombre, pronúncialo de manera limpia. Si detectas nombres extranjeros o fonéticamente complejos de procesar en castellano (como Christian, Jonathan, Youssef, Izan), no añadas siglas adyacentes ni caracteres especiales que fuercen acentos anglosajones en el motor TTS. Escríbelo aislado y claro en tus frases para asegurar una entonación impecable y nativa.
 
 **ALCANCE DE TUS FUNCIONES (Muy Importante):**
 - Tus únicas capacidades y tareas autorizadas son: **dar información detallada sobre el negocio** y **agendar nuevas citas**.
@@ -271,8 +263,7 @@ No omitas ninguno. Insiste amablemente si el usuario olvida proveer alguno de el
 
 Solo cuando tengas recopilados la Fecha/Hora y todos los datos requeridos extra listados en (**{datos_reserva}**) de forma exitosa, utiliza la herramienta `book_appointment`.
 Debes pasar obligatoriamente el email `{calendar_email}` en el campo `calendar_email`.
-
-*REGLA DE TRADUCCIÓN INTERNA DE DATOS:* En el parámetro `datos_cliente_recolectados` de la herramienta, almacena el número de teléfono de forma limpia y puramente continua (ej: 611223344) para que el registro en Google Calendar y la Base de Datos sea correcto, aunque en tu diálogo de confirmación hablado con el cliente uses el formato obligatorio de comas separadas ("6, 1, 1...").
+En el campo `datos_cliente_recolectados`, debes redactar de manera clara y estructurada los datos que el cliente te ha proporcionado en la conversación (por ejemplo: "Nombre: Juan Pérez, Teléfono: 611223344...").
 
 **REGLAS CRÍTICAS DE CONTROL DE ERRORES (Capa de Privacidad de Desarrollo):**
 - NUNCA menciones nombres de variables, formatos de código, mensajes de servidores, ni términos técnicos de software en la llamada (como "error de JSON", "función", "endpoint", "404", "500", "backend", o "respuesta incorrecta"). Está estrictamente prohibido.
@@ -286,9 +277,6 @@ Gestiona la situación diciendo algo como:
 def create_bot_for_client(nombre_negocio, sector, servicios, horario, zona, voice_id, calendar_email, 
                           idioma="es", datos_reserva="Nombre completo, Número de teléfono, Motivo de la cita", duracion_cita=30):
     custom_prompt = build_custom_prompt(nombre_negocio, sector, servicios, horario, zona, calendar_email, idioma, datos_reserva)
-
-    retell_language_mapping = {"es": "es-ES", "en": "en-US", "ca": "ca-ES"}
-    lang_retell = retell_language_mapping.get(str(idioma).strip().lower(), "es-ES")
 
     llm_res = retell_request("POST", "/create-retell-llm", {
         "model": "gpt-4o-mini",
@@ -309,7 +297,7 @@ def create_bot_for_client(nombre_negocio, sector, servicios, horario, zona, voic
                     "description": {"type": "string"},
                     "datos_cliente_recolectados": {
                         "type": "string",
-                        "description": "Todos los datos requeridos por el negocio recolectados conversacionalmente en formato estructurado de texto limpio."
+                        "description": "Todos los datos requeridos por el negocio que han sido recolectados en la conversación."
                     }
                 },
                 "required": ["calendar_email", "summary", "start_time", "end_time", "datos_cliente_recolectados"]
@@ -321,11 +309,11 @@ def create_bot_for_client(nombre_negocio, sector, servicios, horario, zona, voic
         logger.error("Fallo crítico: No se pudo obtener llm_id al crear el agente en Retell.")
         raise Exception("Error creando LLM")
 
+    # Eliminado el parámetro "language" para evitar conflictos de normalización de voz en Retell AI
     agent_res = retell_request("POST", "/create-agent", {
         "agent_name": f"Bot {nombre_negocio}",
         "response_engine": {"type": "retell-llm", "llm_id": llm_res["llm_id"]},
-        "voice_id": voice_id,
-        "language": lang_retell
+        "voice_id": voice_id
     })
 
     if not agent_res or "agent_id" not in agent_res:
@@ -570,14 +558,13 @@ async def update_retell_bot_endpoint(request: Request):
 
         voice_id_tecnico = VOICE_MAPPING.get(asistente_nombre)
         
-        retell_language_mapping = {"es": "es-ES", "en": "en-US", "ca": "ca-ES"}
-        lang_retell = retell_language_mapping.get(str(idioma).strip().lower(), "es-ES")
-
-        agent_patch_data = {"language": lang_retell}
+        # Parámetro "language" eliminado del PATCH para mantener la perfecta pronunciación nativa heredada de la V3
+        agent_patch_data = {}
         if voice_id_tecnico:
             agent_patch_data["voice_id"] = voice_id_tecnico
             
-        retell_request("PATCH", f"/update-agent/{agent_id}", agent_patch_data)
+        if agent_patch_data:
+            retell_request("PATCH", f"/update-agent/{agent_id}", agent_patch_data)
 
         if not voice_id_tecnico:
             voice_id_tecnico = agent_info.get("voice_id")
@@ -670,7 +657,6 @@ async def book_appointment(request: Request):
         calendar_email = args.get("calendar_email")
         start_time_str = args.get("start_time")
 
-        # Obtenemos la duración real asignada al bot buscando por su email de Google Calendar
         duracion_minutos = 30  # Fallback seguro
         conn = get_db_connection()
         cur = conn.cursor()
@@ -685,7 +671,6 @@ async def book_appointment(request: Request):
             cur.close()
             conn.close()
 
-        # Calculamos y forzamos el end_time exacto del lado del servidor usando la configuración de la DB
         try:
             clean_start = str(start_time_str).strip().replace(" ", "T")
             if clean_start.endswith("Z"):
@@ -699,12 +684,10 @@ async def book_appointment(request: Request):
             end_time_str = end_dt.isoformat()
         except Exception as e_time:
             logger.error(f"⚠️ Error calculando el tiempo exacto. Usando el de la IA: {e_time}")
-            end_time_str = args.get("end_time")  # Fallback al cálculo de la IA si el parseo falla
+            end_time_str = args.get("end_time")
 
-        # Extraemos los datos estructurados que el bot recopiló del cliente
         datos_cliente = args.get("datos_cliente_recolectados", "")
         
-        # Formateamos la descripción del evento combinando la por defecto y los datos capturados en vivo
         descripcion_final = "Cita agendada automáticamente por Dansu AI.\n\n"
         if datos_cliente:
             descripcion_final += f"📋 DATOS DEL CLIENTE:\n{datos_cliente}"

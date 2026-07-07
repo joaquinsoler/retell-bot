@@ -1,687 +1,439 @@
-import os
-import json
-import logging
-from datetime import datetime, timedelta
-from zoneinfo import ZoneInfo  # Gestión nativa y precisa de zonas horarias en Python 3.9+
-from fastapi import FastAPI, HTTPException, Request
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse
-import requests
-import psycopg2  # Conector nativo de PostgreSQL
-from psycopg2.extras import RealDictCursor
-
-from google.oauth2 import service_account
-from googleapiclient.discovery import build
-from googleapiclient.errors import HttpError
-
-from jose import JWTError, jwt  # Manejo seguro de tokens del Magic Link
-
-# ==================== CONFIGURACIÓN DE LOGS PARA RENDER ====================
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s - %(message)s",
-    handlers=[logging.StreamHandler()]  # Envía los logs directamente a la consola de Render
-)
-logger = logging.getLogger("DansuAI-Backend")
-
-app = FastAPI(title="Dansu Backend Completo con Magic Link")
-
-# ==================== VARIABLES DE ENTORNO ====================
-RETELL_API_KEY = os.getenv("RETELL_API_KEY")
-GOOGLE_CREDENTIALS_JSON = os.getenv("GOOGLE_CREDENTIALS")
-DATABASE_URL = os.getenv("DATABASE_URL")
-JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY")
-BREVO_API_KEY = os.getenv("BREVO_API_KEY")
-
-if not all([RETELL_API_KEY, GOOGLE_CREDENTIALS_JSON, DATABASE_URL, JWT_SECRET_KEY, BREVO_API_KEY]):
-    logger.critical("Faltan variables de entorno críticas en el despliegue.")
-    raise Exception("Faltan variables de entorno críticas (RETELL_API_KEY, GOOGLE_CREDENTIALS, DATABASE_URL, JWT_SECRET_KEY o BREVO_API_KEY)")
-
-# Configuración JWT
-ALGORITHM = "HS256"
-ACCESS_TOKEN_EXPIRE_MINUTES = 15
-
-# Almacén temporal de sesiones validadas indexadas por IP (IP: {"email": email, "expira": datetime})
-SESIONES_ACTIVAS = {}
-
-# ==================== CORS ====================
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-# ==================== CONEXIÓN E INICIALIZACIÓN DE POSTGRESQL ====================
-def get_db_connection():
-    return psycopg2.connect(DATABASE_URL, cursor_factory=RealDictCursor)
-
-def init_db():
-    """Crea o actualiza la tabla de asistentes en PostgreSQL al arrancar"""
-    conn = get_db_connection()
-    cur = conn.cursor()
-    try:
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS asistentes (
-                id SERIAL PRIMARY KEY,
-                nombre_negocio VARCHAR(255),
-                sector VARCHAR(255),
-                servicios TEXT,
-                horario VARCHAR(255),
-                duracion_cita INT DEFAULT 30,
-                zona VARCHAR(255),
-                google_calendar_email VARCHAR(255),
-                asistente VARCHAR(255),
-                agent_id VARCHAR(255) UNIQUE,
-                phone_number VARCHAR(255),
-                idioma VARCHAR(50) DEFAULT 'es',
-                datos_reserva TEXT DEFAULT 'Nombre completo, Número de teléfono, Motivo de la cita',
-                fecha_creacion TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            );
-        """)
-        # Migraciones automáticas por si la tabla ya existía sin estas columnas
-        cur.execute("ALTER TABLE asistentes ADD COLUMN IF NOT EXISTS idioma VARCHAR(50) DEFAULT 'es';")
-        cur.execute("ALTER TABLE asistentes ADD COLUMN IF NOT EXISTS datos_reserva TEXT DEFAULT 'Nombre completo, Número de teléfono, Motivo de la cita';")
-        cur.execute("ALTER TABLE asistentes ADD COLUMN IF NOT EXISTS duracion_cita INT DEFAULT 30;")
-        conn.commit()
-        logger.info("✅ Base de datos PostgreSQL inicializada, verified y lista.")
-    except Exception as e:
-        logger.error(f"❌ Error inicializando la base de datos: {e}", exc_info=True)
-    finally:
-        cur.close()
-        conn.close()
-
-# Inicializamos la estructura de la base de datos al arrancar el backend
-init_db()
-
-# ==================== GOOGLE CALENDAR ====================
-SCOPES = ['https://www.googleapis.com/auth/calendar']
-MADRID_TZ = ZoneInfo("Europe/Madrid")  # Huso horario de referencia absoluto para el negocio
-
-def get_calendar_service():
-    credentials_info = json.loads(GOOGLE_CREDENTIALS_JSON)
-    credentials = service_account.Credentials.from_service_account_info(
-        credentials_info, scopes=SCOPES
-    )
-    credentials = credentials.with_scopes(SCOPES)
-    if hasattr(credentials, 'with_subject'):
-        credentials = credentials.with_subject(None)
-    if hasattr(credentials, '_regional_access_boundary'):
-        credentials._regional_access_boundary = None
-    return build('calendar', 'v3', credentials=credentials, cache_discovery=False)
-
-
-def ensure_calendar_access(calendar_id: str):
-    try:
-        service = get_calendar_service()
-        service.calendarList().insert(body={'id': calendar_id}).execute()
-        logger.info(f"✅ Calendario suscrito: {calendar_id}")
-    except HttpError as e:
-        if e.status_code == 409:
-            logger.info(f"ℹ️ Ya suscrito: {calendar_id}")
-        else:
-            logger.error(f"⚠️ Error suscripción {e.status_code}: {e}")
-
-
-def normalize_to_madrid_iso(dt_str: str) -> str:
-    if not dt_str:
-        return dt_str
-    dt_str = str(dt_str).strip().replace(" ", "T")
-    if dt_str.endswith("Z"):
-        dt = datetime.fromisoformat(dt_str[:-1]).replace(tzinfo=ZoneInfo("UTC"))
-    else:
-        try:
-            dt = datetime.fromisoformat(dt_str)
-            if dt.tzinfo is None:
-                dt = dt.replace(tzinfo=MADRID_TZ)
-        except ValueError:
-            return dt_str
-    dt_madrid = dt.astimezone(MADRID_TZ)
-    return dt_madrid.isoformat()
-
-
-def check_availability(calendar_id: str, start_time: str, end_time: str) -> bool:
-    try:
-        service = get_calendar_service()
-        iso_start = normalize_to_madrid_iso(start_time)
-        iso_end = normalize_to_madrid_iso(end_time)
-        body = {
-            "timeMin": iso_start,
-            "timeMax": iso_end,
-            "timeZone": "Europe/Madrid",
-            "items": [{"id": calendar_id}]
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Creador de Asistentes AI - Dansu</title>
+    <style>
+        /* === PANTALLA DE CARGA === */
+        #preloader {
+            position: fixed;
+            top: 0; left: 0;
+            width: 100%; height: 100%;
+            background: #ffffff;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            z-index: 99999;
+            transition: opacity 0.6s ease;
         }
-        logger.info(f"🔍 Consultando FreeBusy para {calendar_id} entre {iso_start} y {iso_end}")
-        freebusy_query = service.freebusy().query(body=body).execute()
-        busy_periods = freebusy_query.get("calendars", {}).get(calendar_id, {}).get("busy", [])
-        if busy_periods:
-            logger.warning(f"❌ Hueco ocupado. Conflictos detectados: {busy_periods}")
-            return False
-        logger.info("✅ Hueco 100% disponible.")
-        return True
-    except Exception as e:
-        logger.error(f"⚠️ Error al comprobar disponibilidad con FreeBusy: {e}", exc_info=True)
-        return True
-
-
-def create_google_event(calendar_id: str, summary: str, start_time: str, end_time: str, description: str = "", bypass_availability: bool = False):
-    try:
-        ensure_calendar_access(calendar_id)
-        iso_start = normalize_to_madrid_iso(start_time)
-        iso_end = normalize_to_madrid_iso(end_time)
-        if not bypass_availability and not check_availability(calendar_id, iso_start, iso_end):
-            raise Exception("El horario seleccionado ya no está disponible.")
-        service = get_db_connection()
-        service = get_calendar_service()
-        event = {
-            'summary': summary[:100],
-            'description': (description or "Cita agendada por Dansu AI"),
-            'start': {'dateTime': iso_start, 'timeZone': 'Europe/Madrid'},
-            'end': {'dateTime': iso_end, 'timeZone': 'Europe/Madrid'},
-            'reminders': {'useDefault': True}
+        .loader-content { text-align: center;
         }
-        created = service.events().insert(calendarId=calendar_id, body=event, sendUpdates='none').execute()
-        logger.info(f"✅ EVENTO CREADO: {created.get('htmlLink')}")
-        return created
-    except Exception as e:
-        logger.error(f"❌ Error Google Calendar: {e}", exc_info=True)
-        raise
-
-
-# ==================== VOICE MAPPING & RETELL UTILS ====================
-VOICE_MAPPING = {
-    "Cimo": "11labs-Adrian", "Brynne": "11labs-Brynne", "Chloe": "11labs-Chloe",
-    "Kate": "openai-Nova", "Grace": "openai-Shimmer", "Leland": "11labs-Leland",
-    "Marissa": "11labs-Marissa", "Lily": "11labs-Lily", "Della": "11labs-Delia",
-    "Nico": "openai-Onyx", "Rita": "11labs-Rita", "Meritt": "11labs-Meritt",
-    "Willa": "11labs-Willa", "Maren": "11labs-Maren", "Tasmin": "11labs-Tasmin",
-    "Ashley": "11labs-Ashley", "Andrea": "openai-Alloy", "Claudia": "11labs-Claudia",
-    "Gaby": "11labs-Gaby", "Alejandro": "openai-Echo", "Sloane": "11labs-Sloane"
-}
-
-def retell_request(method: str, endpoint: str, json_data=None):
-    url = f"https://api.retellai.com{endpoint}"
-    headers = {"Authorization": f"Bearer {RETELL_API_KEY}", "Content-Type": "application/json"}
-    try:
-        r = requests.request(method, url, headers=headers, json=json_data, timeout=30)
-        logger.info(f"→ Retell {method} {endpoint} → {r.status_code}")
-        return r.json() if r.ok else None
-    except Exception as e:
-        logger.error(f"❌ Error de comunicación con Retell: {e}", exc_info=True)
-        return None
-
-
-# ==================== CONSTRUCTOR DEL PROMPT DINÁMICO REFORZADO ====================
-def build_custom_prompt(nombre_negocio, sector, servicios, horario, zona, calendar_email, idioma="es", 
-                        datos_reserva="Nombre completo, Número de teléfono, Motivo de la cita"):
-    idiomas_legibles = {
-        "es": "Español de España (es-ES)",
-        "en": "Inglés (en-US)",
-        "ca": "Catalán (ca-ES)"
-    }
-    idioma_atencion = idiomas_legibles.get(str(idioma).strip().lower(), "Español de España (es-ES)")
-
-    ahora_madrid = datetime.now(MADRID_TZ)
-    
-    dias_semana = {0: "Lunes", 1: "Martes", 2: "Miércoles", 3: "Jueves", 4: "Viernes", 5: "Sábado", 6: "Domingo"}
-    meses_año = {1: "Enero", 2: "Febrero", 3: "Marzo", 4: "Abril", 5: "Mayo", 6: "Junio", 7: "Julio", 8: "Agosto", 9: "Septiembre", 10: "Octubre", 11: "Noviembre", 12: "Diciembre"}
-    
-    fecha_legible = f"{dias_semana[ahora_madrid.weekday()]}, {ahora_madrid.day} de {meses_año[ahora_madrid.month]} de {ahora_madrid.year}"
-    hora_legible = ahora_madrid.strftime("%H:%M")
-
-    return f"""Eres la voz y el asistente virtual exclusivo de {nombre_negocio}, un negocio enfocado en el sector de {sector}.
-Tu objetivo principal es atender a los clientes con la máxima amabilidad, empatía y profesionalidad, ofreciendo una conversación fluida, natural y cercana.
-
-**REFERENCIA TEMPORAL INTERNA (USO EXCLUSIVO DEL SISTEMA):**
-- La fecha real de hoy es: {fecha_legible}.
-- La hora real actual es: {hora_legible} (Huso: Europe/Madrid).
-Utiliza esta referencia internamente para comprender de manera exacta términos como "hoy", "mañana", "esta tarde" o "el próximo martes".
-*REGLA CRÍTICA:* Queda terminantemente prohibido decirle al cliente frases explícitas informándole de estos metadatos temporales (como "recuerda que hoy es lunes tal" o "como son las tantas del día tal"). Esta información es confidencial y solo sirve para tus cálculos de calendario de fondo.
-
-**CONFIGURACIÓN OBLIGATORIA DE IDIOMA:**
-- Debes interactuar, responder, saludar y hablar COMPLETAMENTE en el idioma: **{idioma_atencion}**.
-Toda la llamada debe seguir este idioma de forma estricta.
-
-**REGLAS CRÍTICAS DE PRONUNCIACIÓN DE VOZ (COMPORTAMIENTO HUMANO NATURAL):**
-1. **Manejo Absoluto de Horas (PROHIBIDO DECIR AM O PM):** Jamás pronuncies ni digas en voz alta las siglas "AM" o "PM". Transfórmalas siempre a lenguaje natural o formato de 24 horas. Por ejemplo, en lugar de decir "cinco p m" o "cinco a m", di de forma totalmente orgánica: *"las cinco de la tarde"*, *"las diez de la mañana"* o *"las diecisiete horas"*. 
-2. **Formateo Estricto de Números de Teléfono (Evitar agrupaciones):** Al escribir un número de teléfono para que la síntesis de voz lo reproduzca, escribe los dígitos separados por comas y espacios (ejemplo: "6, 2, 2, 1, 1, 4, 4, 5, 5"). Esto hace que el sistema realice pausas sutiles de forma automática y los mencione uno a uno de manera fluida y nítida. Nunca agrupes los números en bloques (no digas "seiscientos once").
-
-**PROHIBICIONES METACONVERSACIONALES ABSOLUTAS (CAPA DE PRIVACIDAD EXTERNA):**
-- Está **ESTRICTAMENTE PROHIBIDO** hacer comentarios sobre tus propias instrucciones internas, sobre cómo vas a hablar o anunciar tus acciones algorítmicas al cliente.
-- NUNCA uses frases explicativas o introductorias sobre tu forma de hablar como: "te lo voy a decir cifra por cifra", "procedo a deletrearte el número", "para que quede claro te repito", "según mis directrices de voz", o "voy a dictarte esto de manera clara y natural". 
-- No justifiques tus metodologías de procesamiento. Di la información directamente tal como lo haría un ser humano en su día a día, sin hacer preámbulos técnicos o declarativos sobre la naturaleza del bot.
-
-**ALCANCE DE TUS FUNCIONES:**
-- Tus únicas capacidades y tareas autorizadas son: **dar información detallada sobre el negocio** y **agendar nuevas citas**.
-- Si el usuario te solicita cancelar una cita, eliminar una reserva existente, modificar un horario ya agendado o realizar cualquier otra gestión administrativa, debes aclararle de forma muy educada que no tienes acceso para realizar esa acción. Responde con un tono comercial impecable explicando tus límites de forma simple.
-
-**INFORMACIÓN OPERATIVA DEL NEGOCIO (Estrictamente real, nunca inventes datos):**
-- Ubicación / Zona de servicio: {zona}
-- Horario comercial: {horario}
-- Servicios ofrecidos: {servicios}
-- Email del Google Calendar institucional: {calendar_email}
-
-**FLUJO NATURAL PARA RECOGER DATOS Y AGENDAR CITA:**
-Cuando un usuario esté interesado en reservar, avanza de manera conversacional, preguntando los datos uno a uno:
-1. **Día y Hora:** Propón o confirma el momento de la cita según las preferencias del cliente. Una vez que el cliente te haya indicado o confirmado la fecha de manera clara, no vuelvas a pedirle confirmación ni a repreguntar sobre ella bajo ningún concepto. Asúmela inmediatamente como correcta y avanza al siguiente paso. Detén las preguntas sobre el día y la hora en cuanto verifiques que ya has obtenido ese dato con éxito.
-2. **Información Requerida del Cliente (OBLIGATORIA):** Pide de forma obligatoria y uno a uno los siguientes datos estipulados por el negocio: **{datos_reserva}**. No omitas ninguno. Insiste amablemente si el usuario olvida proveer alguno de ellos. Recuerda escribir los teléfonos dígito a dígito separados por comas para su correcta modulación.
-3. **PASO CRÍTICO DE CONFIRMACIÓN INTERACTIVA:** Una vez recopilados todos los datos de ({datos_reserva}) y la Fecha/Hora, realiza un resumen natural de la cita y pide confirmación explícita al cliente de forma directa antes de guardar nada.
-   *(Ejemplo de locución fluida: "Perfecto, entonces queda anotado para el [Día] a las [Hora en formato natural], a nombre de [Nombre], y el teléfono es el [Dígitos separados por comas]. ¿Es correcto?").*
-4. **MENSAJE DIRECTO DE RESERVA (SIN PREGUNTAS ADICIONALES):** En el instante en que el cliente te dé su confirmación definitiva diciendo que los datos son correctos, queda **TOTALMENTE PROHIBIDO** hacerle más preguntas, pedirle más datos o meter frases de relleno. Debes limitarte de forma inmediata a dar una respuesta firme de cierre indicando que procedes a guardar la cita y que espere un momento. Esto justifica el breve silencio de procesamiento de red. Acto seguido, dispara la herramienta `book_appointment`.
-   *(Locución exacta obligatoria: "Perfecto, pues procedo a agendar tu cita en el sistema ahora mismo, espera un momento por favor...").*
-
-Debes pasar obligatoriamente el email `{calendar_email}` en el campo `calendar_email`.
-En el campo `datos_cliente_recolectados`, debes redactar de manera clara y estructurada los datos que el cliente te ha proporcionado en la conversación (por ejemplo: "Nombre: Juan Pérez, Teléfono: 611223344...").
-
-**REGLAS CRÍTICAS DE CONTROL DE ERRORES (Capa de Privacidad de Desarrollo):**
-- NUNCA menciones nombres de variables, formatos de código, mensajes de servidores, ni términos técnicos de software en la llamada (como "error de JSON", "función", "endpoint", "404", "500", "backend", o "respuesta incorrecta"). Está estrictamente prohibido.
-- Si la herramienta `book_appointment` te devuelve un fallo o indica que el hueco está ocupado, actúa de manera resolutiva. Gestiona la situación diciendo algo como: 
-  *"Disculpa las molestias, parece que este horario concreto acaba de ocuparse o no está disponible en nuestra agenda en este instante. Déjame revisar... ¿Te vendría bien intentar en otro tramo horario o preferirías mirar otro día?"*"""
-
-
-# ==================== LÓGICA DE CREACIÓN ====================
-def create_bot_for_client(nombre_negocio, sector, servicios, horario, zona, voice_id, calendar_email, 
-                          idioma="es", datos_reserva="Nombre completo, Número de teléfono, Motivo de la cita", duracion_cita=30):
-    custom_prompt = build_custom_prompt(nombre_negocio, sector, servicios, horario, zona, calendar_email, idioma, datos_reserva)
-
-    retell_language_mapping = {"es": "es-ES", "en": "en-US", "ca": "ca-ES"}
-    lang_retell = retell_language_mapping.get(str(idioma).strip().lower(), "es-ES")
-
-    # Mantenemos el modelo gpt-4o de rendimiento avanzado
-    llm_res = retell_request("POST", "/create-retell-llm", {
-        "model": "gpt-4o",
-        "general_prompt": custom_prompt,
-        "general_tools": [{
-            "type": "custom",
-            "name": "book_appointment",
-            "description": "Agenda la cita en el calendario del negocio. Si el hueco está ocupado o falla, devolverá un error.",
-            "url": "https://retell-bot.onrender.com/book-appointment",
-            "method": "POST",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "calendar_email": {"type": "string"},
-                    "summary": {"type": "string"},
-                    "start_time": {"type": "string"},
-                    "end_time": {"type": "string"},
-                    "description": {"type": "string"},
-                    "datos_cliente_recolectados": {
-                        "type": "string",
-                        "description": "Todos los datos requeridos por el negocio que han sido recolectados conversacionalmente del cliente (ej: Nombre completo, Teléfono, etc.)"
-                    }
-                },
-                "required": ["calendar_email", "summary", "start_time", "end_time", "datos_cliente_recolectados"]
-            }
-        }]
-    })
-
-    if not llm_res or "llm_id" not in llm_res:
-        logger.error("Fallo crítico: No se pudo obtener llm_id al crear el agente en Retell.")
-        raise Exception("Error creando LLM")
-
-    agent_res = retell_request("POST", "/create-agent", {
-        "agent_name": f"Bot {nombre_negocio}",
-        "response_engine": {"type": "retell-llm", "llm_id": llm_res["llm_id"]},
-        "voice_id": voice_id,
-        "language": lang_retell
-    })
-
-    if not agent_res or "agent_id" not in agent_res:
-        logger.error("Fallo crítico: No se pudo obtener agent_id al crear el agente en Retell.")
-        raise Exception("Error creando Agent")
-
-    agent_id = agent_res["agent_id"]
-
-    numbers = retell_request("GET", "/v2/list-phone-numbers")
-    free_number = None
-    if numbers and "items" in numbers:
-        for p in numbers["items"]:
-            if not p.get("inbound_agents"):
-                free_number = p.get("phone_number")
-                break
-
-    if free_number:
-        retell_request("PATCH", f"/update-phone-number/{free_number}", {
-            "inbound_agents": [{"agent_id": agent_id, "weight": 1.0}]
-        })
-
-    conn = get_db_connection()
-    cur = conn.cursor()
-    try:
-        cur.execute("""
-            INSERT INTO asistentes (nombre_negocio, sector, servicios, horario, duracion_cita, zona, google_calendar_email, asistente, agent_id, phone_number, idioma, datos_reserva)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s);
-        """, (nombre_negocio, sector, servicios, horario, duracion_cita, zona, calendar_email, voice_id, agent_id, free_number, idioma, datos_reserva))
-        conn.commit()
-        logger.info(f"✅ Bot {agent_id} registrado exitosamente en la base de datos.")
-    except Exception as e:
-        logger.error(f"❌ Error guardando bot en base de datos: {e}", exc_info=True)
-        raise e
-    finally:
-        cur.close()
-        conn.close()
-
-    return {"status": "success", "agent_id": agent_id, "phone_number": free_number}
-
-
-# ==================== UTILS TOKENS & EMAIL (MAGIC LINK) ====================
-def create_magic_token(email: str):
-    expire = datetime.utcnow() + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
-    return jwt.encode({"sub": email.lower(), "exp": expire}, JWT_SECRET_KEY, algorithm=ALGORITHM)
-
-def verify_magic_token(token: str):
-    try:
-        payload = jwt.decode(token, JWT_SECRET_KEY, algorithms=[ALGORITHM])
-        return payload.get("sub")
-    except JWTError as e:
-        logger.warning(f"Validación de Token de enlace mágico fallida: {e}")
-        return None
-
-def send_magic_link_email(email: str, magic_link: str):
-    try:
-        payload = {
-            "sender": {"name": "Dansu AI", "email": "no-reply@dansu.info"},
-            "to": [{"email": email}],
-            "subject": "🔑 Tu enlace de acceso a Dansu AI",
-            "htmlContent": f"""
-            <html>
-            <body style="font-family: sans-serif; padding: 30px; background-color: #f8fafc; color: #1e293b;">
-                <div style="max-width: 500px; margin: 0 auto; background: white; padding: 30px; border-radius: 16px; border: 1px solid #e2e8f0;">
-                    <h2 style="color: #0f172a; margin-top: 0;">¡Hola!</h2>
-                    <p>Haz clic en el botón inferior para iniciar sesión de forma segura e inmediata en tu panel de control de asistentes:</p>
-                    <div style="text-align: center; margin: 30px 0;">
-                        <a href="{magic_link}" target="_blank" style="background-color: #0078FF; color: white; padding: 14px 28px; text-decoration: none; border-radius: 10px; font-weight: bold; display: inline-block;">Iniciar sesión</a>
-                    </div>
-                    <p style="color: #64748b; font-size: 14px; line-height: 22px;">Este enlace es de un solo uso y expirará en 15 minutos por motivos de seguridad. Si no has solicitado este acceso, puedes ignorar este correo con total tranquilidad.</p>
-                    <hr style="border: 0; border-top: 1px solid #e2e8f0; margin: 25px 0;">
-                    <p style="color: #94a3b8; font-size: 12px; margin-bottom: 0;">© 2026 Dansu Technologies. Todos los derechos reservados.</p>
-                </div>
-            </body>
-            </html>
-            """
+        .spinner {
+            width: 70px;
+            height: 70px;
+            border: 6px solid #f3f3f3;
+            border-top: 6px solid #0078FF;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+            margin: 0 auto 20px;
         }
-        headers = {
-            "accept": "application/json",
-            "content-type": "application/json",
-            "api-key": BREVO_API_KEY
+        @keyframes spin { to { transform: rotate(360deg);
+        } }
+        .loader-text { color: #334155; font-size: 15px; font-weight: 500;
         }
-        r = requests.post("https://api.brevo.com/v3/smtp/email", headers=headers, json=payload, timeout=15)
-        logger.info(f"→ Brevo Email → {r.status_code}")
-        return r.status_code in [200, 201, 202]
-    except Exception as e:
-        logger.error(f"❌ Error sending email con Brevo: {e}", exc_info=True)
-        return False
 
+        /* Estilos originales + mejoras */
+        html, body {
+            font-family: 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+            margin: 0; padding: 10px; background: #eaf2f8; color: #333;
+            overflow: hidden;
+        }
+        h2, h3 { color: #111;
+        }
+        .subtitle { color: #666; font-size: 14px; margin-bottom: 20px;
+        }
 
-# ==================== ENDPOINTS DE ACCESO Y PANEL ====================
-@app.get("/login")
-async def login_endpoint(token: str, request: Request):
-    email = verify_magic_token(token)
-    if not email:
-        logger.warning("Intento de acceso con Token caducado o corrupto.")
-        return "<html><body><h3>❌ El enlace es inválido o ha caducado. Por favor, solicita uno nuevo.</h3></body></html>"
-    client_ip = request.headers.get("x-forwarded-for", request.client.host).split(",")[0].strip()
-    SESIONES_ACTIVAS[client_ip] = {
-        "email": email,
-        "expira": datetime.utcnow() + timedelta(minutes=5)
-    }
-    wix_url = "https://www.dansu.info/blank-4"
-    logger.info(f"Redirección autorizada a Wix para IP {client_ip} vinculada al correo {email}")
-    return f"""
-    <html>
-    <head><meta http-equiv="refresh" content="0;url={wix_url}"></head>
-    <body style="font-family:sans-serif; text-align:center; padding-top:50px;">
-        <h3>Verificación completada con éxito. Cargando tu panel... 🚀</h3>
-    </body>
-    </html>
-    """
+        /* Contenedor relativo para posicionar las flechas */
+        .slider-wrapper-rel {
+            position: relative;
+            max-width: 100%;
+            margin-bottom: 20px;
+        }
 
-@app.get("/check-session")
-async def check_session(request: Request):
-    client_ip = request.headers.get("x-forwarded-for", request.client.host).split(",")[0].strip()
-    sesion = SESIONES_ACTIVAS.get(client_ip)
-    if not sesion:
-        return {"status": "no_session"}
-    if datetime.utcnow() > sesion["expira"]:
-        del SESIONES_ACTIVAS[client_ip]
-        logger.info(f"Sesión expirada por tiempo para la IP: {client_ip}")
-        return {"status": "no_session"}
-    email = sesion["email"]
-    del SESIONES_ACTIVAS[client_ip]  # Consumo de un solo uso por seguridad
-    try:
-        conn = get_db_connection()
-        cur = conn.cursor()
-        cur.execute("SELECT * FROM asistentes WHERE google_calendar_email = %s ORDER BY id DESC;", (email,))
-        bots = cur.fetchall()
-        logger.info(f"Sesión consumida correctamente para {email}. Cargados {len(bots)} bots.")
-        return {"status": "success", "email": email, "bots": bots}
-    except Exception as e:
-        logger.error(f"Error en base de datos durante check_session para {email}: {e}", exc_info=True)
-        return {"status": "no_session"}
-    finally:
-        cur.close()
-        conn.close()
+        .slider-container {
+            display: flex;
+            overflow-x: auto; gap: 15px; padding: 10px 5px;
+            scroll-snap-type: x mandatory; scrollbar-width: none;
+            scroll-behavior: smooth;
+        }
+        .slider-container::-webkit-scrollbar { display: none;
+        }
 
-@app.post("/get-user-bots")
-async def get_user_bots(request: Request):
-    try:
-        data = await request.json()
-        email = data.get("email", "").strip()
-        conn = get_db_connection()
-        cur = conn.cursor()
-        cur.execute("SELECT * FROM asistentes WHERE google_calendar_email = %s ORDER BY id DESC;", (email,))
-        bots = cur.fetchall()
-        return {"status": "success", "bots": bots}
-    except Exception as e:
-        logger.error(f"Error obtaining bots del usuario: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
-    finally:
-        if 'cur' in locals(): cur.close()
-        if 'conn' in locals(): conn.close()
+        /* Flechas elegantes de navegación */
+        .slider-arrow {
+            position: absolute;
+            top: 50%;
+            transform: translateY(-50%);
+            width: 40px;
+            height: 40px;
+            background: rgba(255, 255, 255, 0.9);
+            border: 1px solid #e2e8f0;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 18px;
+            cursor: pointer;
+            box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
+            z-index: 10;
+            transition: all 0.2s ease;
+            user-select: none;
+        }
+        .slider-arrow:hover {
+            background: #fff;
+            border-color: #0078FF;
+            color: #0078FF;
+            box-shadow: 0 10px 15px -3px rgba(0, 120, 255, 0.1);
+        }
+        .slider-arrow.left { left: -10px;
+        }
+        .slider-arrow.right { right: -10px;
+        }
 
-@app.post("/update-retell-bot")
-async def update_retell_bot_endpoint(request: Request):
-    try:
-        data = await request.json()
-        agent_id = data.get("agent_id")
-        nombre_negocio = data.get("nombre_negocio")
-        sector = data.get("sector")
-        servicios = data.get("servicios")
-        horario = data.get("horario")
-        zona = data.get("zona")
-        calendar_email = data.get("google_calendar_email")
-        asistente_nombre = data.get("asistente")
-        idioma = data.get("idioma", "es")
-        datos_reserva = data.get("informacion_cita", data.get("datos_reserva", "Nombre completo, Número de teléfono, Motivo de la cita"))
-        try:
-            duracion_cita = int(data.get("duracion_cita", 30))
-        except:
-            duracion_cita = 30
+        /* Ocultar flechas en móviles si se prefiere usar el gesto táctil nativo */
+        @media (max-width: 600px) {
+            .slider-arrow { display: none;
+        }
+        }
 
-        agent_info = retell_request("GET", f"/get-agent/{agent_id}")
-        if not agent_info:
-            raise HTTPException(status_code=404, detail="No se encontró el asistente en Retell AI")
+        .card { flex: 0 0 260px;
+            border: 2px solid #e2e8f0; border-radius: 16px;
+            background: #fff; scroll-snap-align: start;
+        }
+        .card.selected { border-color: #0078FF;
+            box-shadow: 0 10px 15px rgba(0,120,255,0.2);
+        }
 
-        llm_id = agent_info["response_engine"].get("llm_id")
-        if not llm_id:
-            raise HTTPException(status_code=400, detail="El agente no dispone de un motor LLM vinculado")
+        .video-wrapper { height: 160px; background: #000;
+            border-top-left-radius: 14px; border-top-right-radius: 14px; overflow: hidden;
+        }
+        video { width: 100%; height: 100%;
+            object-fit: cover;
+        }
 
-        nuevo_prompt = build_custom_prompt(nombre_negocio, sector, servicios, horario, zona, calendar_email, idioma, datos_reserva)
-        llm_update = retell_request("PATCH", f"/update-retell-llm/{llm_id}", {
-            "general_prompt": nuevo_prompt,
-            "general_tools": [{
-                "type": "custom",
-                "name": "book_appointment",
-                "description": "Agenda la cita en el calendario del negocio. Si el hueco está ocupado o falla, devolverá un error.",
-                "url": "https://retell-bot.onrender.com/book-appointment",
-                "method": "POST",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "calendar_email": {"type": "string"},
-                        "summary": {"type": "string"},
-                        "start_time": {"type": "string"},
-                        "end_time": {"type": "string"},
-                        "description": {"type": "string"},
-                        "datos_cliente_recolectados": {
-                            "type": "string",
-                            "description": "Todos los datos requeridos por el negocio que han sido recolectados conversacionalmente del cliente (ej: Nombre completo, Teléfono, etc.)"
-                        }
-                    },
-                    "required": ["calendar_email", "summary", "start_time", "end_time", "datos_cliente_recolectados"]
+        .card-info { padding: 15px;
+        }
+        .card-name { font-size: 18px; font-weight: bold; margin-bottom: 12px;
+        }
+
+        .btn-select { width: 100%; padding: 10px; border: 2px solid #0078FF; background: transparent;
+            color: #0078FF; border-radius: 8px; font-weight: bold; cursor: pointer; }
+        .card.selected .btn-select { background: #0078FF;
+            color: white; }
+
+        .form-container, .success-box, .instructions-box, .confirmation-box {
+            max-width: 500px;
+            margin: 25px auto; background: #fff; padding: 25px; border-radius: 16px; box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+        }
+        .form-control { width: 100%; padding: 12px; margin-bottom: 15px; border: 1px solid #cbd5e1;
+            border-radius: 8px; box-sizing: border-box; background-color: #fff; font-size: 14px; font-family: inherit; }
+        
+        .field-explanation { font-size: 12px; color: #64748b; line-height: 1.5; margin-top: -10px; margin-bottom: 15px; padding: 0 4px; }
+
+        button {
+            width: 100%;
+            padding: 14px; font-size: 16px; font-weight: bold; border: none; border-radius: 8px; cursor: pointer; margin-top: 10px;
+            transition: all 0.3s;
+        }
+        .btn-submit { background: #0078FF; color: white;
+        }
+        .btn-connect { background: #34A853; color: white;
+        }
+        .btn-confirm { background: #137333; color: white;
+        }
+        .btn-pay { background: #FF9900; color: white; font-size: 18px;
+            text-shadow: 0 1px 2px rgba(0,0,0,0.2); }
+
+        button:disabled {
+            opacity: 0.85;
+            cursor: not-allowed;
+        }
+        .btn-loading {
+            background: #64748b !important;
+        }
+
+        .success-box { border: 2px solid #25D366; display: none;
+        }
+        .instructions-box { border: 2px solid #4285F4; display: none;
+        }
+        .confirmation-box { border: 2px solid #137333; display: none;
+        }
+        .error-box { border: 2px solid #ea4335; background: #fce8e6; display: none;
+        }
+    </style>
+</head>
+<body>
+
+    <div id="preloader">
+        <div class="loader-content">
+            <div class="spinner"></div>
+            <div class="loader-text">Cargando creador de asistentes...</div>
+        </div>
+    </div>
+
+    <div id="flujo-principal">
+        <h2>Elige la voz de tu asistente</h2>
+        <p class="subtitle">Desliza a la derecha, escucha las muestras de audio y selecciona tu favorito</p>
+
+        <div class="slider-wrapper-rel">
+            <div class="slider-arrow left" onclick="desplazarSlider(-275)">❮</div>
+            <div class="slider-arrow right" onclick="desplazarSlider(275)">❯</div>
+
+            <div class="slider-container" id="voces-slider">
+                <div class="card" data-voice="Cimo"><div class="video-wrapper"><video controls preload="metadata" playsinline><source src="https://video.wixstatic.com/video/a23405_aeaa8ab0b44f45d7a743cec6f4c52d71/144p/mp4/file.mp4" type="video/mp4"></video></div><div class="card-info"><div class="card-name">Cimo</div><button class="btn-select" onclick="seleccionarAsistente(this)">Seleccionar</button></div></div>
+                <div class="card" data-voice="Brynne"><div class="video-wrapper"><video controls preload="metadata" playsinline><source src="https://video.wixstatic.com/video/a23405_8d7463b0d217475b854d4348b73225f5/720p/mp4/file.mp4" type="video/mp4"></video></div><div class="card-info"><div class="card-name">Brynne</div><button class="btn-select" onclick="seleccionarAsistente(this)">Seleccionar</button></div></div>
+                <div class="card" data-voice="Chloe"><div class="video-wrapper"><video controls preload="metadata" playsinline><source src="https://video.wixstatic.com/video/a23405_6dee4ac9168044ca8d33ed61d2e1c82d/480p/mp4/file.mp4" type="video/mp4"></video></div><div class="card-info"><div class="card-name">Chloe</div><button class="btn-select" onclick="seleccionarAsistente(this)">Seleccionar</button></div></div>
+                <div class="card" data-voice="Kate"><div class="video-wrapper"><video controls preload="metadata" playsinline><source src="https://video.wixstatic.com/video/a23405_3b57c0423f3946c09256f7a7da0f7e12/144p/mp4/file.mp4" type="video/mp4"></video></div><div class="card-info"><div class="card-name">Kate</div><button class="btn-select" onclick="seleccionarAsistente(this)">Seleccionar</button></div></div>
+                <div class="card" data-voice="Grace"><div class="video-wrapper"><video controls preload="metadata" playsinline><source src="https://video.wixstatic.com/video/a23405_42cd8b8b69054fa48ee2f17a2fb14f07/144p/mp4/file.mp4" type="video/mp4"></video></div><div class="card-info"><div class="card-name">Grace</div><button class="btn-select" onclick="seleccionarAsistente(this)">Seleccionar</button></div></div>
+                <div class="card" data-voice="Leland"><div class="video-wrapper"><video controls preload="metadata" playsinline><source src="https://video.wixstatic.com/video/a23405_56d5f8b0f9ea471194e84b6ca9dac329/720p/mp4/file.mp4" type="video/mp4"></video></div><div class="card-info"><div class="card-name">Leland</div><button class="btn-select" onclick="seleccionarAsistente(this)">Seleccionar</button></div></div>
+                <div class="card" data-voice="Marissa"><div class="video-wrapper"><video controls preload="metadata" playsinline><source src="https://video.wixstatic.com/video/a23405_41447efa9e474ae89bd52134a2f6e5fa/480p/mp4/file.mp4" type="video/mp4"></video></div><div class="card-info"><div class="card-name">Marissa</div><button class="btn-select" onclick="seleccionarAsistente(this)">Seleccionar</button></div></div>
+                <div class="card" data-voice="Lily"><div class="video-wrapper"><video controls preload="metadata" playsinline><source src="https://video.wixstatic.com/video/a23405_2a8ec92d24a44bfe93ab905b79a2bbf8/720p/mp4/file.mp4" type="video/mp4"></video></div><div class="card-info"><div class="card-name">Lily</div><button class="btn-select" onclick="seleccionarAsistente(this)">Seleccionar</button></div></div>
+                <div class="card" data-voice="Della"><div class="video-wrapper"><video controls preload="metadata" playsinline><source src="https://video.wixstatic.com/video/a23405_36d8c455c4a145618063be0974b049d9/720p/mp4/file.mp4" type="video/mp4"></video></div><div class="card-info"><div class="card-name">Della</div><button class="btn-select" onclick="seleccionarAsistente(this)">Seleccionar</button></div></div>
+                <div class="card" data-voice="Nico"><div class="video-wrapper"><video controls preload="metadata" playsinline><source src="https://video.wixstatic.com/video/a23405_245713f3bfed47bb980ea4a93a5f96ea/720p/mp4/file.mp4" type="video/mp4"></video></div><div class="card-info"><div class="card-name">Nico</div><button class="btn-select" onclick="seleccionarAsistente(this)">Seleccionar</button></div></div>
+                <div class="card" data-voice="Rita"><div class="video-wrapper"><video controls preload="metadata" playsinline><source src="https://video.wixstatic.com/video/a23405_1e7c8a61b2f4471cbf7a9508519e4d99/720p/mp4/file.mp4" type="video/mp4"></video></div><div class="card-info"><div class="card-name">Rita</div><button class="btn-select" onclick="seleccionarAsistente(this)">Seleccionar</button></div></div>
+                <div class="card" data-voice="Meritt"><div class="video-wrapper"><video controls preload="metadata" playsinline><source src="https://video.wixstatic.com/video/a23405_292b27688f1548719b78bc144aca0083/720p/mp4/file.mp4" type="video/mp4"></video></div><div class="card-info"><div class="card-name">Meritt</div><button class="btn-select" onclick="seleccionarAsistente(this)">Seleccionar</button></div></div>
+                <div class="card" data-voice="Willa"><div class="video-wrapper"><video controls preload="metadata" playsinline><source src="https://video.wixstatic.com/video/a23405_0b4ec9d8dc8f417c9394be7d35740b90/720p/mp4/file.mp4" type="video/mp4"></video></div><div class="card-info"><div class="card-name">Willa</div><button class="btn-select" onclick="seleccionarAsistente(this)">Seleccionar</button></div></div>
+                <div class="card" data-voice="Maren"><div class="video-wrapper"><video controls preload="metadata" playsinline><source src="https://video.wixstatic.com/video/a23405_4590f73dfb384b8f830bba9cc0102429/720p/mp4/file.mp4" type="video/mp4"></video></div><div class="card-info"><div class="card-name">Maren</div><button class="btn-select" onclick="seleccionarAsistente(this)">Seleccionar</button></div></div>
+                <div class="card" data-voice="Tasmin"><div class="video-wrapper"><video controls preload="metadata" playsinline><source src="https://video.wixstatic.com/video/a23405_a2cf5a18d0544511b21f47de7f960267/720p/mp4/file.mp4" type="video/mp4"></video></div><div class="card-info"><div class="card-name">Tasmin</div><button class="btn-select" onclick="seleccionarAsistente(this)">Seleccionar</button></div></div>
+                <div class="card" data-voice="Ashley"><div class="video-wrapper"><video controls preload="metadata" playsinline><source src="https://video.wixstatic.com/video/a23405_d75c49a573a94294a282f5f7c170731c/720p/mp4/file.mp4" type="video/mp4"></video></div><div class="card-info"><div class="card-name">Ashley</div><button class="btn-select" onclick="seleccionarAsistente(this)">Seleccionar</button></div></div>
+                <div class="card" data-voice="Andrea"><div class="video-wrapper"><video controls preload="metadata" playsinline><source src="https://video.wixstatic.com/video/a23405_d058051cdf3045448cfcb9c06b5f49e3/720p/mp4/file.mp4" type="video/mp4"></video></div><div class="card-info"><div class="card-name">Andrea</div><button class="btn-select" onclick="seleccionarAsistente(this)">Seleccionar</button></div></div>
+                <div class="card" data-voice="Claudia"><div class="video-wrapper"><video controls preload="metadata" playsinline><source src="https://video.wixstatic.com/video/a23405_03c20ace01274d4590fcfa22d79c310a/720p/mp4/file.mp4" type="video/mp4"></video></div><div class="card-info"><div class="card-name">Claudia</div><button class="btn-select" onclick="seleccionarAsistente(this)">Seleccionar</button></div></div>
+                <div class="card" data-voice="Gaby"><div class="video-wrapper"><video controls preload="metadata" playsinline><source src="https://video.wixstatic.com/video/a23405_13c4419d5ee641e88733cf3d23157f4e/720p/mp4/file.mp4" type="video/mp4"></video></div><div class="card-info"><div class="card-name">Gaby</div><button class="btn-select" onclick="seleccionarAsistente(this)">Seleccionar</button></div></div>
+                <div class="card" data-voice="Alejandro"><div class="video-wrapper"><video controls preload="metadata" playsinline><source src="https://video.wixstatic.com/video/a23405_86f94777baee49a1b2e30f486359fc56/720p/mp4/file.mp4" type="video/mp4"></video></div><div class="card-info"><div class="card-name">Alejandro</div><button class="btn-select" onclick="seleccionarAsistente(this)">Seleccionar</button></div></div>
+                <div class="card" data-voice="Sloane"><div class="video-wrapper"><video controls preload="metadata" playsinline><source src="https://video.wixstatic.com/video/a23405_1bdc2297bbc74cf4801f939260e1e941/720p/mp4/file.mp4" type="video/mp4"></video></div><div class="card-info"><div class="card-name">Sloane</div><button class="btn-select" onclick="seleccionarAsistente(this)">Seleccionar</button></div></div>
+            </div>
+        </div>
+
+        <div class="form-container">
+            <h3>Datos del Negocio</h3>
+            <input type="text" id="nombre_negocio" class="form-control" placeholder="Nombre del Negocio *">
+            <input type="text" id="sector" class="form-control" placeholder="Sector / Tipo de Negocio *">
+            <input type="text" id="servicios" class="form-control" placeholder="Productos y servicios *">
+            <p class="field-explanation">Explica detalladamente todos los productos y servicios que ofreces. El asistente negará que tu negocio ofrezca cualquier cosa que no esté escrita explícitamente aquí, por lo que debes poner información completa.</p>
+            <input type="text" id="horario" class="form-control" placeholder="Separación mínima ente dos citas que permitiremos reservar *">
+            <input type="text" id="zona" class="form-control" placeholder="Zona de Servicio *">
+            
+            <select id="idioma" class="form-control">
+                <option value="" disabled selected>Idioma del Asistente *</option>
+                <option value="es">Español</option>
+                <option value="en">Inglés</option>
+            </select>
+
+            <textarea id="informacion_cita" class="form-control" rows="2" placeholder="Información que pedirá el agente para reservar cita *"></textarea>
+            
+            <input type="email" id="google_calendar_email" class="form-control" placeholder="Email de tu Google Calendar *">
+
+            <button id="btn-crear" onclick="procesarEnvio()" class="btn-submit">Crear Asistente Inteligente</button>
+        </div>
+    </div>
+
+    <div id="success-box" class="success-box">
+        <h3>¡Tu asistente está listo! 🎉</h3>
+        <p><strong>Número asignado:</strong></p>
+        <div id="telefono-display" style="font-size:32px; font-weight:bold; color:#25D366; margin:15px 0; text-align:center;"></div>
+        <p style="color:#334155; line-height:1.5;">
+            Este número tiene <strong>10 minutos gratuitos</strong> para que pruebes hablar con tu asistente.<br><br>
+            Una vez realices el pago, se activará de forma permanente.
+        </p>
+        <button id="btn-conectar" onclick="mostrarInstrucciones()" class="btn-connect">🔗 Conectar con Google Calendar</button>
+    </div>
+
+    <div id="instructions-box" class="instructions-box">
+        <h3>Cómo compartir tu calendario con Dansu</h3>
+        <p><strong>Email que debes añadir:</strong></p>
+        <p style="background:#f1f3f4; padding:12px; border-radius:8px; font-family:monospace; word-break:break-all; text-align:center; font-size:15px;">
+            asistente-virtual@asistente-virtual-500413.iam.gserviceaccount.com
+        </p>
+        <ol style="text-align:left; line-height:1.8; font-size:15px;">
+            <li>Abre <a href="https://calendar.google.com" target="_blank">Google Calendar</a></li>
+            <li>En la parte izquierda, haz clic en <strong>"Mis calendarios"</strong></li>
+            <li>Busca el calendario donde quieres recibir las citas, haz clic en los <strong>tres puntos ⋮</strong></li>
+            <li>Selecciona <strong>"Configurar y compartir"</strong></li>
+            <li>Baja hasta la sección <strong>"Compartido con"</strong></li>
+            <li>Haz clic en <strong>"Añadir personas y grupos"</strong></li>
+            <li>Pega el email de arriba</li>
+            <li>Selecciona el permiso <strong>"Hacer cambios y gestionar el uso compartido"</strong></li>
+            <li>Pulsa <strong>"Enviar"</strong></li>
+        </ol>
+        <button id="btn-ya-compartido" onclick="confirmarCompartido()" class="btn-confirm">✅ Ya he compartido el calendario</button>
+    </div>
+
+    <div id="confirmation-box" class="confirmation-box">
+        <div id="success-message" style="display:none; text-align:center;">
+            <p style="color:#137333; font-size:18px; font-weight:bold;">✅ Conexión verificada correctamente</p>
+            <p style="margin:20px 0;">Ahora solo falta activar tu asistente de forma permanente.</p>
+            <button onclick="ejecutarFlujoPago()" class="btn-pay">💳 Realizar Pago y Activar Permanentemente</button>
+        </div>
+        <div id="error-message" style="display:none;" class="error-box">
+            <p><strong>❌ No se detectó el acceso</strong></p>
+            <p>Revisa que hayas seguido todos los pasos y hayas dado los permisos correctos.</p>
+            <button onclick="reintentarConexion()" style="background:#ea4335; color:white; width:100%; padding:12px; border:none; border-radius:8px;">Volver a intentarlo</button>
+        </div>
+    </div>
+
+    <script>
+        let asistenteSeleccionado = null;
+        let currentCalendarEmail = "";
+
+        // Función para mover el slider con las flechas
+        function desplazarSlider(desplazamiento) {
+            const slider = document.getElementById('voces-slider');
+            slider.scrollBy({ left: desplazamiento, behavior: 'smooth' });
+        }
+
+        function seleccionarAsistente(button) {
+            document.querySelectorAll('.card').forEach(c => c.classList.remove('selected'));
+            const card = button.closest('.card');
+            card.classList.add('selected');
+            asistenteSeleccionado = card.getAttribute('data-voice');
+        }
+
+        async function procesarEnvio() {
+            const btn = document.getElementById('btn-crear');
+            if (!asistenteSeleccionado) return alert("Por favor, selecciona una voz antes de continuar.");
+
+            const payload = {
+                asistente: asistenteSeleccionado,
+                nombre_negocio: document.getElementById('nombre_negocio').value.trim(),
+                sector: document.getElementById('sector').value.trim(),
+                servicios: document.getElementById('servicios').value.trim(),
+                horario: document.getElementById('horario').value.trim(),
+                zona: document.getElementById('zona').value.trim(),
+                idioma: document.getElementById('idioma').value,
+                informacion_cita: document.getElementById('informacion_cita').value.trim(),
+                google_calendar_email: document.getElementById('google_calendar_email').value.trim()
+            };
+
+            // Validación de que ningún campo esté vacío
+            if (Object.values(payload).some(v => !v)) return alert("Completa todos los campos");
+            // Estado de carga
+            btn.disabled = true;
+            btn.classList.add('btn-loading');
+            btn.innerHTML = 'Creando asistente<span style="margin-left:8px;">⏳</span>';
+
+            try {
+                const res = await fetch("https://retell-bot.onrender.com/create-retell-bot", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify(payload)
+                });
+
+                const data = await res.json();
+                if (data.status === "success") {
+                    currentCalendarEmail = payload.google_calendar_email;
+                    document.getElementById('telefono-display').innerText = data.phone_number || "Número no asignado";
+                    document.getElementById('success-box').style.display = 'block';
+                    document.getElementById('success-box').scrollIntoView({ behavior: 'smooth' });
+                } else {
+                    alert("Error del servidor: " + (data.detail || "No se pudo crear"));
                 }
-            }]
-        })
-        if not llm_update:
-            raise HTTPException(status_code=500, detail="Error al sincronizar cambios y herramientas con Retell AI")
+            } catch (e) {
+                alert("Error al crear el asistente");
+            } finally {
+                // Restaurar botón si falla
+                btn.disabled = false;
+                btn.classList.remove('btn-loading');
+                btn.innerHTML = 'Crear Asistente Inteligente';
+            }
+        }
 
-        voice_id_tecnico = VOICE_MAPPING.get(asistente_nombre)
-        retell_language_mapping = {"es": "es-ES", "en": "en-US", "ca": "ca-ES"}
-        lang_retell = retell_language_mapping.get(str(idioma).strip().lower(), "es-ES")
-        agent_patch_data = {"language": lang_retell}
-        if voice_id_tecnico:
-            agent_patch_data["voice_id"] = voice_id_tecnico
-        retell_request("PATCH", f"/update-agent/{agent_id}", agent_patch_data)
-        if not voice_id_tecnico:
-            voice_id_tecnico = agent_info.get("voice_id")
+        function mostrarInstrucciones() {
+            const btn = document.getElementById('btn-conectar');
+            btn.disabled = true;
+            btn.style.background = '#64748b';
+            btn.innerHTML = 'Abriendo instrucciones...';
 
-        conn = get_db_connection()
-        cur = conn.cursor()
-        cur.execute("""
-            UPDATE asistentes SET nombre_negocio = %s, sector = %s, servicios = %s, horario = %s, duracion_cita = %s, zona = %s, google_calendar_email = %s, asistente = %s, idioma = %s, datos_reserva = %s WHERE agent_id = %s;
-        """, (nombre_negocio, sector, servicios, horario, duracion_cita, zona, calendar_email, asistente_nombre, idioma, datos_reserva, agent_id))
-        conn.commit()
-        return {"status": "success", "message": "Asistente actualizado con éxito"}
-    except Exception as e:
-        logger.error(f"Error en update-retell-bot: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
-    finally:
-        if 'cur' in locals(): cur.close()
-        if 'conn' in locals(): conn.close()
+            document.getElementById('instructions-box').style.display = 'block';
+            document.getElementById('instructions-box').scrollIntoView({ behavior: 'smooth' });
+        }
 
-@app.post("/delete-retell-bot")
-async def delete_retell_bot(request: Request):
-    try:
-        data = await request.json()
-        agent_id = data.get("agent_id")
-        agent_info = retell_request("GET", f"/get-agent/{agent_id}")
-        llm_id = None
-        if agent_info and "response_engine" in agent_info:
-            llm_id = agent_info["response_engine"].get("llm_id")
-        
-        phone_number = None
-        if agent_info:
-            phone_number = agent_info.get("phone_number")
+        function reintentarConexion() {
+            const btn = document.getElementById('btn-conectar');
+            btn.disabled = false;
+            btn.style.background = '#34A853';
+            btn.innerHTML = '🔗 Conectar con Google Calendar';
 
-        if phone_number:
-            try:
-                retell_request("PATCH", f"/update-phone-number/{phone_number}", {"inbound_agents": []})
-            except Exception as e_phone:
-                logger.warning(f"No se pudo desvincular el teléfono del agente {agent_id}: {e_phone}")
+            const btnCompartido = document.getElementById('btn-ya-compartido');
+            btnCompartido.disabled = false;
+            btnCompartido.style.background = '#137333';
+            btnCompartido.innerHTML = '✅ Ya he compartido el calendario';
 
-        retell_request("DELETE", f"/delete-agent/{agent_id}")
-        if llm_id:
-            retell_request("DELETE", f"/delete-retell-llm/{llm_id}")
-        else:
-            logger.warning(f"ℹ️ El agente {agent_id} ya no constaba en Retell. Purgando DB...")
+            document.getElementById('success-box').scrollIntoView({ behavior: 'smooth' });
+        }
 
-        conn = get_db_connection()
-        cur = conn.cursor()
-        cur.execute("DELETE FROM asistentes WHERE agent_id = %s;", (agent_id,))
-        conn.commit()
-        logger.info(f"✅ Registro limpiado con éxito en PostgreSQL para: {agent_id}")
-        return {"status": "success", "message": "Asistente eliminado de forma permanente."}
-    except Exception as e:
-        logger.error(f"❌ Error crítico en delete-retell-bot: {e}", exc_info=True)
-        try:
-            conn = get_db_connection()
-            cur = conn.cursor()
-            cur.execute("DELETE FROM asistentes WHERE agent_id = %s;", (agent_id,))
-            conn.commit()
-            return {"status": "success", "message": "Limpieza forzada en base de datos completada tras fallo crítico."}
-        except Exception as db_err:
-            logger.critical(f"Fallo total e irrecuperable en DB: {db_err}", exc_info=True)
-            raise HTTPException(status_code=500, detail=f"Fallo total e irrecuperable en DB: {str(db_err)}")
-    finally:
-        if 'cur' in locals(): cur.close()
-        if 'conn' in locals(): conn.close()
+        async function confirmarCompartido() {
+            const btn = document.getElementById('btn-ya-compartido');
+            btn.disabled = true;
+            btn.style.background = '#64748b';
+            btn.innerHTML = 'Verificando acceso<span style="margin-left:8px;">⏳</span>';
+            try {
+                const res = await fetch("https://retell-bot.onrender.com/verify-calendar-access", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ calendar_email: currentCalendarEmail })
+                });
+                if (res.ok) {
+                    document.getElementById('success-message').style.display = 'block';
+                    document.getElementById('error-message').style.display = 'none';
+                } else {
+                    throw new Error();
+                }
+            } catch (err) {
+                document.getElementById('success-message').style.display = 'none';
+                document.getElementById('error-message').style.display = 'block';
+            }
 
+            document.getElementById('confirmation-box').style.display = 'block';
+            document.getElementById('confirmation-box').scrollIntoView({ behavior: 'smooth' });
+        }
 
-# ==================== ENDPOINTS GENERALES ORIGINALES ====================
-@app.post("/book-appointment")
-@app.post("/book-appointment/")
-async def book_appointment(request: Request):
-    try:
-        raw_body = (await request.body()).decode("utf-8")
-        data = json.loads(raw_body) if raw_body else {}
-        args = data.get("args", data)
-        calendar_email = args.get("calendar_email")
-        start_time_str = args.get("start_time")
-        end_time_str = args.get("end_time")
-        descripcion_final = args.get("datos_cliente_recolectados", "")
-        if args.get("description"):
-            descripcion_final += " | " + args.get("description", "")
-        create_google_event(
-            calendar_email, args.get("summary", "Cita Agendada"), start_time_str, end_time_str, descripcion_final
-        )
-        return {"code": "SUCCESS", "message": "Cita agendada correctamente"}
-    except Exception as e:
-        logger.error(f"❌ ERROR EN BOOK-APPOINTMENT: {e}", exc_info=True)
-        return {"code": "ERROR", "message": str(e)}
+        function ejecutarFlujoPago() {
+            const nuevaVentana = window.open("about:blank", "_blank");
+            if (!nuevaVentana || nuevaVentana.closed || typeof nuevaVentana.closed == 'undefined') {
+                alert("Por favor, permite las ventanas emergentes para proceder al pago.");
+                return;
+            }
 
-@app.post("/verify-calendar-access")
-@app.post("/verify-calendar-access/")
-async def verify_calendar_access(request: Request):
-    try:
-        data = await request.json()
-        calendar_email = data.get("calendar_email")
-        create_google_event(
-            calendar_email, "🧪 Prueba de Acceso", (datetime.now(MADRID_TZ) + timedelta(days=30)).isoformat(), (datetime.now(MADRID_TZ) + timedelta(days=30, minutes=15)).isoformat(), "Prueba técnica", bypass_availability=True
-        )
-        return {"status": "success", "message": "Acceso verificado correctamente"}
-    except Exception as e:
-        logger.error(f"Error en verify-calendar-access: {e}", exc_info=True)
-        raise HTTPException(status_code=400, detail=str(e))
+            nuevaVentana.document.write(`
+                <html>
+                <head>
+                    <title>Cargando Pasarela de Pago...</title>
+                    <style>
+                        body {
+                            font-family: 'Segoe UI', sans-serif;
+                            display: flex; flex-direction: column; justify-content: center; align-items: center;
+                            height: 100vh; margin: 0; background-color: #ffffff; color: #333;
+                        }
+                        .loader {
+                            border: 4px solid #f3f3f3; border-top: 4px solid #0078FF;
+                            border-radius: 50%; width: 40px; height: 40px; animation: spin 1s linear infinite;
+                            margin-bottom: 20px;
+                        }
+                        @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+                    </style>
+                </head>
+                <body>
+                    <div class="loader"></div>
+                    <p>Redirigiendo de forma segura al paywall...</p>
+                </body>
+                </html>
+            `);
+            nuevaVentana.document.close();
 
-@app.post("/create-retell-bot")
-async def create_retell_bot_endpoint(request: Request):
-    try:
-        payload = await request.json()
-        data = payload if isinstance(payload, dict) else payload.get("data", payload)
-        voice_id = VOICE_MAPPING.get(data.get("asistente"), "openai-Alloy")
-        
-        idioma = data.get("idioma", "es")
-        datos_reserva = data.get("informacion_cita", data.get("datos_reserva", "Nombre completo, Número de teléfono, Motivo de la cita"))
-        
-        try:
-            duracion_cita = int(data.get("duracion_cita", 30))
-        except:
-            duracion_cita = 30
+            setTimeout(() => {
+                if (nuevaVentana) nuevaVentana.location.href = "https://buy.stripe.com/dRm14n67u4L8aZhayo9AA00";
+            }, 800);
+        }
 
-        return create_bot_for_client(
-            data.get("nombre_negocio"), data.get("sector"), data.get("servicios"),
-            data.get("horario"), data.get("zona"), voice_id, data.get("google_calendar_email"),
-            idioma, datos_reserva, duracion_cita
-        )
-    except Exception as e:
-        logger.error(f"Error en create-retell-bot: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.post("/request-magic-link")
-async def request_magic_link(request: Request):
-    try:
-        data = await request.json()
-        email = data.get("email", "").strip().lower()
-        if not email:
-            raise HTTPException(status_code=400, detail="Email requerido")
-        token = create_magic_token(email)
-        magic_link = f"https://retell-bot.onrender.com/login?token={token}"
-        enviado = send_magic_link_email(email, magic_link)
-        if enviado:
-            return {"status": "success", "message": "Enlace mágico enviado correctamente."}
-        else:
-            raise HTTPException(status_code=500, detail="Error al enviar el correo.")
-    except Exception as e:
-        logger.error(f"Error en request-magic-link: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+        // Preloader
+        window.addEventListener('load', () => {
+            const preloader = document.getElementById('preloader');
+            setTimeout(() => {
+                preloader.style.opacity = '0';
+                setTimeout(() => preloader.style.display = 'none', 600);
+            }, 700);
+        });
+    </script>
+</body>
+</html>

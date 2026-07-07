@@ -188,6 +188,29 @@ def create_google_event(calendar_id: str, summary: str, start_time: str, end_tim
         raise
 
 
+# ==================== ENDPOINT EXCLUSIVO PARA LA HERRAMIENTA RETELL (BOOK APPOINTMENT) ====================
+@app.post("/book-appointment")
+async def book_appointment(request: Request):
+    try:
+        data = await request.json()
+        calendar_email = data.get("calendar_email")
+        summary = data.get("summary", "Cita de Asistente Virtual")
+        start_time = data.get("start_time")
+        end_time = data.get("end_time")
+        datos_cliente = data.get("datos_cliente_recolectados", "")
+
+        logger.info(f"📅 Intento de reserva en {calendar_email} de {start_time} a {end_time}")
+        if not calendar_email or not start_time or not end_time:
+            return {"status": "error", "message": "Faltan parámetros requeridos (calendar_email, start_time o end_time)"}
+
+        description = f"Datos recolectados por el Asistente AI:\n\n{datos_cliente}"
+        event = create_google_event(calendar_email, summary, start_time, end_time, description)
+        return {"status": "success", "event_id": event.get("id"), "html_link": event.get("htmlLink")}
+    except Exception as e:
+        logger.error(f"⚠️ Error en endpoint book-appointment: {e}")
+        return {"status": "error", "message": str(e)}
+
+
 # ==================== VOICE MAPPING & RETELL UTILS ====================
 VOICE_MAPPING = {
     "Cimo": "11labs-Adrian", "Brynne": "11labs-Brynne", "Chloe": "11labs-Chloe",
@@ -547,7 +570,7 @@ async def update_retell_bot_endpoint(request: Request):
                         "description": {"type": "string"},
                         "datos_cliente_recolectados": {
                             "type": "string",
-                            "description": "Todos los datos RA de contacto o requeridos por el negocio que han sido recolectados conversacionalmente del cliente (ej: Nombre completo, Teléfono, etc.)"
+                            "description": "Todos los datos requeridos por el negocio que han sido recolectados conversacionalmente del cliente (ej: Nombre completo, Teléfono, etc.)"
                         }
                     },
                     "required": ["calendar_email", "summary", "start_time", "end_time", "datos_cliente_recolectados"]

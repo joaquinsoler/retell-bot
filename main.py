@@ -211,7 +211,7 @@ def retell_request(method: str, endpoint: str, json_data=None):
         return None
 
 
-# ==================== CONSTRUCTOR DEL PROMPT DINÁMICO CORREGIDO ====================
+# ==================== CONSTRUCTOR DEL PROMPT DINÁMICO REPARADO ====================
 def build_custom_prompt(nombre_negocio, sector, servicios, horario, zona, calendar_email, idioma="es", 
                         datos_reserva="Nombre completo, Número de teléfono, Motivo de la cita"):
     idiomas_legibles = {
@@ -247,8 +247,9 @@ Toda la llamada debe seguir este idioma de forma estricta.
 Responde con un tono comercial impecable explicando tus límites.
 
 **TU PERSONALIDAD Y TONO REQUERIDO:**
-- Habla con calidez, usando frases cortas y claras para mantener la comodidad. Sin embargo, para los números rige la regla de deletreado estricta que figura abajo.
-- Escucha activamente. Muéstrate siempre servicial, educado y con un trato comercial impecable.
+- Habla con calidez, usando frases cortas y claras para que la llamada sea cómoda.
+- Escucha activamente.
+- Muéstrate siempre servicial, educado y con un trato comercial impecable.
 
 **INFORMACIÓN OPERATIVA DEL NEGOCIO (Estrictamente real, nunca inventes datos):**
 - Ubicación / Zona de servicio: {zona}
@@ -261,14 +262,10 @@ Cuando un usuario esté interesado en reservar, avanza de manera conversacional,
 1. **Día y Hora:** Propón o confirma el momento de la cita según las preferencias del cliente.
 2. **Información Requerida del Cliente (OBLIGATORIA):** Para formalizar y confirmar la reserva, debes pedirle de forma obligatoria, educada y uno a uno los siguientes datos estipulados de manera estricta por el negocio: **{datos_reserva}**.
 No omitas ninguno. Insiste amablemente si el usuario olvida proveer alguno de ellos.
-Solo cuando tengas recopilados la Fecha/Hora y todos los datos requeridos extra listados en (**{datos_reserva}**) de forma exitosa, utiliza la herramienta `book_appointment`.
-Debes pasar obligatoriamente el email `{calendar_email}` en el campo `calendar_email`.
-En el campo `datos_cliente_recolectados`, debes estructurar la información usando palabras de texto para deletrear obligatoriamente cualquier número recopilado, tal como se especifica en las instrucciones del parámetro de la función.
 
-**REGLAS OBLIGATORIAS DE DICCIÓN Y PAUSAS NUMÉRICAS (MÁXIMA PRIORIDAD CRÍTICA):**
-- Tienes TERMINANTEMENTE PROHIBIDO escribir dígitos numéricos puros (0, 1, 2, 3, 4, 5, 6, 7, 8, 9) o los caracteres de dos puntos (:) o las siglas en mayúsculas "AM" o "PM". El uso de caracteres numéricos puros satura el canal TTS y provoca lecturas ininteligibles.
-- **DELETREADO DE TELÉFONO UNO A UNO:** Cada vez que confirmes, repitas o dictes un número de teléfono, debes escribir obligatoriamente cada dígito convertido en palabra y separado de forma estricta por un punto y un espacio (Ejemplo de salida de texto requerida: "seis. uno. uno. dos. dos. tres. tres. cuatro. cuatro."). El punto obliga de forma física al motor de voz a pausar tras decir cada número por separado, logrando una dicción humana impecable.
-- **DURACIÓN Y FORMATO DE HORAS:** Cada vez que confirmes o repitas una hora, escríbela con letras enteras y describe de forma conversacional explícita el tramo del día. NUNCA uses las siglas "AM" o "PM". En su lugar escribe: "de la tarde", "de la mañana" o "de la noche" (Ejemplo: En lugar de decir 16:30 o 4 PM, debes escribir exactamente "A las cuatro y media de la tarde" o "A las once en punto de la mañana"). Esto evitará que la última parte de la hora suene ininteligible o robótica.
+Solo cuando tengas recopilados la Fecha/Hora y todos los datos requeridos extra de forma exitosa, utiliza la herramienta `book_appointment`.
+Debes pasar obligatoriamente el email `{calendar_email}` en el campo `calendar_email`.
+Redacta de manera clara todos los datos que el cliente te ha proporcionado dentro del parámetro `description` para que queden registrados en la cita.
 
 **REGLAS CRÍTICAS DE CONTROL DE ERRORES (Capa de Privacidad de Desarrollo):**
 - NUNCA menciones nombres de variables, formatos de código, mensajes de servidores, ni términos técnicos de software en la llamada (como "error de JSON", "función", "endpoint", "404", "backend"). Está estrictamente prohibido.
@@ -300,13 +297,9 @@ def create_bot_for_client(nombre_negocio, sector, servicios, horario, zona, voic
                     "summary": {"type": "string"},
                     "start_time": {"type": "string"},
                     "end_time": {"type": "string"},
-                    "description": {"type": "string"},
-                    "datos_cliente_recolectados": {
-                        "type": "string",
-                        "description": "Todos los datos requeridos por el negocio que han sido recolectados. CRÍTICO: Cualquier número de teléfono u hora guardado debe transcribirse obligatoriamente deletreando sus dígitos uno a uno mediante palabras separadas por puntos (Ejemplo: 'seis. uno. uno. dos...'). Las horas deben indicar formalmente 'de la tarde' o 'de la mañana' en lugar de usar AM o PM. NUNCA utilices dígitos numéricos."
-                    }
+                    "description": {"type": "string"}
                 },
-                "required": ["calendar_email", "summary", "start_time", "end_time", "datos_cliente_recolectados"]
+                "required": ["calendar_email", "summary", "start_time", "end_time"]
             }
         }]
     })
@@ -548,13 +541,9 @@ async def update_retell_bot_endpoint(request: Request):
                         "summary": {"type": "string"},
                         "start_time": {"type": "string"},
                         "end_time": {"type": "string"},
-                        "description": {"type": "string"},
-                        "datos_cliente_recolectados": {
-                            "type": "string",
-                            "description": "Todos los datos requeridos por el negocio que han sido recolectados. CRÍTICO: Cualquier número de teléfono u hora guardado debe transcribirse obligatoriamente deletreando sus dígitos uno a uno mediante palabras separadas por puntos (Ejemplo: 'seis. uno. uno. dos...'). Las horas deben indicar formalmente 'de la tarde' o 'de la mañana' en lugar de usar AM o PM. NUNCA utilices dígitos numéricos."
-                        }
+                        "description": {"type": "string"}
                     },
-                    "required": ["calendar_email", "summary", "start_time", "end_time", "datos_cliente_recolectados"]
+                    "required": ["calendar_email", "summary", "start_time", "end_time"]
                 }
             }]
         })
@@ -664,50 +653,44 @@ async def book_appointment(request: Request):
 
         calendar_email = args.get("calendar_email")
         start_time_str = args.get("start_time")
+        end_time_str = args.get("end_time")
 
-        duracion_minutos = 30  # Fallback seguro
-        conn = get_db_connection()
-        cur = conn.cursor()
-        try:
-            cur.execute("SELECT duracion_cita FROM asistentes WHERE google_calendar_email = %s ORDER BY id DESC LIMIT 1;", (calendar_email,))
-            row = cur.fetchone()
-            if row and row.get("duracion_cita"):
-                duracion_minutos = int(row["duracion_cita"])
-        except Exception as e_db:
-            logger.error(f"⚠️ Error al consultar duración de cita en base de datos: {e_db}")
-        finally:
-            cur.close()
-            conn.close()
+        # Manteniendo la lógica de duración dinámica del lado del servidor para Google Calendar
+        if not end_time_str:
+            duracion_minutos = 30  
+            conn = get_db_connection()
+            cur = conn.cursor()
+            try:
+                cur.execute("SELECT duracion_cita FROM asistentes WHERE google_calendar_email = %s ORDER BY id DESC LIMIT 1;", (calendar_email,))
+                row = cur.fetchone()
+                if row and row.get("duracion_cita"):
+                    duracion_minutos = int(row["duracion_cita"])
+            except Exception as e_db:
+                logger.error(f"⚠️ Error al consultar duración de cita: {e_db}")
+            finally:
+                cur.close()
+                conn.close()
 
-        try:
-            clean_start = str(start_time_str).strip().replace(" ", "T")
-            if clean_start.endswith("Z"):
-                start_dt = datetime.fromisoformat(clean_start[:-1]).replace(tzinfo=ZoneInfo("UTC"))
-            else:
-                start_dt = datetime.fromisoformat(clean_start)
-                if start_dt.tzinfo is None:
-                    start_dt = start_dt.replace(tzinfo=MADRID_TZ)
-            
-            end_dt = start_dt + timedelta(minutes=duracion_minutos)
-            end_time_str = end_dt.isoformat()
-        except Exception as e_time:
-            logger.error(f"⚠️ Error calculando el tiempo exacto. Usando el de la IA: {e_time}")
-            end_time_str = args.get("end_time")  # Fallback al cálculo de la IA si el parseo falla
-
-        datos_cliente = args.get("datos_cliente_recolectados", "")
-        
-        descripcion_final = "Cita agendada automáticamente por Dansu AI.\n\n"
-        if datos_cliente:
-            descripcion_final += f"📋 DATOS DEL CLIENTE:\n{datos_cliente}"
-        else:
-            descripcion_final += args.get("description", "")
+            try:
+                clean_start = str(start_time_str).strip().replace(" ", "T")
+                if clean_start.endswith("Z"):
+                    start_dt = datetime.fromisoformat(clean_start[:-1]).replace(tzinfo=ZoneInfo("UTC"))
+                else:
+                    start_dt = datetime.fromisoformat(clean_start)
+                    if start_dt.tzinfo is None:
+                        start_dt = start_dt.replace(tzinfo=MADRID_TZ)
+                
+                end_dt = start_dt + timedelta(minutes=duracion_minutos)
+                end_time_str = end_dt.isoformat()
+            except Exception as e_time:
+                logger.error(f"⚠️ Error calculando end_time: {e_time}")
 
         create_google_event(
             calendar_email,
             args.get("summary"),
             start_time_str,
             end_time_str,
-            descripcion_final
+            args.get("description", "Cita agendada automáticamente por Dansu AI.")
         )
         return {"code": "SUCCESS", "message": "Cita agendada correctamente"}
     except Exception as e:

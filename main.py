@@ -122,6 +122,7 @@ def ensure_calendar_access(calendar_id: str):
             logger.info(f"ℹ️ Ya suscrito: {calendar_id}")
         else:
             logger.error(f"⚠️ Error suscripción {e.status_code}: {e}")
+            raise e
 
 
 def normalize_to_madrid_iso(dt_str: str) -> str:
@@ -188,6 +189,22 @@ def create_google_event(calendar_id: str, summary: str, start_time: str, end_tim
         raise
 
 
+# ==================== ENDPOINT DE VERIFICACIÓN DE ACCESO AL CALENDARIO ====================
+@app.post("/verify-calendar-access")
+async def verify_calendar_access(request: Request):
+    try:
+        data = await request.json()
+        calendar_email = data.get("google_calendar_email")
+        logger.info(f"Verificando acceso a Google Calendar para: {calendar_email}")
+        if not calendar_email:
+            raise HTTPException(status_code=400, detail="Falta el campo google_calendar_email")
+        ensure_calendar_access(calendar_email)
+        return {"status": "success", "message": "Acceso verificado correctamente"}
+    except Exception as e:
+        logger.error(f"Error en verify-calendar-access: {e}", exc_info=True)
+        raise HTTPException(status_code=400, detail=str(e))
+
+
 # ==================== ENDPOINT DE LA HERRAMIENTA RETELL (BOOK APPOINTMENT) ====================
 @app.post("/book-appointment")
 async def book_appointment(request: Request):
@@ -233,10 +250,9 @@ def retell_request(method: str, endpoint: str, json_data=None):
         logger.error(f"❌ Error de comunicación con Retell: {e}", exc_info=True)
         return None
 
-# ==================== CONSTRUCTOR DEL PROMPT DINÁMICO ORIGINAL ESTABLE (REFORZADO) ====================
+# ==================== CONSTRUCTOR DEL PROMPT DINÁMICO REFORZADO ====================
 def build_custom_prompt(nombre_negocio, sector, servicios, horario, zona, calendar_email, idioma="es", 
                         datos_reserva="Nombre completo, Número de teléfono, Motivo de la cita"):
-    # Mapeo conversacional claro del idioma configurado
     idiomas_legibles = {
         "es": "Español de España (es-ES)",
         "en": "Inglés (en-US)",
@@ -244,10 +260,9 @@ def build_custom_prompt(nombre_negocio, sector, servicios, horario, zona, calend
     }
     idioma_atencion = idiomas_legibles.get(str(idioma).strip().lower(), "Español de España (es-ES)")
 
-    # Captura dinámica del tiempo preciso en la zona del negocio (España/Madrid) en el momento del envío
+    # Captura dinámica del tiempo preciso en Madrid
     ahora_madrid = datetime.now(MADRID_TZ)
     
-    # Formateamos los días de la semana y meses de forma explícita y clara en castellano
     dias_semana = {0: "Lunes", 1: "Martes", 2: "Miércoles", 3: "Jueves", 4: "Viernes", 5: "Sábado", 6: "Domingo"}
     meses_año = {1: "Enero", 2: "Febrero", 3: "Marzo", 4: "Abril", 5: "Mayo", 6: "Junio", 7: "Julio", 8: "Agosto", 9: "Septiembre", 10: "Octubre", 11: "Noviembre", 12: "Diciembre"}
     
@@ -260,10 +275,10 @@ Tu objetivo principal es atender a los clientes con la máxima amabilidad, empat
 **REFERENCIA TEMPORAL OBLIGATORIA (MUY IMPORTANTE):**
 - La fecha de hoy es: **{fecha_legible}**.
 - La hora actual es: **{hora_legible}** (Zona horaria: Europe/Madrid).
-Utiliza esta referencia exacta para interpretar de manera inteligente y matemáticamente precisa los términos relativos que use el usuario como "hoy", "mañana", "esta tarde", "ayer", o expresiones de semanas avanzadas como "el martes que viene", "el próximo lunes" o "la semana que viene". Calcula el día exacto basándote estrictamente en que hoy es {fecha_legible}.
+Utiliza esta referencia exacta para interpretar de manera inteligente y matemáticamente precisa los términos relativos que use el usuario como "hoy", "mañana", "esta tarde", o expresiones avanzadas como "el martes que viene", "el próximo lunes" o "la semana que viene". Calcula el día exacto basándote estrictamente en que hoy es {fecha_legible}.
 
 **REGLA CRÍTICA DE VALIDACIÓN DE FECHAS:**
-- Está TERMINANTEMENTE PROHIBIDO contradecir al usuario, corregirle el día de la semana o decirle frases conflictivas como "esa fecha no existe porque es jueves" o "estás equivocado". Si el usuario indica un día concreto que no cuadra con el calendario (por ejemplo: "el miércoles 8 de julio"), simplifica el proceso por completo: ignora la validación del nombre del día de la semana y limítate amable y directamente a pedir o confirmar únicamente el mes y el número del día (por ejemplo: "Perfecto, ¿te refieres al 8 de julio?"). Evita cualquier fricción.
+- Está TERMINANTEMENTE PROHIBIDO contradecir al usuario, decirle que la fecha no existe o frases como "esa fecha no existe porque es jueves". Si el usuario indica un día concreto que no cuadra con el calendario (por ejemplo: "el miércoles 8 de julio"), simplifica el proceso por completo: ignora el nombre del día de la semana y limítate amable y directamente a pedir o confirmar únicamente el mes y el número del día (por ejemplo: "Perfecto, ¿te refieres al 8 de julio?"). Evita cualquier fricción conversacional.
 
 **CONFIGURACIÓN OBLIGATORIA DE IDIOMA:**
 - Debes interactuar, responder, saludo y hablar COMPLETAMENTE en el idioma: **{idioma_atencion}**.
@@ -288,7 +303,7 @@ Escucha activamente.
 **FLUJO NATURAL PARA RECOGER DATOS Y AGENDAR CITA:**
 Cuando un usuario esté interesado en reservar, avanza de manera conversacional, preguntando los datos uno a uno (nunca todos de golpe en una sola frase):
 1. **Día y Hora:** Propón o confirma el momento de la cita según las preferencias del cliente (confirmando mes y número de día).
-2. **Información Requerida FIJA del Cliente (OBLIGATORIA SIEMPRE):** Para formalizar cualquier reserva, debes solicitar obligatoriamente de forma educada, prioritaria y una a una las siguientes credenciales de contacto básicas:
+2. **Información Requerida FIJA del Cliente (OBLIGATORIA SIEMPRE):** Para formalizar cualquier reserva, debes solicitar obligatoriamente de forma educada, prioritaria y una a una los siguientes campos fijos:
    - **Nombre completo**
    - **Número de teléfono**
 3. **Información Adicional Requerida por el Negocio:** Una vez recopilados los datos fijos anteriores, procede a solicitar de manera natural la información complementaria configurada dinámicamente en esta variable: **{datos_reserva}**.
@@ -600,9 +615,9 @@ async def update_retell_bot_endpoint(request: Request):
         """, (nombre_negocio, sector, servicios, horario, duracion_cita, zona, calendar_email, voice_id_tecnico, idioma, datos_reserva, agent_id))
         conn.commit()
         
-        return {"status": "success", "message": "Acceso verificado correctamente"}
+        return {"status": "success", "message": "Bot actualizado correctamente"}
     except Exception as e:
-        logger.error(f"Error en verify-calendar-access: {e}", exc_info=True)
+        logger.error(f"Error en update-retell-bot: {e}", exc_info=True)
         raise HTTPException(status_code=400, detail=str(e))
 
 

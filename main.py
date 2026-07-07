@@ -265,14 +265,14 @@ Solo cuando tengas recopilados la Fecha/Hora y todos los datos requeridos extra 
 Debes pasar obligatoriamente el email `{calendar_email}` en el campo `calendar_email`.
 En el campo `datos_cliente_recolectados`, debes estructurar la información usando palabras de texto para deletrear obligatoriamente cualquier número recopilado, tal como se especifica en las instrucciones del parámetro de la función.
 
-**REGLAS OBLIGATORIAS DE DICCIÓN Y FORMATEO ALFABÉTICO MASIVO (MÁXIMA PRIORIDAD):**
-- Tienes TERMINANTEMENTE PROHIBIDO escribir dígitos numéricos puros (0, 1, 2, 3, 4, 5, 6, 7, 8, 9) o símbolos de hora como el carácter de dos puntos (:) al interactuar con el cliente o al estructurar la llamada. El uso de caracteres numéricos puros satura el canal TTS y provoca lecturas erróneas.
-- Cada vez que confirmes, repitas o dictes un NÚMERO DE TELÉFONO, escríbelo en palabras completas separando cada dígito por comas (Ejemplo interno: "seis, uno, uno, dos, dos, tres, tres, cuatro, cuatro"). Las comas forzarán una pronunciación perfecta, pausada y fluida en el motor de voz.
-- Cada vez que confirmes o repitas una HORA, escríbela con letras enteras en formato conversacional descriptivo tradicional (Ejemplo interno: "las cuatro y media de la tarde" o "las once en punto de la mañana"). NUNCA uses representaciones en formato militar.
+**REGLAS OBLIGATORIAS DE DICCIÓN Y PAUSAS NUMÉRICAS (MÁXIMA PRIORIDAD CRÍTICA):**
+- Tienes TERMINANTEMENTE PROHIBIDO escribir dígitos numéricos puros (0, 1, 2, 3, 4, 5, 6, 7, 8, 9) o los caracteres de dos puntos (:) o las siglas en mayúsculas "AM" o "PM". El uso de caracteres numéricos puros satura el canal TTS y provoca lecturas ininteligibles.
+- **DELETREADO DE TELÉFONO UNO A UNO:** Cada vez que confirmes, repitas o dictes un número de teléfono, debes escribir obligatoriamente cada dígito convertido en palabra y separado de forma estricta por un punto y un espacio (Ejemplo de salida de texto requerida: "seis. uno. uno. dos. dos. tres. tres. cuatro. cuatro."). El punto obliga de forma física al motor de voz a pausar tras decir cada número por separado, logrando una dicción humana impecable.
+- **DURACIÓN Y FORMATO DE HORAS:** Cada vez que confirmes o repitas una hora, escríbela con letras enteras y describe de forma conversacional explícita el tramo del día. NUNCA uses las siglas "AM" o "PM". En su lugar escribe: "de la tarde", "de la mañana" o "de la noche" (Ejemplo: En lugar de decir 16:30 o 4 PM, debes escribir exactamente "A las cuatro y media de la tarde" o "A las once en punto de la mañana"). Esto evitará que la última parte de la hora suene ininteligible o robótica.
 
 **REGLAS CRÍTICAS DE CONTROL DE ERRORES (Capa de Privacidad de Desarrollo):**
 - NUNCA menciones nombres de variables, formatos de código, mensajes de servidores, ni términos técnicos de software en la llamada (como "error de JSON", "función", "endpoint", "404", "backend"). Está estrictamente prohibido.
-- Si la herramienta `book_appointment` te devuelve un fallo, un error del sistema o indica que el hueco está ocupado, actúa como un comercial humano resolutivo y amable. Offréce opciones alternativas de inmediato.
+- Si la herramienta `book_appointment` te devuelve un fallo, un error del sistema o indica que el hueco está ocupado, actúa como un comercial humano resolutivo y amable. Ofrece opciones alternativas de inmediato.
 """
 
 
@@ -303,7 +303,7 @@ def create_bot_for_client(nombre_negocio, sector, servicios, horario, zona, voic
                     "description": {"type": "string"},
                     "datos_cliente_recolectados": {
                         "type": "string",
-                        "description": "Todos los datos requeridos por el negocio que han sido recolectados. CRÍTICO: Cualquier número de teléfono u hora guardado en esta cadena de texto debe transcribirse OBLIGATORIAMENTE deletreando sus dígitos en palabras legibles separadas por comas (Ejemplo: 'seis, ocho, dos, uno...'). NUNCA uses dígitos numéricos puros aquí."
+                        "description": "Todos los datos requeridos por el negocio que han sido recolectados. CRÍTICO: Cualquier número de teléfono u hora guardado debe transcribirse obligatoriamente deletreando sus dígitos uno a uno mediante palabras separadas por puntos (Ejemplo: 'seis. uno. uno. dos...'). Las horas deben indicar formalmente 'de la tarde' o 'de la mañana' en lugar de usar AM o PM. NUNCA utilices dígitos numéricos."
                     }
                 },
                 "required": ["calendar_email", "summary", "start_time", "end_time", "datos_cliente_recolectados"]
@@ -551,7 +551,7 @@ async def update_retell_bot_endpoint(request: Request):
                         "description": {"type": "string"},
                         "datos_cliente_recolectados": {
                             "type": "string",
-                            "description": "Todos los datos requeridos por el negocio que han sido recolectados. CRÍTICO: Cualquier número de teléfono u hora guardado en esta cadena de texto debe transcribirse OBLIGATORIAMENTE deletreando sus dígitos en palabras legibles separadas por comas (Ejemplo: 'seis, ocho, dos, uno...'). NUNCA uses dígitos numéricos puros aquí."
+                            "description": "Todos los datos requeridos por el negocio que han sido recolectados. CRÍTICO: Cualquier número de teléfono u hora guardado debe transcribirse obligatoriamente deletreando sus dígitos uno a uno mediante palabras separadas por puntos (Ejemplo: 'seis. uno. uno. dos...'). Las horas deben indicar formalmente 'de la tarde' o 'de la mañana' en lugar de usar AM o PM. NUNCA utilices dígitos numéricos."
                         }
                     },
                     "required": ["calendar_email", "summary", "start_time", "end_time", "datos_cliente_recolectados"]

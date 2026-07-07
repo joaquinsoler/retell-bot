@@ -172,7 +172,6 @@ def create_google_event(calendar_id: str, summary: str, start_time: str, end_tim
         iso_end = normalize_to_madrid_iso(end_time)
         if not bypass_availability and not check_availability(calendar_id, iso_start, iso_end):
             raise Exception("El horario seleccionado ya no está disponible.")
-        service = get_db_connection # Fallback o uso directo del service de calendar
         service = get_calendar_service()
         event = {
             'summary': summary[:100],
@@ -211,10 +210,10 @@ def retell_request(method: str, endpoint: str, json_data=None):
         logger.error(f"❌ Error de comunicación con Retell: {e}", exc_info=True)
         return None
 
+
 # ==================== CONSTRUCTOR DEL PROMPT DINÁMICO CORREGIDO ====================
 def build_custom_prompt(nombre_negocio, sector, servicios, horario, zona, calendar_email, idioma="es", 
                         datos_reserva="Nombre completo, Número de teléfono, Motivo de la cita"):
-    # Mapeo conversacional claro del idioma configurado
     idiomas_legibles = {
         "es": "Español de España (es-ES)",
         "en": "Inglés (en-US)",
@@ -222,10 +221,8 @@ def build_custom_prompt(nombre_negocio, sector, servicios, horario, zona, calend
     }
     idioma_atencion = idiomas_legibles.get(str(idioma).strip().lower(), "Español de España (es-ES)")
 
-    # Captura dinámica del tiempo preciso en la zona del negocio (España/Madrid) en el momento del envío
     ahora_madrid = datetime.now(MADRID_TZ)
     
-    # Formateamos los días de la semana y meses de forma explícita y clara en castellano
     dias_semana = {0: "Lunes", 1: "Martes", 2: "Miércoles", 3: "Jueves", 4: "Viernes", 5: "Sábado", 6: "Domingo"}
     meses_año = {1: "Enero", 2: "Febrero", 3: "Marzo", 4: "Abril", 5: "Mayo", 6: "Junio", 7: "Julio", 8: "Agosto", 9: "Septiembre", 10: "Octubre", 11: "Noviembre", 12: "Diciembre"}
     
@@ -233,7 +230,7 @@ def build_custom_prompt(nombre_negocio, sector, servicios, horario, zona, calend
     hora_legible = ahora_madrid.strftime("%H:%M")
 
     return f"""Eres la voz y el asistente virtual exclusivo de {nombre_negocio}, un negocio enfocado en el sector de {sector}.
-Tu objetivo principal es atender a los clientes con la máxima amabilidad, empatía y profesionalidad, offering una conversación fluida, natural y cercana.
+Tu objetivo principal es atender a los clientes con la máxima amabilidad, empatía y profesionalidad, ofreciendo una conversación fluida, natural y cercana.
 
 **REFERENCIA TEMPORAL OBLIGATORIA (MUY IMPORTANTE):**
 - La fecha de hoy es: **{fecha_legible}**.
@@ -241,18 +238,17 @@ Tu objetivo principal es atender a los clientes con la máxima amabilidad, empat
 Utiliza esta referencia exacta para interpretar correctamente términos relativos que use el usuario como "hoy", "mañana", "esta tarde", "el próximo lunes" o "ayer", calculando los días en función de este marco.
 
 **CONFIGURACIÓN OBLIGATORIA DE IDIOMA:**
-- Debes interactuar, responder, saludo y hablar COMPLETAMENTE en el idioma: **{idioma_atencion}**.
+- Debes interactuar, responder, saludar y hablar COMPLETAMENTE en el idioma: **{idioma_atencion}**.
 Toda la llamada debe seguir este idioma de forma estricta.
 
 **ALCANCE DE TUS FUNCIONES (Muy Importante):**
-- Tus únicas capacidades y tareas autorizadas son: **dar información detallada sobre el negocio** and **agendar nuevas citas**.
+- Tus únicas capacidades y tareas autorizadas son: **dar información detallada sobre el negocio** y **agendar nuevas citas**.
 - Si el usuario te solicita cancelar una cita, eliminar una reserva existente, modificar un horario ya agendado o realizar cualquier otra gestión administrativa, debes aclararle de forma muy educada que no tienes acceso para realizar esa acción.
-Responde con un tono comercial impecable explicando tus límites. (Ej: *"Actualmente solo puedo facilitarte información y agendar nuevas citas en el sistema. Para cancelar o modificar una reserva que ya tienes, te sugiero ponerte en contacto directamente con nuestro equipo técnico o de atención humana a través de nuestros canales habituales, y ellos lo resolverán encantados."*).
+Responde con un tono comercial impecable explicando tus límites.
 
 **TU PERSONALIDAD Y TONO REQUERIDO:**
-- Habla con calidez, usando frases cortas y claras para que la llamada sea cómoda. Sin embargo, cuando manejes o dictes datos numéricos, respeta las reglas de dicción específicas indicadas más abajo para que se entiendan a la perfección.
-- Escucha activamente.
-- Muéstrate siempre servicial, educado y con un trato comercial impecable.
+- Habla con calidez, usando frases cortas y claras para mantener la comodidad. Sin embargo, para los números rige la regla de deletreado estricta que figura abajo.
+- Escucha activamente. Muéstrate siempre servicial, educado y con un trato comercial impecable.
 
 **INFORMACIÓN OPERATIVA DEL NEGOCIO (Estrictamente real, nunca inventes datos):**
 - Ubicación / Zona de servicio: {zona}
@@ -267,19 +263,17 @@ Cuando un usuario esté interesado en reservar, avanza de manera conversacional,
 No omitas ninguno. Insiste amablemente si el usuario olvida proveer alguno de ellos.
 Solo cuando tengas recopilados la Fecha/Hora y todos los datos requeridos extra listados en (**{datos_reserva}**) de forma exitosa, utiliza la herramienta `book_appointment`.
 Debes pasar obligatoriamente el email `{calendar_email}` en el campo `calendar_email`.
-En el campo `datos_cliente_recolectados`, debes redactar de manera clara y estructurada los datos que el cliente te ha proporcionado en la conversación (por ejemplo: "Nombre: Juan Pérez, Teléfono: 611223344...").
+En el campo `datos_cliente_recolectados`, debes estructurar la información usando palabras de texto para deletrear obligatoriamente cualquier número recopilado, tal como se especifica en las instrucciones del parámetro de la función.
 
-**REGLAS OBLIGATORIAS DE DICCIÓN Y LECTURA NUMÉRICA (CRÍTICO PARA EL MOTOR DE VOZ):**
-- **FORMATO DE HORAS:** Cuando propongas, confirmes o repitas una hora, escríbela y dila SIEMPRE en formato de lenguaje natural descriptivo, NUNCA uses números pegados con dos puntos ni formato militar si puede confundir al sintetizador. Ejemplo: En lugar de escribir "16:30" o "17:00", escribe y di "A las cuatro y media de la tarde" o "A las cinco en punto de la tarde". Si es por la mañana, especifica "de la mañana". Esto garantiza que el motor de voz lo pronuncie con absoluta naturalidad humana.
-- **FORMATO DE TELÉFONOS:** Al leer, verificar o repetir un número de teléfono móvil o fijo, NO los digas todos de corrido como una cifra millonaria masiva. Escríbelos e nunciálos separando los dígitos por espacios o guiones cortos, o bien agrupados de dos en dos de forma pausada (Ej: para el número 611223344, debes escribirlo o procesarlo mentalmente como "6 1 1, 2 2, 3 3, 4 4" o "611, 22, 33, 44"). Esto evitará que la voz sufra micro-cortes, que se salte números o que lea el teléfono de forma atropellada.
-- **PRIORIDAD DE CONFIRMACIÓN:** Aunque la directriz general sea usar frases cortas, la lectura completa y exacta de un teléfono o una hora es una excepción absoluta: debe decirse sin cortes, con seguridad y de manera totalmente fluida.
+**REGLAS OBLIGATORIAS DE DICCIÓN Y FORMATEO ALFABÉTICO MASIVO (MÁXIMA PRIORIDAD):**
+- Tienes TERMINANTEMENTE PROHIBIDO escribir dígitos numéricos puros (0, 1, 2, 3, 4, 5, 6, 7, 8, 9) o símbolos de hora como el carácter de dos puntos (:) al interactuar con el cliente o al estructurar la llamada. El uso de caracteres numéricos puros satura el canal TTS y provoca lecturas erróneas.
+- Cada vez que confirmes, repitas o dictes un NÚMERO DE TELÉFONO, escríbelo en palabras completas separando cada dígito por comas (Ejemplo interno: "seis, uno, uno, dos, dos, tres, tres, cuatro, cuatro"). Las comas forzarán una pronunciación perfecta, pausada y fluida en el motor de voz.
+- Cada vez que confirmes o repitas una HORA, escríbela con letras enteras en formato conversacional descriptivo tradicional (Ejemplo interno: "las cuatro y media de la tarde" o "las once en punto de la mañana"). NUNCA uses representaciones en formato militar.
 
 **REGLAS CRÍTICAS DE CONTROL DE ERRORES (Capa de Privacidad de Desarrollo):**
-- NUNCA menciones nombres de variables, formatos de código, mensajes de servidores, ni términos técnicos de software en la llamada (como "error de JSON", "función", "endpoint", "404", "500", "backend", o "respuesta incorrecta"). Está estrictamente prohibido.
-- Si la herramienta `book_appointment` te devuelve un fallo, un error del sistema o indica que el hueco está ocupado, actúa como un comercial humano resolutivo y amable.
-Gestiona la situación diciendo algo como: 
-  *"Disculpa las molestias, parece que este horario concreto acaba de ocuparse o no está disponible en nuestra agenda en este instante. Déjame revisar... ¿Te vendría bien intentar en otro tramo horario o preferirías mirar otro día?"*
-- Si experimentas algún problema técnico interno con las herramientas, mantén la calma, discúlpate amablemente por la pequeña pausa y reconduce la llamada ofreciéndote a tomar nota manualmente o pedirle que lo intente en unos instantes, garantizando siempre una experiencia de atención al cliente excelente."""
+- NUNCA menciones nombres de variables, formatos de código, mensajes de servidores, ni términos técnicos de software en la llamada (como "error de JSON", "función", "endpoint", "404", "backend"). Está estrictamente prohibido.
+- Si la herramienta `book_appointment` te devuelve un fallo, un error del sistema o indica que el hueco está ocupado, actúa como un comercial humano resolutivo y amable. Offréce opciones alternativas de inmediato.
+"""
 
 
 # ==================== LÓGICA DE CREACIÓN ====================
@@ -309,7 +303,7 @@ def create_bot_for_client(nombre_negocio, sector, servicios, horario, zona, voic
                     "description": {"type": "string"},
                     "datos_cliente_recolectados": {
                         "type": "string",
-                        "description": "Todos los datos requeridos por el negocio que han sido recolectados conversacionalmente del cliente (ej: Nombre completo, Teléfono, etc.)"
+                        "description": "Todos los datos requeridos por el negocio que han sido recolectados. CRÍTICO: Cualquier número de teléfono u hora guardado en esta cadena de texto debe transcribirse OBLIGATORIAMENTE deletreando sus dígitos en palabras legibles separadas por comas (Ejemplo: 'seis, ocho, dos, uno...'). NUNCA uses dígitos numéricos puros aquí."
                     }
                 },
                 "required": ["calendar_email", "summary", "start_time", "end_time", "datos_cliente_recolectados"]
@@ -557,7 +551,7 @@ async def update_retell_bot_endpoint(request: Request):
                         "description": {"type": "string"},
                         "datos_cliente_recolectados": {
                             "type": "string",
-                            "description": "Todos los datos requeridos por el negocio que han sido recolectados conversacionalmente del cliente (ej: Nombre completo, Teléfono, etc.)"
+                            "description": "Todos los datos requeridos por el negocio que han sido recolectados. CRÍTICO: Cualquier número de teléfono u hora guardado en esta cadena de texto debe transcribirse OBLIGATORIAMENTE deletreando sus dígitos en palabras legibles separadas por comas (Ejemplo: 'seis, ocho, dos, uno...'). NUNCA uses dígitos numéricos puros aquí."
                         }
                     },
                     "required": ["calendar_email", "summary", "start_time", "end_time", "datos_cliente_recolectados"]
@@ -659,7 +653,7 @@ async def delete_retell_bot_endpoint(request: Request):
         if 'conn' in locals(): conn.close()
 
 
-# ==================== ENDPOINTS GENERALES ORIGINALES ====================
+# ==================== ENDPOINTS GENERALES ORIGINALES PRESERVADOS ====================
 @app.post("/book-appointment")
 @app.post("/book-appointment/")
 async def book_appointment(request: Request):
@@ -671,7 +665,6 @@ async def book_appointment(request: Request):
         calendar_email = args.get("calendar_email")
         start_time_str = args.get("start_time")
 
-        # Obtenemos la duración real asignada al bot buscando por su email de Google Calendar
         duracion_minutos = 30  # Fallback seguro
         conn = get_db_connection()
         cur = conn.cursor()
@@ -686,7 +679,6 @@ async def book_appointment(request: Request):
             cur.close()
             conn.close()
 
-        # Calculamos y forzamos el end_time exacto del lado del servidor usando la configuración de la DB
         try:
             clean_start = str(start_time_str).strip().replace(" ", "T")
             if clean_start.endswith("Z"):
@@ -702,10 +694,8 @@ async def book_appointment(request: Request):
             logger.error(f"⚠️ Error calculando el tiempo exacto. Usando el de la IA: {e_time}")
             end_time_str = args.get("end_time")  # Fallback al cálculo de la IA si el parseo falla
 
-        # Extraemos los datos structured que el bot recopiló del cliente
         datos_cliente = args.get("datos_cliente_recolectados", "")
         
-        # Formateamos la descripción del evento combinando la por defecto y los datos capturados en vivo
         descripcion_final = "Cita agendada automáticamente por Dansu AI.\n\n"
         if datos_cliente:
             descripcion_final += f"📋 DATOS DEL CLIENTE:\n{datos_cliente}"

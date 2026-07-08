@@ -415,12 +415,16 @@ def send_magic_link_email(email: str, magic_link: str):
 
 
 # ==================== ENDPOINTS DE ACCESO Y PANEL ====================
-@app.get("/login")
+@app.get("/login", response_class=HTMLResponse)
 async def login_endpoint(token: str, request: Request):
     email = verify_magic_token(token)
     if not email:
         logger.warning("Intento de acceso con Token caducado o corrupto.")
-        return "<html><body><h3>❌ El enlace es inválido o ha caducado. Por favor, solicita uno nuevo.</h3></body></html>"
+        return HTMLResponse(
+            content="<html><body><h3>❌ El enlace es inválido o ha caducado. Por favor, solicita uno nuevo.</h3></body></html>", 
+            status_code=400
+        )
+    
     client_ip = request.headers.get("x-forwarded-for", request.client.host).split(",")[0].strip()
     SESIONES_ACTIVAS[client_ip] = {
         "email": email,
@@ -428,7 +432,8 @@ async def login_endpoint(token: str, request: Request):
     }
     wix_url = "https://www.dansu.info/blank-4"
     logger.info(f"Redirección autorizada a Wix para IP {client_ip} vinculada al correo {email}")
-    return f"""
+    
+    html_content = f"""
     <html>
     <head><meta http-equiv="refresh" content="0;url={wix_url}"></head>
     <body style="font-family:sans-serif; text-align:center; padding-top:50px;">
@@ -436,26 +441,7 @@ async def login_endpoint(token: str, request: Request):
     </body>
     </html>
     """
-
-@app.get("/check-session")
-async def check_session(request: Request):
-    client_ip = request.headers.get("x-forwarded-for", request.client.host).split(",")[0].strip()
-    sesion = SESIONES_ACTIVAS.get(client_ip)
-    if not sesion:
-        return {"status": "no_session"}
-    if datetime.utcnow() > sesion["expira"]:
-        del SESIONES_ACTIVAS[client_ip]
-        logger.info(f"Sesión expirada por tiempo para la IP: {client_ip}")
-        return {"status": "no_session"}
-    email = sesion["email"]
-    del SESIONES_ACTIVAS[client_ip]  # Consumo de un solo uso por seguridad
-    try:
-        conn = get_db_connection()
-        cur = conn.cursor()
-        cur.execute("SELECT * FROM asistentes WHERE google_calendar_email = %s ORDER BY id DESC;", (email,))
-        bots = cur.fetchall()
-        logger.info(f"Sesión consumida correctamente para {email}. Cargados {len(bots)} bots.")
-        return {"status": "success", "email": email, "bots": bots}
+    return HTMLResponse(content=html_content, status_code=200)
     except Exception as e:
         logger.error(f"Error en base de datos durante check_session para {email}: {e}", exc_info=True)
         return {"status": "no_session"}

@@ -240,7 +240,7 @@ Utiliza esta referencia internamente para comprender de manera exacta términos 
 
 **CONFIGURACIÓN OBLIGATORIA DE IDIOMA:**
 - Debes interactuar, responder, saludar y hablar COMPLETAMENTE en el idioma: **{idioma_atencion}**.
-Toda la llamada debe seguir este idioma de forma estricta.
+Toda la llamada debe seguir este idioma de forma de estricta.
 
 **REGLAS CRÍTICAS DE PRONUNCIACIÓN DE VOZ (COMPORTAMIENTO HUMANO NATURAL):**
 1. **Manejo Absoluto de Horas (PROHIBIDO DECIR AM O PM):** Jamás pronuncies ni digas en voz alta las siglas "AM" o "PM". Transfórmalas siempre a lenguaje natural o formato de 24 horas. Por ejemplo, en lugar de decir "cinco p m" o "cinco a m", di de forma totalmente orgánica: *"las cinco de la tarde"*, *"las diez de la mañana"* o *"las diecisiete horas"*. 
@@ -498,6 +498,8 @@ async def update_retell_bot_endpoint(request: Request):
         asistente_nombre = data.get("asistente")
         idioma = data.get("idioma", "es")
         datos_reserva = data.get("informacion_cita", data.get("datos_reserva", "Nombre completo, Número de teléfono, Motivo de la cita"))
+        
+        # En edición capturamos duracion_cita como string directo sin alterarlo
         duracion_cita = str(data.get("duracion_cita", "30")).strip()
 
         agent_info = retell_request("GET", f"/get-agent/{agent_id}")
@@ -655,7 +657,7 @@ async def create_retell_bot_endpoint(request: Request):
         idioma = data.get("idioma", "es")
         datos_reserva = data.get("informacion_cita", data.get("datos_reserva", "Nombre completo, Número de teléfono, Motivo de la cita"))
         
-        # CORREGIDO: Ahora extraemos correctamente el valor del campo "duracion_cita" enviado por el frontend
+        # Sincronización fidedigna con la clave "duracion_cita" que ahora sí envía el formulario de creación
         duracion_cita = str(data.get("duracion_cita", data.get("duracion_cita_texto", "30"))).strip()
 
         return create_bot_for_client(

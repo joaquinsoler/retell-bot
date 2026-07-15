@@ -253,6 +253,10 @@ Tu objetivo principal es atender a los clientes con la máxima amabilidad, empat
 Utiliza esta referencia internamente para comprender de manera exacta términos como "hoy", "mañana", "esta tarde" o "el próximo martes".
 *REGLA CRÍTICA:* Queda terminantemente prohibido decirle al cliente frases explícitas informándole de estos metadatos temporales (como "recuerda que hoy es lunes tal" o "como son las tantas del día tal"). Esta información es confidencial y solo sirve para tus cálculos de calendario de fondo.
 
+**REGLA CRÍTICA DE FECHAS EN EL PASADO:**
+- Jamás propongas, sugieras ni aceptes agendar una cita para un día u hora que ya haya pasado en relación a la referencia temporal de hoy ({fecha_legible} a las {hora_legible}). 
+- Si el usuario te pide una hora o día que ya ha transcurrido (por ejemplo, te pide "las 9:00 de la mañana" cuando ya son las "14:00 de la tarde", o te pide el día de ayer), debes indicarle de manera muy educada que esa hora ya ha pasado y pedirle amablemente que seleccione un hueco futuro.
+
 **CONFIGURACIÓN OBLIGATORIA DE IDIOMA:**
 - Debes interactuar, responder, saludar y hablar COMPLETAMENTE en el idioma: **{idioma_atencion}**.
 Toda la llamada debe seguir este idioma de forma estricta.
@@ -281,8 +285,9 @@ Toda la llamada debe seguir este idioma de forma estricta.
 Cuando un usuario esté interesado en reservar, avanza de manera conversacional, preguntando los datos uno a uno:
 1. **Día y Hora:** Propón o confirma el momento de la cita según las preferencias del cliente. Una vez que el cliente te haya indicado o confirmado la fecha de manera clara, no vuelvas a pedirle confirmación ni a repreguntar sobre ella bajo ningún concepto. Asúmela inmediatamente como correcta y avanza al siguiente paso. Detén las preguntas sobre el día y la hora en cuanto verifiques que ya has obtenido ese dato con éxito.
 2. **Información Requerida del Cliente (OBLIGATORIA):** Pide de forma obligatoria y uno a uno los siguientes datos estipulados por el negocio: **{datos_reserva}**. No omitas ninguno. Insiste amablemente si el usuario olvida proveer alguno de ellos. Recuerda escribir los teléfonos dígito a dígito separados por comas para su correcta modulación.
-3. **PASO CRÍTICO DE CONFIRMACIÓN INTERACTIVA:** Una vez recopilados todos los datos de ({datos_reserva}) y la Fecha/Hora, realiza un resumen natural de la cita y pide confirmación explícita al cliente de forma directa antes de guardar nada.
-   *(Ejemplo de locución fluida: "Perfecto, entonces queda anotado para el [Día] a las [Hora en formato natural], a nombre de [Nombre], y el teléfono es el [Dígitos separados por comas]. ¿Es correcto?").*
+3. **PASO CRÍTICO DE CONFIRMACIÓN INTERACTIVA (CON EL AÑO EXPLICITO):** Una vez recopilados todos los datos de ({datos_reserva}) y la Fecha/Hora, realiza un resumen natural de la cita y pide confirmación explícita al cliente de forma directa antes de guardar nada.
+   *REGLA OBLIGATORIA:* Al repetir verbalmente la fecha del resumen, debes decir el DÍA, el MES y obligatoriamente el **AÑO completo**. No lo omitas bajo ningún concepto para dar máxima certidumbre.
+   *(Ejemplo de locución fluida: "Perfecto, entonces queda anotado para el [Día de la semana] [Día numérico] de [Mes] del [Año], a las [Hora en formato natural], a nombre de [Nombre], y el teléfono es el [Dígitos separados por comas]. ¿Es correcto?").*
 4. **MENSAJE DIRECTO DE RESERVA (SIN PREGUNTAS ADICIONALES):** En el instante en que el cliente te dé su confirmación definitiva diciendo que los datos son correctos, queda **TOTALMENTE PROHIBIDO** hacerle más preguntas, pedirle más datos o meter frases de relleno. Debes limitarte de forma inmediata a dar una respuesta firme de cierre indicando que procedes a guardar la cita y que espere un momento. Esto justifica el breve silencio de procesamiento de red. Acto correcto, dispara la herramienta `book_appointment`.
    *(Locución exacta obligatoria: "Perfecto, pues procedo a agendar tu cita en el sistema ahora mismo, espera un momento por favor...").*
 
@@ -291,8 +296,8 @@ En el campo `datos_cliente_recolectados`, debes redactar de manera clara y estru
 
 **REGLAS CRÍTICAS DE CONTROL DE ERRORES (Capa de Privacidad de Desarrollo):**
 - NUNCA menciones nombres de variables, formatos de código, mensajes de servidores, ni términos técnicos de software en la llamada (como "error de JSON", "función", "endpoint", "404", "500", "backend", o "respuesta incorrecta"). Está estrictamente prohibido.
-- Si la herramienta `book_appointment` te devuelve un fallo o indica que el hueco está ocupado, actúa de manera resolutiva. Gestiona la situación diciendo algo como: 
-  *"Disculpa las molestias, parece que este horario concreto acaba de ocuparse o no está disponible en nuestra agenda en este instante. Déjame revisar... ¿Te vendría bien intentar en otro tramo horario o preferirías mirar otro día?"*"""
+- Si la herramienta `book_appointment` te devuelve un fallo, te indica que la cita es en el pasado o que el hueco está ocupado, actúa de manera resolutiva. Gestiona la situación diciendo algo como: 
+  *"Disculpa las molestias, parece que ese horario concreto ya ha pasado, está ocupado o no está disponible en nuestra agenda en este instante. Déjame revisar... ¿Te vendría bien intentar en otro tramo horario o preferirías mirar otro día?"*"""
 
 
 # ==================== LÓGICA DE CREACIÓN ====================
@@ -303,8 +308,6 @@ def create_bot_for_client(nombre_negocio, sector, servicios, horario, zona, voic
     retell_language_mapping = {"es": "es-ES", "en": "en-US", "ca": "ca-ES"}
     lang_retell = retell_language_mapping.get(str(idioma).strip().lower(), "es-ES")
 
-    # CORREGIDO: Se elimina 'end_time' de los campos requeridos y de la descripción del parámetro de Retell.
-    # Así la IA no tiene que intentar calcular fechas ISO matemáticas complejas de forma errónea.
     llm_res = retell_request("POST", "/create-retell-llm", {
         "model": "gpt-4o",
         "general_prompt": custom_prompt,
@@ -518,7 +521,6 @@ async def update_retell_bot_endpoint(request: Request):
         idioma = data.get("idioma", "es")
         datos_reserva = data.get("informacion_cita", data.get("datos_reserva", "Nombre completo, Número de teléfono, Motivo de la cita"))
         
-        # Recibimos el número entero limpio de minutos (ej: 60)
         duracion_cita = str(data.get("duracion_cita", "30")).strip()
 
         agent_info = retell_request("GET", f"/get-agent/{agent_id}")
@@ -531,7 +533,6 @@ async def update_retell_bot_endpoint(request: Request):
 
         nuevo_prompt = build_custom_prompt(nombre_negocio, sector, servicios, horario, zona, calendar_email, idioma, datos_reserva, duracion_cita)
         
-        # Sincronizamos las herramientas eliminando el requerimiento de 'end_time'
         llm_update = retell_request("PATCH", f"/update-retell-llm/{llm_id}", {
             "general_prompt": nuevo_prompt,
             "general_tools": [{
@@ -647,21 +648,31 @@ async def book_appointment(request: Request):
         
         raw_datos = args.get("datos_cliente_recolectados", "")
 
-        # 1. CONSULTA DE DURACIÓN DE LA CITA DESDE LA BASE DE DATOS POSTGRESQL
-        # Por defecto asignamos 30 minutos por seguridad si no existiera registro o fallara.
+        # 1. VALIDACIÓN CRÍTICA: BLOQUEO DE CITAS EN EL PASADO
+        # Comparamos la fecha de inicio recibida con el momento actual en Europa/Madrid
+        start_iso = normalize_to_madrid_iso(start_time_str)
+        start_dt = datetime.fromisoformat(start_iso)
+        ahora_madrid = datetime.now(MADRID_TZ)
+
+        # Tolerancia sutil de 2 minutos para evitar problemas de latencia de red al agendar "ahora mismo"
+        if start_dt < (ahora_madrid - timedelta(minutes=2)):
+            logger.warning(f"❌ Reserva rechazada: Intento de cita en el pasado ({start_iso}) en comparación con la hora actual ({ahora_madrid.isoformat()})")
+            return {
+                "code": "ERROR", 
+                "message": "La fecha u hora de la cita seleccionada ya ha pasado en nuestro sistema de reservas. Por favor, selecciona un horario futuro."
+            }
+
+        # 2. CONSULTA DE DURACIÓN DE LA CITA DESDE LA BASE DE DATOS POSTGRESQL
         duracion_minutos = 30
         nombre_negocio_auditoria = "Asistente Dansu"
-        agent_id_auditoria = ""
         
         try:
             conn = get_db_connection()
             cur = conn.cursor()
-            cur.execute("SELECT nombre_negocio, agent_id, duracion_cita FROM asistentes WHERE google_calendar_email = %s LIMIT 1;", (calendar_email,))
+            cur.execute("SELECT nombre_negocio, duracion_cita FROM asistentes WHERE google_calendar_email = %s LIMIT 1;", (calendar_email,))
             db_bot = cur.fetchone()
             if db_bot:
                 nombre_negocio_auditoria = db_bot["nombre_negocio"]
-                agent_id_auditoria = db_bot["agent_id"]
-                # Leemos el valor numérico limpio guardado en base de datos (ej: "180" si son 3 horas)
                 try:
                     duracion_minutos = int(str(db_bot["duracion_cita"]).strip())
                 except ValueError:
@@ -672,14 +683,11 @@ async def book_appointment(request: Request):
             if 'cur' in locals(): cur.close()
             if 'conn' in locals(): conn.close()
 
-        # 2. CÁLCULO SEGURO DE FECHAS EN PYTHON (start_time -> end_time)
-        # Parseamos la fecha de inicio enviada por el bot y le sumamos los minutos definidos exactamente
-        start_iso = normalize_to_madrid_iso(start_time_str)
-        start_dt = datetime.fromisoformat(start_iso)
+        # 3. CÁLCULO SEGURO DE FECHAS EN PYTHON (start_time -> end_time)
         end_dt = start_dt + timedelta(minutes=duracion_minutos)
         end_time_str = end_dt.isoformat()
 
-        # 3. FUNCIÓN DE LIMPIEZA DE NÚMEROS DE TELÉFONO (QUITAR COMAS Y ESPACIOS)
+        # 4. FUNCIÓN DE LIMPIEZA DE NÚMEROS DE TELÉFONO (QUITAR COMAS Y ESPACIOS)
         def clean_spaced_phones(text):
             pattern = r'(?:\d\s*,\s*){3,}\d'
             def replace_match(match):
@@ -688,7 +696,7 @@ async def book_appointment(request: Request):
 
         datos_limpios = clean_spaced_phones(raw_datos)
 
-        # 4. PARSEAR LOS DATOS DEL CLIENTE PARA EVITAR DUPLICADOS
+        # 5. PARSEAR LOS DATOS DEL CLIENTE PARA EVITAR DUPLICADOS
         lineas_formateadas = []
         campos_vistos = set()
 
@@ -721,12 +729,9 @@ async def book_appointment(request: Request):
                     campos_vistos.add(linea_limpia)
                     lineas_formateadas.append(f"•  {linea_limpia}")
 
-        # 5. CONSTRUCCIÓN DE LA DESCRIPCIÓN FINAL DEL EVENTO
+        # 6. CONSTRUCCIÓN DE LA DESCRIPCIÓN FINAL DEL EVENTO
         seccion_cliente = "\n".join(lineas_formateadas) if lineas_formateadas else f"• {datos_limpios}"
-        
-        asistente_info_auditoria = ""
-        if agent_id_auditoria:
-            asistente_info_auditoria = f"\n🤖  Asistente: {nombre_negocio_auditoria}\n🆔  ID de Agente: {agent_id_auditoria}"
+        asistente_info_auditoria = f"\n🤖  Asistente: {nombre_negocio_auditoria}"
 
         descripcion_final = (
             f"📋  DETALLES DE LA RESERVA\n"

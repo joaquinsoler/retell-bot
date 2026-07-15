@@ -654,7 +654,9 @@ async def create_retell_bot_endpoint(request: Request):
         
         idioma = data.get("idioma", "es")
         datos_reserva = data.get("informacion_cita", data.get("datos_reserva", "Nombre completo, Número de teléfono, Motivo de la cita"))
-        duracion_cita = str(data.get("horario", "30")).strip() # Se mapea del campo horario que contiene el valor descriptivo en el payload original
+        
+        # CORREGIDO: Ahora extraemos correctamente el valor del campo "duracion_cita" enviado por el frontend
+        duracion_cita = str(data.get("duracion_cita", data.get("duracion_cita_texto", "30"))).strip()
 
         return create_bot_for_client(
             data.get("nombre_negocio"), data.get("sector"), data.get("servicios"),

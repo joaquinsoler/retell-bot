@@ -16,7 +16,8 @@ from googleapiclient.errors import HttpError
 
 from jose import JWTError, jwt  # Manejo seguro de tokens del Magic Link
 
-# ==================== CONFIGURACIÓN DE LOGS PARA RENDER ====================\nlogging.basicConfig(
+# ==================== CONFIGURACIÓN DE LOGS PARA RENDER ====================
+logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s - %(message)s",
     handlers=[logging.StreamHandler()]  # Envía los logs directamente a la consola de Render
@@ -25,7 +26,8 @@ logger = logging.getLogger("DansuAI-Backend")
 
 app = FastAPI(title="Dansu Backend Completo con Magic Link")
 
-# ==================== VARIABLES DE ENTORNO ====================\nRETELL_API_KEY = os.getenv("RETELL_API_KEY")
+# ==================== VARIABLES DE ENTORNO ====================
+RETELL_API_KEY = os.getenv("RETELL_API_KEY")
 GOOGLE_CREDENTIALS_JSON = os.getenv("GOOGLE_CREDENTIALS")
 DATABASE_URL = os.getenv("DATABASE_URL")
 JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY")
@@ -42,7 +44,8 @@ ACCESS_TOKEN_EXPIRE_MINUTES = 15
 # Almacén temporal de sesiones validadas indexadas por IP (IP: {"email": email, "expira": datetime})
 SESIONES_ACTIVAS = {}
 
-# ==================== CORS ====================\napp.add_middleware(
+# ==================== CORS ====================
+app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
     allow_credentials=True,
@@ -50,7 +53,8 @@ SESIONES_ACTIVAS = {}
     allow_headers=["*"],
 )
 
-# ==================== CONEXIÓN E INICIALIZACIÓN DE POSTGRESQL ====================\ndef get_db_connection():
+# ==================== CONEXIÓN E INICIALIZACIÓN DE POSTGRESQL ====================
+def get_db_connection():
     return psycopg2.connect(DATABASE_URL, cursor_factory=RealDictCursor)
 
 def init_db():
@@ -91,7 +95,8 @@ def init_db():
 # Inicializamos la estructura de la base de datos al arrancar el backend
 init_db()
 
-# ==================== GOOGLE CALENDAR ====================\nSCOPES = ['https://www.googleapis.com/auth/calendar']
+# ==================== GOOGLE CALENDAR ====================
+SCOPES = ['https://www.googleapis.com/auth/calendar']
 MADRID_TZ = ZoneInfo("Europe/Madrid")  # Huso horario de referencia absoluto para el negocio
 
 def get_calendar_service():
@@ -263,7 +268,7 @@ Cuando un usuario esté interesado en reservar, avanza de manera conversacional,
 2. **Información Requerida del Cliente (OBLIGATORIA):** Pide de forma obligatoria y uno a uno los siguientes datos estipulados por el negocio: **{datos_reserva}**. No omitas ninguno. Insiste amablemente si el usuario olvida proveer alguno de ellos. Recuerda escribir los teléfonos dígito a dígito separados por comas para su correcta modulación.
 3. **PASO CRÍTICO DE CONFIRMACIÓN INTERACTIVA:** Una vez recopilados todos los datos de ({datos_reserva}) y la Fecha/Hora, realiza un resumen natural de la cita y pide confirmación explícita al cliente de forma directa antes de guardar nada.
    *(Ejemplo de locución fluida: "Perfecto, entonces queda anotado para el [Día] a las [Hora en formato natural], a nombre de [Nombre], y el teléfono es el [Dígitos separados por comas]. ¿Es correcto?").*
-4. **MENSAJE DIRECTO DE RESERVA (SIN PREGUNTAS ADICIONALES):** En el instante en que el cliente te dé su confirmación definitiva diciendo que los datos son correctos, queda **TOTALMENTE PROHIBIDO** hacerle más preguntas, pedirle más datos o meter frases de relleno. Debes limitarte de forma inmediata a dar una respuesta firme de cierre indicando que procedes a guardar la cita y que espere un momento. Esto justifica el breve silencio de procesamiento de red. Acto seguido, dispara la herramienta `book_appointment`.
+4. **MENSAJE DIRECTO DE RESERVA (SIN PREGUNTAS ADICIONALES):** En el instante en que el cliente te dé su confirmación definitiva diciendo que los datos son correctos, queda **TOTALMENTE PROHIBIDO** hacerle más preguntas, pedirle más datos o meter frases de relleno. Debes limitarte de forma inmediata a dar una respuesta firme de cierre indicando que procedes a guardar la cita y que espere un momento. Esto justifica el breve silencio de procesamiento de red. Acto correcto, dispara la herramienta `book_appointment`.
    *(Locución exacta obligatoria: "Perfecto, pues procedo a agendar tu cita en el sistema ahora mismo, espera un momento por favor...").*
 
 Debes pasar obligatoriamente el email `{calendar_email}` en el campo `calendar_email`.

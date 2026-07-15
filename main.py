@@ -16,8 +16,7 @@ from googleapiclient.errors import HttpError
 
 from jose import JWTError, jwt  # Manejo seguro de tokens del Magic Link
 
-# ==================== CONFIGURACIÓN DE LOGS PARA RENDER ====================
-logging.basicConfig(
+# ==================== CONFIGURACIÓN DE LOGS PARA RENDER ====================\nlogging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s - %(message)s",
     handlers=[logging.StreamHandler()]  # Envía los logs directamente a la consola de Render
@@ -26,8 +25,7 @@ logger = logging.getLogger("DansuAI-Backend")
 
 app = FastAPI(title="Dansu Backend Completo con Magic Link")
 
-# ==================== VARIABLES DE ENTORNO ====================
-RETELL_API_KEY = os.getenv("RETELL_API_KEY")
+# ==================== VARIABLES DE ENTORNO ====================\nRETELL_API_KEY = os.getenv("RETELL_API_KEY")
 GOOGLE_CREDENTIALS_JSON = os.getenv("GOOGLE_CREDENTIALS")
 DATABASE_URL = os.getenv("DATABASE_URL")
 JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY")
@@ -44,8 +42,7 @@ ACCESS_TOKEN_EXPIRE_MINUTES = 15
 # Almacén temporal de sesiones validadas indexadas por IP (IP: {"email": email, "expira": datetime})
 SESIONES_ACTIVAS = {}
 
-# ==================== CORS ====================
-app.add_middleware(
+# ==================== CORS ====================\napp.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
     allow_credentials=True,
@@ -53,8 +50,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ==================== CONEXIÓN E INICIALIZACIÓN DE POSTGRESQL ====================
-def get_db_connection():
+# ==================== CONEXIÓN E INICIALIZACIÓN DE POSTGRESQL ====================\ndef get_db_connection():
     return psycopg2.connect(DATABASE_URL, cursor_factory=RealDictCursor)
 
 def init_db():
@@ -69,7 +65,7 @@ def init_db():
                 sector VARCHAR(255),
                 servicios TEXT,
                 horario VARCHAR(255),
-                duracion_cita INT DEFAULT 30,
+                duracion_cita VARCHAR(255) DEFAULT '30',
                 zona VARCHAR(255),
                 google_calendar_email VARCHAR(255),
                 asistente VARCHAR(255),
@@ -80,10 +76,10 @@ def init_db():
                 fecha_creacion TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
         """)
-        # Migraciones automáticas por si la tabla ya existía sin estas columnas
+        # Migraciones automáticas por si la tabla ya existía con tipo antiguo
+        cur.execute("ALTER TABLE asistentes ALTER COLUMN duracion_cita TYPE VARCHAR(255);")
         cur.execute("ALTER TABLE asistentes ADD COLUMN IF NOT EXISTS idioma VARCHAR(50) DEFAULT 'es';")
         cur.execute("ALTER TABLE asistentes ADD COLUMN IF NOT EXISTS datos_reserva TEXT DEFAULT 'Nombre completo, Número de teléfono, Motivo de la cita';")
-        cur.execute("ALTER TABLE asistentes ADD COLUMN IF NOT EXISTS duracion_cita INT DEFAULT 30;")
         conn.commit()
         logger.info("✅ Base de datos PostgreSQL inicializada, verified y lista.")
     except Exception as e:
@@ -95,8 +91,7 @@ def init_db():
 # Inicializamos la estructura de la base de datos al arrancar el backend
 init_db()
 
-# ==================== GOOGLE CALENDAR ====================
-SCOPES = ['https://www.googleapis.com/auth/calendar']
+# ==================== GOOGLE CALENDAR ====================\nSCOPES = ['https://www.googleapis.com/auth/calendar']
 MADRID_TZ = ZoneInfo("Europe/Madrid")  # Huso horario de referencia absoluto para el negocio
 
 def get_calendar_service():
@@ -172,7 +167,6 @@ def create_google_event(calendar_id: str, summary: str, start_time: str, end_tim
         iso_end = normalize_to_madrid_iso(end_time)
         if not bypass_availability and not check_availability(calendar_id, iso_start, iso_end):
             raise Exception("El horario seleccionado ya no está disponible.")
-        service = get_db_connection()
         service = get_calendar_service()
         event = {
             'summary': summary[:100],
@@ -214,7 +208,7 @@ def retell_request(method: str, endpoint: str, json_data=None):
 
 # ==================== CONSTRUCTOR DEL PROMPT DINÁMICO REFORZADO ====================
 def build_custom_prompt(nombre_negocio, sector, servicios, horario, zona, calendar_email, idioma="es", 
-                        datos_reserva="Nombre completo, Número de teléfono, Motivo de la cita"):
+                        datos_reserva="Nombre completo, Número de teléfono, Motivo de la cita", duracion_cita="30"):
     idiomas_legibles = {
         "es": "Español de España (es-ES)",
         "en": "Inglés (en-US)",
@@ -260,6 +254,7 @@ Toda la llamada debe seguir este idioma de forma estricta.
 - Ubicación / Zona de servicio: {zona}
 - Horario comercial: {horario}
 - Servicios ofrecidos: {servicios}
+- Separación mínima requerida entre dos citas: {duracion_cita}
 - Email del Google Calendar institucional: {calendar_email}
 
 **FLUJO NATURAL PARA RECOGER DATOS Y AGENDAR CITA:**
@@ -282,13 +277,12 @@ En el campo `datos_cliente_recolectados`, debes redactar de manera clara y estru
 
 # ==================== LÓGICA DE CREACIÓN ====================
 def create_bot_for_client(nombre_negocio, sector, servicios, horario, zona, voice_id, calendar_email, 
-                          idioma="es", datos_reserva="Nombre completo, Número de teléfono, Motivo de la cita", duracion_cita=30):
-    custom_prompt = build_custom_prompt(nombre_negocio, sector, servicios, horario, zona, calendar_email, idioma, datos_reserva)
+                          idioma="es", datos_reserva="Nombre completo, Número de teléfono, Motivo de la cita", duracion_cita="30"):
+    custom_prompt = build_custom_prompt(nombre_negocio, sector, servicios, horario, zona, calendar_email, idioma, datos_reserva, duracion_cita)
 
     retell_language_mapping = {"es": "es-ES", "en": "en-US", "ca": "ca-ES"}
     lang_retell = retell_language_mapping.get(str(idioma).strip().lower(), "es-ES")
 
-    # Mantenemos el modelo gpt-4o de rendimiento avanzado
     llm_res = retell_request("POST", "/create-retell-llm", {
         "model": "gpt-4o",
         "general_prompt": custom_prompt,
@@ -499,10 +493,7 @@ async def update_retell_bot_endpoint(request: Request):
         asistente_nombre = data.get("asistente")
         idioma = data.get("idioma", "es")
         datos_reserva = data.get("informacion_cita", data.get("datos_reserva", "Nombre completo, Número de teléfono, Motivo de la cita"))
-        try:
-            duracion_cita = int(data.get("duracion_cita", 30))
-        except:
-            duracion_cita = 30
+        duracion_cita = str(data.get("duracion_cita", "30")).strip()
 
         agent_info = retell_request("GET", f"/get-agent/{agent_id}")
         if not agent_info:
@@ -512,7 +503,7 @@ async def update_retell_bot_endpoint(request: Request):
         if not llm_id:
             raise HTTPException(status_code=400, detail="El agente no dispone de un motor LLM vinculado")
 
-        nuevo_prompt = build_custom_prompt(nombre_negocio, sector, servicios, horario, zona, calendar_email, idioma, datos_reserva)
+        nuevo_prompt = build_custom_prompt(nombre_negocio, sector, servicios, horario, zona, calendar_email, idioma, datos_reserva, duracion_cita)
         llm_update = retell_request("PATCH", f"/update-retell-llm/{llm_id}", {
             "general_prompt": nuevo_prompt,
             "general_tools": [{
@@ -658,11 +649,7 @@ async def create_retell_bot_endpoint(request: Request):
         
         idioma = data.get("idioma", "es")
         datos_reserva = data.get("informacion_cita", data.get("datos_reserva", "Nombre completo, Número de teléfono, Motivo de la cita"))
-        
-        try:
-            duracion_cita = int(data.get("duracion_cita", 30))
-        except:
-            duracion_cita = 30
+        duracion_cita = str(data.get("horario", "30")).strip() # Se mapea del campo horario que contiene el valor descriptivo en el payload original
 
         return create_bot_for_client(
             data.get("nombre_negocio"), data.get("sector"), data.get("servicios"),

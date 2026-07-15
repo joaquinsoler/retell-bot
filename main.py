@@ -229,6 +229,21 @@ def build_custom_prompt(nombre_negocio, sector, servicios, horario, zona, calend
     fecha_legible = f"{dias_semana[ahora_madrid.weekday()]}, {ahora_madrid.day} de {meses_año[ahora_madrid.month]} de {ahora_madrid.year}"
     hora_legible = ahora_madrid.strftime("%H:%M")
 
+    # CONVERSIÓN DE MINUTOS A FORMATO HUMANO NATURAL PARA EL PROMPT DE LA IA
+    try:
+        mins = int(str(duracion_cita).strip())
+        if mins < 60:
+            duracion_legible_prompt = f"{mins} minutos"
+        else:
+            horas = mins // 60
+            resto = mins % 60
+            texto_h = "1 hora" if horas == 1 else f"{horas} horas"
+            texto_m = f" y {resto} minutos" if resto > 0 else ""
+            duracion_legible_prompt = f"{texto_h}{texto_m}"
+    except (ValueError, TypeError):
+        # Si por alguna razón histórica llegara un texto libre, lo inyectamos tal cual
+        duracion_legible_prompt = str(duracion_cita)
+
     return f"""Eres la voz y el asistente virtual exclusivo de {nombre_negocio}, un negocio enfocado en el sector de {sector}.
 Tu objetivo principal es atender a los clientes con la máxima amabilidad, empatía y profesionalidad, ofreciendo una conversación fluida, natural y cercana.
 
@@ -240,7 +255,7 @@ Utiliza esta referencia internamente para comprender de manera exacta términos 
 
 **CONFIGURACIÓN OBLIGATORIA DE IDIOMA:**
 - Debes interactuar, responder, saludar y hablar COMPLETAMENTE en el idioma: **{idioma_atencion}**.
-Toda la llamada debe seguir este idioma de forma de estricta.
+Toda la llamada debe seguir este idioma de forma estricta.
 
 **REGLAS CRÍTICAS DE PRONUNCIACIÓN DE VOZ (COMPORTAMIENTO HUMANO NATURAL):**
 1. **Manejo Absoluto de Horas (PROHIBIDO DECIR AM O PM):** Jamás pronuncies ni digas en voz alta las siglas "AM" o "PM". Transfórmalas siempre a lenguaje natural o formato de 24 horas. Por ejemplo, en lugar de decir "cinco p m" o "cinco a m", di de forma totalmente orgánica: *"las cinco de la tarde"*, *"las diez de la mañana"* o *"las diecisiete horas"*. 
@@ -259,7 +274,7 @@ Toda la llamada debe seguir este idioma de forma de estricta.
 - Ubicación / Zona de servicio: {zona}
 - Horario comercial: {horario}
 - Servicios ofrecidos: {servicios}
-- Separación mínima requerida entre dos citas: {duracion_cita}
+- Separación mínima requerida entre dos citas: {duracion_legible_prompt}
 - Email del Google Calendar institucional: {calendar_email}
 
 **FLUJO NATURAL PARA RECOGER DATOS Y AGENDAR CITA:**
@@ -499,7 +514,7 @@ async def update_retell_bot_endpoint(request: Request):
         idioma = data.get("idioma", "es")
         datos_reserva = data.get("informacion_cita", data.get("datos_reserva", "Nombre completo, Número de teléfono, Motivo de la cita"))
         
-        # En edición capturamos duracion_cita como string directo sin alterarlo
+        # Recibimos el número entero limpio de minutos (ej: 60)
         duracion_cita = str(data.get("duracion_cita", "30")).strip()
 
         agent_info = retell_request("GET", f"/get-agent/{agent_id}")
@@ -657,7 +672,7 @@ async def create_retell_bot_endpoint(request: Request):
         idioma = data.get("idioma", "es")
         datos_reserva = data.get("informacion_cita", data.get("datos_reserva", "Nombre completo, Número de teléfono, Motivo de la cita"))
         
-        # Sincronización fidedigna con la clave "duracion_cita" que ahora sí envía el formulario de creación
+        # Sincronización con el campo "duracion_cita" enviado como número entero por la nueva lógica del select
         duracion_cita = str(data.get("duracion_cita", data.get("duracion_cita_texto", "30"))).strip()
 
         return create_bot_for_client(

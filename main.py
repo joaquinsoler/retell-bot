@@ -210,8 +210,7 @@ async def request_magic_link(request: Request):
     # 1. Verificar si el usuario existe en tu base de datos
     conn = psycopg2.connect(DATABASE_URL)
     cur = conn.cursor()
-    # Consulta corregida:
-cur.execute("SELECT google_calendar_email FROM asistentes WHERE google_calendar_email = %s LIMIT 1", (email,))
+    cur.execute("SELECT google_calendar_email FROM asistentes WHERE google_calendar_email = %s LIMIT 1", (email,))
     user = cur.fetchone()
     cur.close()
     conn.close()

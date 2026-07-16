@@ -477,6 +477,62 @@ def send_magic_link_email(email: str, magic_link: str):
     except Exception as e:
         logger.error(f"❌ Error sending email con Brevo: {e}", exc_info=True)
         return False
+# ==================== GROK CHATBOT ====================
+GROK_API_KEY = os.getenv("GROK_API_KEY")
+
+if not GROK_API_KEY:
+    logger.warning("⚠️ GROK_API_KEY no encontrada. El chatbot con Grok no funcionará.")
+
+from openai import OpenAI
+
+grok_client = OpenAI(
+    api_key=GROK_API_KEY,
+    base_url="https://api.x.ai/v1"
+)
+
+# Modelo recomendado (julio 2026) - puedes cambiarlo
+GROK_MODEL = "grok-4.5"   # o "grok-4.3" si quieres más económico
+
+@app.post("/chat-grok")
+async def chat_with_grok(request: Request):
+    try:
+        data = await request.json()
+        user_message = data.get("message", "").strip()
+        history = data.get("history", [])  # Lista de {"role": "user/assistant", "content": "..."}
+        
+        if not user_message:
+            raise HTTPException(status_code=400, detail="Mensaje vacío")
+
+        # Construir mensajes para Grok (compatible OpenAI)
+        messages = [
+            {"role": "system", "content": "Eres un asistente útil, amigable y directo de Dansu AI. Responde siempre en español a menos que el usuario indique otro idioma."}
+        ]
+        
+        # Añadir historial (máximo últimos 20 mensajes para ahorrar tokens)
+        messages.extend(history[-20:])
+        
+        # Mensaje actual del usuario
+        messages.append({"role": "user", "content": user_message})
+
+        response = grok_client.chat.completions.create(
+            model=GROK_MODEL,
+            messages=messages,
+            temperature=0.7,
+            max_tokens=800,
+            stream=False  # Cambia a True si quieres streaming
+        )
+
+        assistant_reply = response.choices[0].message.content
+
+        return {
+            "status": "success",
+            "reply": assistant_reply,
+            "model": GROK_MODEL
+        }
+
+    except Exception as e:
+        logger.error(f"Error en chat-grok: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Error interno del chatbot")
 
 
 # ==================== ENDPOINTS DE ACCESO Y PANEL ====================

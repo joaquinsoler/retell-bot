@@ -15,15 +15,6 @@ from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
 from jose import JWTError, jwt  # Manejo seguro de tokens del Magic Link
-import google.generativeai as genai
-from google.generativeai.types import HarmCategory, HarmBlockThreshold
-
-# Configuración de Gemini con búsqueda web
-genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
-model = genai.GenerativeModel(
-    model_name='gemini-1.5-flash',
-    tools=[{'google_search_retrieval': {}}] # Habilita la búsqueda en tiempo real
-)
 
 # ==================== CONFIGURACIÓN DE LOGS PARA RENDER ====================
 logging.basicConfig(
@@ -773,25 +764,3 @@ async def request_magic_link(request: Request):
     except Exception as e:
         logger.error(f"Error en request-magic-link: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
-@app.post("/chat-crm")
-async def chat_crm(request: Request):
-    try:
-        data = await request.json()
-        agent_id = data.get("agent_id")
-        user_message = data.get("message")
-        history = data.get("history", [])
-
-        # Preparamos el contexto para Gemini
-        # Podemos incluir el agent_id para que la IA sepa qué configuración tiene el usuario
-        system_instruction = f"Eres un asistente técnico para Dansu AI. Estás ayudando a configurar el asistente con ID {agent_id}. Usa Google Search para dar información actualizada sobre integraciones de CRM."
-        
-        chat = model.start_chat(history=history)
-        response = chat.send_message(user_message)
-        
-        return {
-            "reply": response.text,
-            "history": chat.history # Devolvemos el historial actualizado al front
-        }
-    except Exception as e:
-        logger.error(f"Error en chat-crm: {e}")
-        raise HTTPException(status_code=500, detail="Error al conectar con Gemini")

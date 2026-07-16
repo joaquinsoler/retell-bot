@@ -171,8 +171,8 @@ def create_google_event(calendar_id: str, summary: str, start_time: str, end_tim
     try:
         ensure_calendar_access(calendar_id)
         
-        # === NUEVA LÓGICA: Obtener duración del asistente desde la base de datos ===
-        duracion_minutos = 30  # valor por defecto
+        # === OBTENER DURACIÓN REAL DEL ASISTENTE ===
+        duracion_minutos = 30
         conn = get_db_connection()
         cur = conn.cursor()
         try:
@@ -183,35 +183,36 @@ def create_google_event(calendar_id: str, summary: str, start_time: str, end_tim
             row = cur.fetchone()
             if row and row.get('duracion_cita'):
                 duracion_minutos = int(row['duracion_cita'])
-                logger.info(f"Duración del asistente obtenida de la BD: {duracion_minutos} minutos")
         except Exception as e:
-            logger.warning(f"No se pudo obtener duracion_cita de la BD: {e}")
+            logger.warning(f"No se pudo obtener duracion_cita: {e}")
         finally:
             cur.close()
             conn.close()
 
-        # Calcular end_time si no viene o está vacío
-        if end_time is None or str(end_time).strip() == "":
-            try:
-                start_dt = datetime.fromisoformat(str(start_time).replace("Z", "+00:00"))
-                if start_dt.tzinfo is None:
-                    start_dt = start_dt.replace(tzinfo=MADRID_TZ)
-                end_dt = start_dt + timedelta(minutes=duracion_minutos)
-                end_time = end_dt.isoformat()
-                logger.info(f"end_time calculado automáticamente con {duracion_minutos} minutos")
-            except Exception as calc_error:
-                logger.error(f"Error calculando end_time: {calc_error}")
-                # Fallback: 30 minutos
-                start_dt = datetime.fromisoformat(str(start_time).replace("Z", "+00:00"))
-                if start_dt.tzinfo is None:
-                    start_dt = start_dt.replace(tzinfo=MADRID_TZ)
-                end_dt = start_dt + timedelta(minutes=30)
-                end_time = end_dt.isoformat()
-        else:
-            logger.info("Usando end_time proporcionado por el agente")
+        # === FORZAR SIEMPRE la duración configurada (ignorar end_time del agente) ===
+        try:
+            start_dt = datetime.fromisoformat(str(start_time).replace("Z", "+00:00"))
+            if start_dt.tzinfo is None:
+                start_dt = start_dt.replace(tzinfo=MADRID_TZ)
+            
+            end_dt = start_dt + timedelta(minutes=duracion_minutos)
+            final_end_time = end_dt.isoformat()
+            
+            if end_time is not None and str(end_time).strip() != "":
+                logger.warning(f"⚠️ El agente envió end_time pero se ignoró. Duración forzada a {duracion_minutos} min.")
+            
+            logger.info(f"✅ Duración aplicada: {duracion_minutos} minutos desde {start_time}")
+        except Exception as calc_error:
+            logger.error(f"Error calculando duración: {calc_error}")
+            # Fallback seguro
+            start_dt = datetime.fromisoformat(str(start_time).replace("Z", "+00:00"))
+            if start_dt.tzinfo is None:
+                start_dt = start_dt.replace(tzinfo=MADRID_TZ)
+            end_dt = start_dt + timedelta(minutes=30)
+            final_end_time = end_dt.isoformat()
 
         iso_start = normalize_to_madrid_iso(start_time)
-        iso_end = normalize_to_madrid_iso(end_time)
+        iso_end = normalize_to_madrid_iso(final_end_time)
 
         if not bypass_availability and not check_availability(calendar_id, iso_start, iso_end):
             raise Exception("El horario seleccionado ya no está disponible.")
@@ -219,14 +220,14 @@ def create_google_event(calendar_id: str, summary: str, start_time: str, end_tim
         service = get_calendar_service()
         event = {
             'summary': summary[:100],
-            'description': (description or "Cita agendada por Dansu AI"),
+            'description': (description or f"Cita agendada por Dansu AI - Duración: {duracion_minutos} min"),
             'start': {'dateTime': iso_start, 'timeZone': 'Europe/Madrid'},
             'end': {'dateTime': iso_end, 'timeZone': 'Europe/Madrid'},
             'reminders': {'useDefault': True}
         }
 
         created = service.events().insert(calendarId=calendar_id, body=event, sendUpdates='none').execute()
-        logger.info(f"✅ EVENTO CREADO correctamente ({duracion_minutos} min): {created.get('htmlLink')}")
+        logger.info(f"✅ EVENTO CREADO FORZADO ({duracion_minutos} min): {created.get('htmlLink')}")
         return created
 
     except Exception as e:
@@ -666,9 +667,10 @@ async def book_appointment(request: Request):
         raw_body = (await request.body()).decode("utf-8")
         data = json.loads(raw_body) if raw_body else {}
         args = data.get("args", data)
+        
         calendar_email = args.get("calendar_email")
         start_time_str = args.get("start_time")
-        end_time_str = args.get("end_time")          # Puede venir vacío o None
+        # end_time se ignora intencionalmente ahora
         descripcion_final = args.get("datos_cliente_recolectados", "")
         if args.get("description"):
             descripcion_final += " | " + args.get("description", "")
@@ -677,7 +679,7 @@ async def book_appointment(request: Request):
             calendar_email, 
             args.get("summary", "Cita Agendada"), 
             start_time_str, 
-            end_time_str,          # ← Ahora puede ser None y se calculará con duracion_cita
+            None,                    # ← Forzamos None para que siempre use duracion_cita
             descripcion_final
         )
         return {"code": "SUCCESS", "message": "Cita agendada correctamente"}

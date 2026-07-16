@@ -171,25 +171,39 @@ def create_google_event(calendar_id: str, summary: str, start_time: str, end_tim
     try:
         ensure_calendar_access(calendar_id)
         
-        # === OBTENER DURACIÓN REAL DEL ASISTENTE ===
-        duracion_minutos = 30
+        # === BÚSQUEDA MÁS ROBUSTA DE duracion_cita ===
+        duracion_minutos = 30  # fallback seguro
+        calendar_id_clean = str(calendar_id).strip().lower()
+        
         conn = get_db_connection()
         cur = conn.cursor()
         try:
-            cur.execute(
-                "SELECT duracion_cita FROM asistentes WHERE google_calendar_email = %s LIMIT 1;", 
-                (calendar_id,)
-            )
+            # Buscamos con y sin case-sensitive + trim
+            cur.execute("""
+                SELECT duracion_cita, google_calendar_email 
+                FROM asistentes 
+                WHERE LOWER(TRIM(google_calendar_email)) = LOWER(TRIM(%s)) 
+                LIMIT 1;
+            """, (calendar_id,))
             row = cur.fetchone()
+            
             if row and row.get('duracion_cita'):
                 duracion_minutos = int(row['duracion_cita'])
-        except Exception as e:
-            logger.warning(f"No se pudo obtener duracion_cita: {e}")
+                logger.info(f"✅ Duración encontrada en BD: {duracion_minutos} minutos para email '{row.get('google_calendar_email')}'")
+            else:
+                logger.warning(f"⚠️ No se encontró asistente con email: {calendar_id} (búsqueda limpia: {calendar_id_clean}). Usando fallback 30 min.")
+                # Intento alternativo: buscar cualquier coincidencia parcial (debug)
+                cur.execute("SELECT duracion_cita, google_calendar_email FROM asistentes LIMIT 5;")
+                rows = cur.fetchall()
+                if rows:
+                    logger.warning(f"Registros existentes en BD: {[r['google_calendar_email'] for r in rows]}")
+        except Exception as db_err:
+            logger.error(f"❌ Error consultando duración en BD: {db_err}", exc_info=True)
         finally:
             cur.close()
             conn.close()
 
-        # === FORZAR SIEMPRE la duración configurada (ignorar end_time del agente) ===
+        # === FORZAR DURACIÓN ===
         try:
             start_dt = datetime.fromisoformat(str(start_time).replace("Z", "+00:00"))
             if start_dt.tzinfo is None:
@@ -199,12 +213,12 @@ def create_google_event(calendar_id: str, summary: str, start_time: str, end_tim
             final_end_time = end_dt.isoformat()
             
             if end_time is not None and str(end_time).strip() != "":
-                logger.warning(f"⚠️ El agente envió end_time pero se ignoró. Duración forzada a {duracion_minutos} min.")
+                logger.warning(f"⚠️ Ignorado end_time enviado por agente ({end_time}). Forzado a {duracion_minutos} min.")
             
-            logger.info(f"✅ Duración aplicada: {duracion_minutos} minutos desde {start_time}")
+            logger.info(f"⏱️ Aplicando duración: {duracion_minutos} minutos")
         except Exception as calc_error:
-            logger.error(f"Error calculando duración: {calc_error}")
-            # Fallback seguro
+            logger.error(f"Error calculando horario: {calc_error}")
+            # Ultra fallback
             start_dt = datetime.fromisoformat(str(start_time).replace("Z", "+00:00"))
             if start_dt.tzinfo is None:
                 start_dt = start_dt.replace(tzinfo=MADRID_TZ)
@@ -220,20 +234,19 @@ def create_google_event(calendar_id: str, summary: str, start_time: str, end_tim
         service = get_calendar_service()
         event = {
             'summary': summary[:100],
-            'description': (description or f"Cita agendada por Dansu AI - Duración: {duracion_minutos} min"),
+            'description': (description or f"Cita agendada por Dansu AI - Duración: {duracion_minutos} minutos"),
             'start': {'dateTime': iso_start, 'timeZone': 'Europe/Madrid'},
             'end': {'dateTime': iso_end, 'timeZone': 'Europe/Madrid'},
             'reminders': {'useDefault': True}
         }
 
         created = service.events().insert(calendarId=calendar_id, body=event, sendUpdates='none').execute()
-        logger.info(f"✅ EVENTO CREADO FORZADO ({duracion_minutos} min): {created.get('htmlLink')}")
+        logger.info(f"✅ EVENTO CREADO CON DURACIÓN {duracion_minutos} MIN: {created.get('htmlLink')}")
         return created
 
     except Exception as e:
         logger.error(f"❌ Error Google Calendar: {e}", exc_info=True)
         raise
-
 
 # ==================== VOICE MAPPING & RETELL UTILS ====================
 VOICE_MAPPING = {

@@ -1,7 +1,6 @@
 import os
 import json
 import logging
-import re
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo  # Gestión nativa y precisa de zonas horarias en Python 3.9+
 from fastapi import FastAPI, HTTPException, Request
@@ -63,30 +62,28 @@ def init_db():
     conn = get_db_connection()
     cur = conn.cursor()
     try:
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS asistentes (
-                id SERIAL PRIMARY KEY,
-                nombre_negocio VARCHAR(255),
-                sector VARCHAR(255),
-                servicios TEXT,
-                horario VARCHAR(255),
-                duracion_cita VARCHAR(255) DEFAULT '30',
-                zona VARCHAR(255),
-                google_calendar_email VARCHAR(255),
-                asistente VARCHAR(255),
-                agent_id VARCHAR(255) UNIQUE,
-                phone_number VARCHAR(255),
-                idioma VARCHAR(50) DEFAULT 'es',
-                datos_reserva TEXT DEFAULT 'Nombre completo, Número de teléfono, Motivo de la cita',
-                fecha_creacion TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            );
-        """)
-        # Migraciones automáticas por si la tabla ya existía con tipo antiguo
-        cur.execute("ALTER TABLE asistentes ALTER COLUMN duracion_cita TYPE VARCHAR(255);")
+            cur.execute("""
+        CREATE TABLE IF NOT EXISTS asistentes (
+            id SERIAL PRIMARY KEY,
+            nombre_negocio VARCHAR(255),
+            sector VARCHAR(255),
+            servicios TEXT,
+            horario VARCHAR(255),
+            duracion_cita INTEGER DEFAULT 30,  -- Nueva columna: minutos por cita
+            zona VARCHAR(255),
+            google_calendar_email VARCHAR(255),
+            asistente VARCHAR(255),
+            agent_id VARCHAR(255) UNIQUE,
+            phone_number VARCHAR(255),
+            fecha_creacion TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+    """)
+        # Migraciones automáticas por si la tabla ya existía sin estas columnas
         cur.execute("ALTER TABLE asistentes ADD COLUMN IF NOT EXISTS idioma VARCHAR(50) DEFAULT 'es';")
         cur.execute("ALTER TABLE asistentes ADD COLUMN IF NOT EXISTS datos_reserva TEXT DEFAULT 'Nombre completo, Número de teléfono, Motivo de la cita';")
+        cur.execute("ALTER TABLE asistentes ADD COLUMN IF NOT EXISTS duracion_cita INT DEFAULT 30;")
         conn.commit()
-        logger.info("✅ Base de datos PostgreSQL inicializada, verified y lista.")
+        logger.info("✅ Base de datos PostgreSQL inicializada, verificada y lista.")
     except Exception as e:
         logger.error(f"❌ Error inicializando la base de datos: {e}", exc_info=True)
     finally:
@@ -176,7 +173,7 @@ def create_google_event(calendar_id: str, summary: str, start_time: str, end_tim
         service = get_calendar_service()
         event = {
             'summary': summary[:100],
-            'description': description,
+            'description': (description or "Cita agendada por Dansu AI"),
             'start': {'dateTime': iso_start, 'timeZone': 'Europe/Madrid'},
             'end': {'dateTime': iso_end, 'timeZone': 'Europe/Madrid'},
             'reminders': {'useDefault': True}
@@ -211,105 +208,42 @@ def retell_request(method: str, endpoint: str, json_data=None):
         logger.error(f"❌ Error de comunicación con Retell: {e}", exc_info=True)
         return None
 
+# ==================== CONSTRUCTOR DEL PROMPT DINÁMICO ORIGINAL ESTABLE ====================
+def build_custom_prompt(nombre_negocio, sector, servicios, horario, zona, calendar_email, duracion_cita=30):
+    return f"""Eres la voz y el asistente virtual exclusivo de {nombre_negocio}, un negocio enfocado en el sector de {sector}. Tu objetivo principal es atender a los clientes con la máxima amabilidad, empatía y profesionalidad, offering una conversación fluida, natural y cercana.
 
-# ==================== CONSTRUCTOR DEL PROMPT DINÁMICO REFORZADO ====================
-def build_custom_prompt(nombre_negocio, sector, servicios, horario, zona, calendar_email, idioma="es", 
-                        datos_reserva="Nombre completo, Número de teléfono, Motivo de la cita", duracion_cita="30"):
-    idiomas_legibles = {
-        "es": "Español de España (es-ES)",
-        "en": "Inglés (en-US)",
-        "ca": "Catalán (ca-ES)"
-    }
-    idioma_atencion = idiomas_legibles.get(str(idioma).strip().lower(), "Español de España (es-ES)")
-
-    ahora_madrid = datetime.now(MADRID_TZ)
-    
-    dias_semana = {0: "Lunes", 1: "Martes", 2: "Miércoles", 3: "Jueves", 4: "Viernes", 5: "Sábado", 6: "Domingo"}
-    meses_año = {1: "Enero", 2: "Febrero", 3: "Marzo", 4: "Abril", 5: "Mayo", 6: "Junio", 7: "Julio", 8: "Agosto", 9: "Septiembre", 10: "Octubre", 11: "Noviembre", 12: "Diciembre"}
-    
-    fecha_legible = f"{dias_semana[ahora_madrid.weekday()]}, {ahora_madrid.day} de {meses_año[ahora_madrid.month]} de {ahora_madrid.year}"
-    hora_legible = ahora_madrid.strftime("%H:%M")
-
-    # CONVERSIÓN DE MINUTOS A FORMATO HUMANO NATURAL PARA EL PROMPT DE LA IA
-    try:
-        mins = int(str(duracion_cita).strip())
-        if mins < 60:
-            duracion_legible_prompt = f"{mins} minutos"
-        else:
-            horas = mins // 60
-            resto = mins % 60
-            texto_h = "1 hora" if horas == 1 else f"{horas} horas"
-            texto_m = f" y {resto} minutos" if resto > 0 else ""
-            duracion_legible_prompt = f"{texto_h}{texto_m}"
-    except (ValueError, TypeError):
-        duracion_legible_prompt = str(duracion_cita)
-
-    return f"""Eres la voz y el asistente virtual exclusivo de {nombre_negocio}, un negocio enfocado en el sector de {sector}.
-Tu objetivo principal es atender a los clientes con la máxima amabilidad, empatía y profesionalidad, ofreciendo una conversación fluida, natural y cercana.
-
-**REFERENCIA TEMPORAL INTERNA (USO EXCLUSIVO DEL SISTEMA):**
-- La fecha real de hoy es: {fecha_legible}.
-- La hora real actual es: {hora_legible} (Huso: Europe/Madrid).
-Utiliza esta referencia internamente para comprender de manera exacta términos como "hoy", "mañana", "esta tarde" o "el próximo martes".
-*REGLA CRÍTICA:* Queda terminantemente prohibido decirle al cliente frases explícitas informándole de estos metadatos temporales (como "recuerda que hoy es lunes tal" o "como son las tantas del día tal"). Esta información es confidencial y solo sirve para tus cálculos de calendario de fondo.
-
-**REGLA CRÍTICA DE FECHAS EN EL PASADO:**
-- Jamás propongas, sugieras ni aceptes agendar una cita para un día u hora que ya haya pasado en relación a la referencia temporal de hoy ({fecha_legible} a las {hora_legible}). 
-- Si el usuario te pide una hora o día que ya ha transcurrido (por ejemplo, te pide "las 9:00 de la mañana" cuando ya son las "14:00 de la tarde", o te pide el día de ayer), debes indicarle de manera muy educada que esa hora ya ha pasado y pedirle amablemente que seleccione un hueco futuro.
-
-**CONFIGURACIÓN OBLIGATORIA DE IDIOMA:**
-- Debes interactuar, responder, saludar y hablar COMPLETAMENTE en el idioma: **{idioma_atencion}**.
-Toda la llamada debe seguir este idioma de forma estricta.
-
-**REGLAS CRÍTICAS DE PRONUNCIACIÓN DE VOZ (COMPORTAMIENTO HUMANO NATURAL):**
-1. **Manejo Absoluto de Horas (PROHIBIDO DECIR AM O PM):** Jamás pronuncies ni digas en voz alta las siglas "AM" o "PM". Transfórmalas siempre a lenguaje natural o formato de 24 horas. Por ejemplo, en lugar de decir "cinco p m" o "cinco a m", di de forma totalmente orgánica: *"las cinco de la tarde"*, *"las diez de la mañana"* o *"las diecisiete horas"*. 
-2. **Formateo Estricto de Números de Teléfono (Evitar agrupaciones):** Al escribir un número de teléfono para que la síntesis de voz lo reproduzca, escribe los dígitos separados por comas y espacios (ejemplo: "6, 2, 2, 1, 1, 4, 4, 5, 5"). Esto hace que el sistema realice pausas sutiles de forma automática y los mencione uno a uno de manera fluida y nítida. Nunca agrupes los números en bloques (no digas "seiscientos once").
-
-**PROHIBICIONES METACONVERSACIONALES ABSOLUTAS (CAPA DE PRIVACIDAD EXTERNA):**
-- Está **ESTRICTAMENTE PROHIBIDO** hacer comentarios sobre tus propias instrucciones internas, sobre cómo vas a hablar o anunciar tus acciones algorítmicas al cliente.
-- NUNCA uses frases explicativas o introductorias sobre tu forma de hablar como: "te lo voy a decir cifra por cifra", "procedo a deletrearte el número", "para que quede claro te repito", "según mis directrices de voz", o "voy a dictarte esto de manera clara y natural". 
-- No justifiques tus metodologías de procesamiento. Di la información directamente tal como lo haría un ser humano en su día a día, sin hacer preámbulos técnicos o declarativos sobre la naturaleza del bot.
-
-**ALCANCE DE TUS FUNCIONES:**
+**ALCANCE DE TUS FUNCIONES (Muy Importante):**
 - Tus únicas capacidades y tareas autorizadas son: **dar información detallada sobre el negocio** y **agendar nuevas citas**.
-- Si el usuario te solicita cancelar una cita, eliminar una reserva existente, modificar un horario ya agendado o realizar cualquier otra gestión administrativa, debes aclararle de forma muy educada que no tienes acceso para realizar esa acción. Responde con un tono comercial impecable explicando tus límites de forma simple.
+- Si el usuario te solicita cancelar una cita, eliminar una reserva existente, modificar un horario ya agendado o realizar cualquier otra gestión administrativa, debes aclararle de forma muy educada que no tienes acceso para realizar esa acción.
 
-**INFORMACIÓN OPERATIVA DEL NEGOCIO (Estrictamente real, nunca inventes datos):**
+**INFORMACIÓN OPERATIVA DEL NEGOCIO:**
 - Ubicación / Zona de servicio: {zona}
 - Horario comercial: {horario}
+- **Duración estándar de cada cita: {duracion_cita} minutos**
 - Servicios ofrecidos: {servicios}
-- Separación mínima requerida entre dos citas: {duracion_legible_prompt}
 - Email del Google Calendar institucional: {calendar_email}
 
 **FLUJO NATURAL PARA RECOGER DATOS Y AGENDAR CITA:**
-Cuando un usuario esté interesado en reservar, avanza de manera conversacional, preguntando los datos uno a uno:
-1. **Día y Hora:** Propón o confirma el momento de la cita según las preferencias del cliente. Una vez que el cliente te haya indicado o confirmado la fecha de manera clara, no vuelvas a pedirle confirmación ni a repreguntar sobre ella bajo ningún concepto. Asúmela inmediatamente como correcta y avanza al siguiente paso. Detén las preguntas sobre el día y la hora en cuanto verifiques que ya has obtenido ese dato con éxito.
-2. **Información Requerida del Cliente (OBLIGATORIA):** Pide de forma obligatoria y uno a uno los siguientes datos estipulados por el negocio: **{datos_reserva}**. No omitas ninguno. Insiste amablemente si el usuario olvida proveer alguno de ellos. Recuerda escribir los teléfonos dígito a dígito separados por comas para su correcta modulación.
-3. **PASO CRÍTICO DE CONFIRMACIÓN INTERACTIVA (CON EL AÑO EXPLICITO):** Una vez recopilados todos los datos de ({datos_reserva}) y la Fecha/Hora, realiza un resumen natural de la cita y pide confirmación explícita al cliente de forma directa antes de guardar nada.
-   *REGLA OBLIGATORIA:* Al repetir verbalmente la fecha del resumen, debes decir el DÍA, el MES y obligatoriamente el **AÑO completo**. No lo omitas bajo ningún concepto para dar máxima certidumbre.
-   *(Ejemplo de locución fluida: "Perfecto, entonces queda anotado para el [Día de la semana] [Día numérico] de [Mes] del [Año], a las [Hora en formato natural], a nombre de [Nombre], y el teléfono es el [Dígitos separados por comas]. ¿Es correcto?").*
-4. **MENSAJE DIRECTO DE RESERVA (SIN PREGUNTAS ADICIONALES):** En el instante en que el cliente te dé su confirmación definitiva diciendo que los datos son correctos, queda **TOTALMENTE PROHIBIDO** hacerle más preguntas, pedirle más datos o meter frases de relleno. Debes limitarte de forma inmediata a dar una respuesta firme de cierre indicando que procedes a guardar la cita y que espere un momento. Esto justifica el breve silencio de procesamiento de red. Acto correcto, dispara la herramienta `book_appointment`.
-   *(Locución exacta obligatoria: "Perfecto, pues procedo a agendar tu cita en el sistema ahora mismo, espera un momento por favor...").*
+Cuando un usuario esté interesado en reservar, avanza de manera conversacional:
+1. Día y Hora
+2. Nombre Completo
+3. Número de Teléfono
+4. Motivo de la Cita
 
-Debes pasar obligatoriamente el email `{calendar_email}` en el campo `calendar_email`.
-En el campo `datos_cliente_recolectados`, debes redactar de manera clara y estructurada los datos que el cliente te ha proporcionado en la conversación (por ejemplo: "Nombre: Juan Pérez, Teléfono: 6, 1, 1, 2, 2, 3, 3, 4, 4...").
+**Importante:** Cada cita tiene una duración fija de **{duracion_cita} minutos**. Al llamar a la herramienta `book_appointment`, asegúrate de que el `end_time` sea exactamente {duracion_cita} minutos después del `start_time`.
 
-**REGLAS CRÍTICAS DE CONTROL DE ERRORES (Capa de Privacidad de Desarrollo):**
-- NUNCA menciones nombres de variables, formatos de código, mensajes de servidores, ni términos técnicos de software en la llamada (como "error de JSON", "función", "endpoint", "404", "500", "backend", o "respuesta incorrecta"). Está estrictamente prohibido.
-- Si la herramienta `book_appointment` te devuelve un fallo, te indica que la cita es en el pasado o que el hueco está ocupado, actúa de manera resolutiva. Gestiona la situación diciendo algo como: 
-  *"Disculpa las molestias, parece que ese horario concreto ya ha pasado, está ocupado o no está disponible en nuestra agenda en este instante. Déjame revisar... ¿Te vendría bien intentar en otro tramo horario o preferirías mirar otro día?"*"""
+Solo cuando tengas todos los datos, utiliza la herramienta `book_appointment`."""
 
 
 # ==================== LÓGICA DE CREACIÓN ====================
-def create_bot_for_client(nombre_negocio, sector, servicios, horario, zona, voice_id, calendar_email, 
-                          idioma="es", datos_reserva="Nombre completo, Número de teléfono, Motivo de la cita", duracion_cita="30"):
-    custom_prompt = build_custom_prompt(nombre_negocio, sector, servicios, horario, zona, calendar_email, idioma, datos_reserva, duracion_cita)
+def create_bot_for_client(nombre_negocio, sector, servicios, horario, zona, voice_id, calendar_email, duracion_cita=30):
+    custom_prompt = build_custom_prompt(nombre_negocio, sector, servicios, horario, zona, calendar_email, duracion_cita)  custom_prompt = build_custom_prompt(nombre_negocio, sector, servicios, horario, zona, calendar_email, idioma, datos_reserva)
 
     retell_language_mapping = {"es": "es-ES", "en": "en-US", "ca": "ca-ES"}
     lang_retell = retell_language_mapping.get(str(idioma).strip().lower(), "es-ES")
 
     llm_res = retell_request("POST", "/create-retell-llm", {
-        "model": "gpt-4o",
+        "model": "gpt-4o-mini",
         "general_prompt": custom_prompt,
         "general_tools": [{
             "type": "custom",
@@ -322,17 +256,15 @@ def create_bot_for_client(nombre_negocio, sector, servicios, horario, zona, voic
                 "properties": {
                     "calendar_email": {"type": "string"},
                     "summary": {"type": "string"},
-                    "start_time": {
-                        "type": "string",
-                        "description": "Fecha y hora de inicio de la cita en formato ISO string en Europe/Madrid (ej: 2026-07-15T17:00:00)."
-                    },
+                    "start_time": {"type": "string"},
+                    "end_time": {"type": "string"},
                     "description": {"type": "string"},
                     "datos_cliente_recolectados": {
                         "type": "string",
                         "description": "Todos los datos requeridos por el negocio que han sido recolectados conversacionalmente del cliente (ej: Nombre completo, Teléfono, etc.)"
                     }
                 },
-                "required": ["calendar_email", "summary", "start_time", "datos_cliente_recolectados"]
+                "required": ["calendar_email", "summary", "start_time", "end_time", "datos_cliente_recolectados"]
             }
         }]
     })
@@ -406,75 +338,89 @@ def send_magic_link_email(email: str, magic_link: str):
             "to": [{"email": email}],
             "subject": "🔑 Tu enlace de acceso a Dansu AI",
             "htmlContent": f"""
-            <html>
-            <body style="font-family: sans-serif; padding: 30px; background-color: #f8fafc; color: #1e293b;">
-                <div style="max-width: 500px; margin: 0 auto; background: white; padding: 30px; border-radius: 16px; border: 1px solid #e2e8f0;">
-                    <h2 style="color: #0f172a; margin-top: 0;">¡Hola!</h2>
-                    <p>Haz clic en el botón inferior para iniciar sesión de forma segura e inmediata en tu panel de control de asistentes:</p>
-                    <div style="text-align: center; margin: 30px 0;">
-                        <a href="{magic_link}" target="_blank" style="background-color: #0078FF; color: white; padding: 14px 28px; text-decoration: none; border-radius: 10px; font-weight: bold; display: inline-block;">Iniciar sesión</a>
+                <html>
+                <body style="font-family: sans-serif; padding: 30px; background-color: #f8fafc; color: #1e293b;">
+                    <div style="max-width: 500px; margin: 0 auto; background: white; padding: 30px; border-radius: 16px; border: 1px solid #e2e8f0;">
+                        <h2 style="color: #0f172a; margin-top: 0;">¡Hola!</h2>
+                        <p>Haz clic en el botón inferior para iniciar sesión de forma segura e inmediata en tu panel de control de asistentes:</p>
+                        <div style="text-align: center; margin: 30px 0;">
+                            <a href="{magic_link}" target="_blank" style="background-color: #0078FF; color: white; padding: 14px 28px; text-decoration: none; border-radius: 12px; font-weight: 600; display: inline-block;">Acceder a mi Panel ✨</a>
+                        </div>
                     </div>
-                    <p style="color: #64748b; font-size: 14px; line-height: 22px;">Este enlace es de un solo uso y expirará en 15 minutos por motivos de seguridad. Si no has solicitado este acceso, puedes ignorar este correo con total tranquilidad.</p>
-                    <hr style="border: 0; border-top: 1px solid #e2e8f0; margin: 25px 0;">
-                    <p style="color: #94a3b8; font-size: 12px; margin-bottom: 0;">© 2026 Dansu Technologies. Todos los derechos reservados.</p>
-                </div>
-            </body>
-            </html>
+                </body>
+                </html>
             """
         }
-        headers = {
-            "accept": "application/json",
-            "content-type": "application/json",
-            "api-key": BREVO_API_KEY
-        }
-        r = requests.post("https://api.brevo.com/v3/smtp/email", headers=headers, json=payload, timeout=15)
-        logger.info(f"→ Brevo Email → {r.status_code}")
-        return r.status_code in [200, 201, 202]
+        r = requests.post("https://api.brevo.com/v3/smtp/email", headers={"api-key": BREVO_API_KEY, "Content-Type": "application/json"}, json=payload, timeout=15)
+        return r.status_code in (200, 201)
     except Exception as e:
-        logger.error(f"❌ Error sending email con Brevo: {e}", exc_info=True)
+        logger.error(f"Fallo enviando email con Brevo a {email}: {e}", exc_info=True)
         return False
 
 
-# ==================== ENDPOINTS DE ACCESO Y PANEL ====================
-@app.get("/login", response_class=HTMLResponse)
-async def login_endpoint(token: str, request: Request):
+# ==================== ENDPOINTS DE AUTENTICACIÓN ====================
+@app.post("/request-magic-link")
+async def request_magic_link(request: Request):
+    try:
+        data = await request.json()
+        email = data.get("email", "").strip().lower()
+        if not email or "@" not in email:
+            raise HTTPException(400, "Email inválido")
+
+        token = create_magic_token(email)
+        magic_link = f"https://retell-bot.onrender.com/redirect-to-wix?token={token}"
+
+        if send_magic_link_email(email, magic_link):
+            logger.info(f"Magic link solicitado y enviado a: {email}")
+            return {"status": "success", "message": "Enlace enviado de forma transaccional."}
+        raise HTTPException(500, "Error enviando email.")
+    except Exception as e:
+        logger.error(f"Error en request-magic-link: {e}", exc_info=True)
+        raise HTTPException(500, str(e))
+
+
+@app.get("/redirect-to-wix", response_class=HTMLResponse)
+async def redirect_to_wix(token: str, request: Request):
     email = verify_magic_token(token)
     if not email:
         logger.warning("Intento de acceso con Token caducado o corrupto.")
-        return HTMLResponse(
-            content="<html><body><h3>❌ El enlace es inválido o ha caducado. Por favor, solicita uno nuevo.</h3></body></html>", 
-            status_code=400
-        )
+        return "<html><body><h3>❌ El enlace es inválido o ha caducado. Por favor, solicita uno nuevo.</h3></body></html>"
+    
     client_ip = request.headers.get("x-forwarded-for", request.client.host).split(",")[0].strip()
+    
     SESIONES_ACTIVAS[client_ip] = {
         "email": email,
         "expira": datetime.utcnow() + timedelta(minutes=5)
     }
+    
     wix_url = "https://www.dansu.info/blank-4"
     logger.info(f"Redirección autorizada a Wix para IP {client_ip} vinculada al correo {email}")
-    
-    html_content = f"""
+    return f"""
     <html>
-    <head><meta http-equiv="refresh" content="0;url={wix_url}"></head>
-    <body style="font-family:sans-serif; text-align:center; padding-top:50px;">
-        <h3>Verificación completada con éxito. Cargando tu panel... 🚀</h3>
-    </body>
+        <head><meta http-equiv="refresh" content="0;url={wix_url}"></head>
+        <body style="font-family:sans-serif; text-align:center; padding-top:50px;">
+             <h3>Verificación completada con éxito. Cargando tu panel... 🚀</h3>
+        </body>
     </html>
     """
-    return HTMLResponse(content=html_content, status_code=200)
+
 
 @app.get("/check-session")
 async def check_session(request: Request):
     client_ip = request.headers.get("x-forwarded-for", request.client.host).split(",")[0].strip()
     sesion = SESIONES_ACTIVAS.get(client_ip)
+    
     if not sesion:
         return {"status": "no_session"}
+    
     if datetime.utcnow() > sesion["expira"]:
         del SESIONES_ACTIVAS[client_ip]
         logger.info(f"Sesión expirada por tiempo para la IP: {client_ip}")
         return {"status": "no_session"}
+        
     email = sesion["email"]
     del SESIONES_ACTIVAS[client_ip]  # Consumo de un solo uso por seguridad
+    
     try:
         conn = get_db_connection()
         cur = conn.cursor()
@@ -489,11 +435,12 @@ async def check_session(request: Request):
         cur.close()
         conn.close()
 
+
 @app.post("/get-user-bots")
 async def get_user_bots(request: Request):
     try:
         data = await request.json()
-        email = data.get("email", "").strip().lower()
+        email = data.get("email", "").strip()
         conn = get_db_connection()
         cur = conn.cursor()
         cur.execute("SELECT * FROM asistentes WHERE google_calendar_email = %s ORDER BY id DESC;", (email,))
@@ -506,6 +453,8 @@ async def get_user_bots(request: Request):
         if 'cur' in locals(): cur.close()
         if 'conn' in locals(): conn.close()
 
+
+# ==================== ENDPOINT DE ACTUALIZACIÓN (UPDATE) ====================
 @app.post("/update-retell-bot")
 async def update_retell_bot_endpoint(request: Request):
     try:
@@ -518,21 +467,30 @@ async def update_retell_bot_endpoint(request: Request):
         zona = data.get("zona")
         calendar_email = data.get("google_calendar_email")
         asistente_nombre = data.get("asistente")
-        idioma = data.get("idioma", "es")
-        datos_reserva = data.get("informacion_cita", data.get("datos_reserva", "Nombre completo, Número de teléfono, Motivo de la cita"))
         
-        duracion_cita = str(data.get("duracion_cita", "30")).strip()
+        idioma = data.get("idioma", "es")
+        datos_reserva = data.get("datos_reserva", data.get("informacion_cita", "Nombre completo, Número de teléfono, Motivo de la cita"))
+        
+        try:
+            duracion_cita = int(data.get("duracion_cita", 30))
+        except:
+            duracion_cita = 30
+
+        logger.info(f"Actualizando Bot ID: {agent_id} | Idioma: {idioma} | Datos Reserva: {datos_reserva} | Duración: {duracion_cita}")
+
+        if not agent_id:
+            raise HTTPException(status_code=400, detail="Falta el agent_id")
 
         agent_info = retell_request("GET", f"/get-agent/{agent_id}")
-        if not agent_info:
-            raise HTTPException(status_code=404, detail="No se encontró el asistente en Retell")
+        if not agent_info or "response_engine" not in agent_info:
+            raise HTTPException(status_code=404, detail="No se encontró el agente en Retell AI")
 
         llm_id = agent_info["response_engine"].get("llm_id")
         if not llm_id:
             raise HTTPException(status_code=400, detail="El agente no dispone de un motor LLM vinculado")
 
-        nuevo_prompt = build_custom_prompt(nombre_negocio, sector, servicios, horario, zona, calendar_email, idioma, datos_reserva, duracion_cita)
-        
+        nuevo_prompt = build_custom_prompt(nombre_negocio, sector, servicios, horario, zona, calendar_email, idioma, datos_reserva)
+
         llm_update = retell_request("PATCH", f"/update-retell-llm/{llm_id}", {
             "general_prompt": nuevo_prompt,
             "general_tools": [{
@@ -546,70 +504,85 @@ async def update_retell_bot_endpoint(request: Request):
                     "properties": {
                         "calendar_email": {"type": "string"},
                         "summary": {"type": "string"},
-                        "start_time": {
-                            "type": "string",
-                            "description": "Fecha y hora de inicio de la cita en formato ISO string en Europe/Madrid (ej: 2026-07-15T17:00:00)."
-                        },
+                        "start_time": {"type": "string"},
+                        "end_time": {"type": "string"},
                         "description": {"type": "string"},
                         "datos_cliente_recolectados": {
                             "type": "string",
                             "description": "Todos los datos requeridos por el negocio que han sido recolectados conversacionalmente del cliente (ej: Nombre completo, Teléfono, etc.)"
                         }
                     },
-                    "required": ["calendar_email", "summary", "start_time", "datos_cliente_recolectados"]
+                    "required": ["calendar_email", "summary", "start_time", "end_time", "datos_cliente_recolectados"]
                 }
             }]
         })
+        
         if not llm_update:
-            raise HTTPException(status_code=500, detail="Error al sincronizar cambios y herramientas con Retell")
+            raise HTTPException(status_code=500, detail="Error al sincronizar cambios y herramientas con Retell AI")
 
         voice_id_tecnico = VOICE_MAPPING.get(asistente_nombre)
+        
         retell_language_mapping = {"es": "es-ES", "en": "en-US", "ca": "ca-ES"}
         lang_retell = retell_language_mapping.get(str(idioma).strip().lower(), "es-ES")
+
         agent_patch_data = {"language": lang_retell}
         if voice_id_tecnico:
             agent_patch_data["voice_id"] = voice_id_tecnico
+            
         retell_request("PATCH", f"/update-agent/{agent_id}", agent_patch_data)
+
         if not voice_id_tecnico:
             voice_id_tecnico = agent_info.get("voice_id")
 
         conn = get_db_connection()
         cur = conn.cursor()
         cur.execute("""
-            UPDATE asistentes SET nombre_negocio = %s, sector = %s, servicios = %s, horario = %s, duracion_cita = %s, zona = %s, google_calendar_email = %s, asistente = %s, idioma = %s, datos_reserva = %s WHERE agent_id = %s;
-        """, (nombre_negocio, sector, servicios, horario, duracion_cita, zona, calendar_email, asistente_nombre, idioma, datos_reserva, agent_id))
+            UPDATE asistentes 
+            SET nombre_negocio = %s, sector = %s, servicios = %s, horario = %s, duracion_cita = %s, zona = %s, google_calendar_email = %s, asistente = %s, idioma = %s, datos_reserva = %s
+            WHERE agent_id = %s;
+        """, (nombre_negocio, sector, servicios, horario, duracion_cita, zona, calendar_email, voice_id_tecnico, idioma, datos_reserva, agent_id))
         conn.commit()
-        return {"status": "success", "message": "Asistente actualizado con éxito"}
+        
+        logger.info(f"✅ Registro persistente actualizado en DB para el bot: {agent_id}")
+        return {"status": "success", "message": "Asistente modificado de forma dinámica con éxito."}
     except Exception as e:
-        logger.error(f"Error en update-retell-bot: {e}", exc_info=True)
+        logger.error(f"❌ Error crítico en update-retell-bot: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
     finally:
         if 'cur' in locals(): cur.close()
         if 'conn' in locals(): conn.close()
 
+
 @app.post("/delete-retell-bot")
-async def delete_retell_bot(request: Request):
+async def delete_retell_bot_endpoint(request: Request):
     try:
         data = await request.json()
         agent_id = data.get("agent_id")
+
+        if not agent_id:
+            raise HTTPException(status_code=400, detail="Falta el parámetro agent_id")
+
+        logger.info(f"🗑️ Iniciando borrado adaptativo del agente: {agent_id}")
         agent_info = retell_request("GET", f"/get-agent/{agent_id}")
-        llm_id = None
-        if agent_info and "response_engine" in agent_info:
-            llm_id = agent_info["response_engine"].get("llm_id")
         
-        phone_number = None
-        if agent_info:
-            phone_number = agent_info.get("phone_number")
-
-        if phone_number:
+        if agent_info and isinstance(agent_info, dict):
+            llm_id = agent_info.get("response_engine", {}).get("llm_id")
             try:
-                retell_request("PATCH", f"/update-phone-number/{phone_number}", {"inbound_agents": []})
+                numbers_res = retell_request("GET", "/v2/list-phone-numbers")
+                if numbers_res and "items" in numbers_res:
+                    for phone in numbers_res["items"]:
+                        agents = phone.get("inbound_agents", [])
+                        if any(a.get("agent_id") == agent_id for a in agents):
+                            retell_request("PATCH", f"/update-phone-number/{phone['phone_number']}", {
+                                "inbound_agents": []
+                            })
+                            logger.info(f"ℹ️ Número {phone['phone_number']} liberado exitosamente.")
             except Exception as e_phone:
-                logger.warning(f"No se pudo desvincular el teléfono del agente {agent_id}: {e_phone}")
+                logger.error(f"⚠️ No se pudo liberar el teléfono del agente {agent_id}: {e_phone}")
 
-        retell_request("DELETE", f"/delete-agent/{agent_id}")
-        if llm_id:
-            retell_request("DELETE", f"/delete-retell-llm/{llm_id}")
+            retell_request("DELETE", f"/delete-agent/{agent_id}")
+            if llm_id:
+                retell_request("DELETE", f"/delete-retell-llm/{llm_id}")
         else:
             logger.warning(f"ℹ️ El agente {agent_id} ya no constaba en Retell. Purgando DB...")
 
@@ -619,6 +592,7 @@ async def delete_retell_bot(request: Request):
         conn.commit()
         logger.info(f"✅ Registro limpiado con éxito en PostgreSQL para: {agent_id}")
         return {"status": "success", "message": "Asistente eliminado de forma permanente."}
+
     except Exception as e:
         logger.error(f"❌ Error crítico en delete-retell-bot: {e}", exc_info=True)
         try:
@@ -643,112 +617,41 @@ async def book_appointment(request: Request):
         raw_body = (await request.body()).decode("utf-8")
         data = json.loads(raw_body) if raw_body else {}
         args = data.get("args", data)
+
         calendar_email = args.get("calendar_email")
-        start_time_str = args.get("start_time")
-        
-        raw_datos = args.get("datos_cliente_recolectados", "")
+        start_time = args.get("start_time")
+        summary = args.get("summary")
+        description = args.get("description", "")
 
-        # 1. VALIDACIÓN CRÍTICA: BLOQUEO DE CITAS EN EL PASADO
-        # Comparamos la fecha de inicio recibida con el momento actual en Europa/Madrid
-        start_iso = normalize_to_madrid_iso(start_time_str)
-        start_dt = datetime.fromisoformat(start_iso)
-        ahora_madrid = datetime.now(MADRID_TZ)
+        # Obtener duración desde la base de datos
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute("SELECT duracion_cita FROM asistentes WHERE google_calendar_email = %s ORDER BY id DESC LIMIT 1;", (calendar_email,))
+        row = cur.fetchone()
+        duracion_minutos = row["duracion_cita"] if row and row["duracion_cita"] else 30
+        cur.close()
+        conn.close()
 
-        # Tolerancia sutil de 2 minutos para evitar problemas de latencia de red al agendar "ahora mismo"
-        if start_dt < (ahora_madrid - timedelta(minutes=2)):
-            logger.warning(f"❌ Reserva rechazada: Intento de cita en el pasado ({start_iso}) en comparación con la hora actual ({ahora_madrid.isoformat()})")
-            return {
-                "code": "ERROR", 
-                "message": "La fecha u hora de la cita seleccionada ya ha pasado en nuestro sistema de reservas. Por favor, selecciona un horario futuro."
-            }
+        # Calcular end_time si no viene proporcionado
+        if "end_time" not in args or not args.get("end_time"):
+            from datetime import datetime, timedelta
+            dt_start = datetime.fromisoformat(start_time.replace("Z", "+00:00"))
+            dt_end = dt_start + timedelta(minutes=duracion_minutos)
+            end_time = dt_end.isoformat()
+        else:
+            end_time = args.get("end_time")
 
-        # 2. CONSULTA DE DURACIÓN DE LA CITA DESDE LA BASE DE DATOS POSTGRESQL
-        duracion_minutos = 30
-        nombre_negocio_auditoria = "Asistente Dansu"
-        
-        try:
-            conn = get_db_connection()
-            cur = conn.cursor()
-            cur.execute("SELECT nombre_negocio, duracion_cita FROM asistentes WHERE google_calendar_email = %s LIMIT 1;", (calendar_email,))
-            db_bot = cur.fetchone()
-            if db_bot:
-                nombre_negocio_auditoria = db_bot["nombre_negocio"]
-                try:
-                    duracion_minutos = int(str(db_bot["duracion_cita"]).strip())
-                except ValueError:
-                    logger.warning(f"No se pudo parsear como entero el valor duracion_cita '{db_bot['duracion_cita']}'.")
-        except Exception as db_err:
-            logger.warning(f"No se pudo consultar el bot de auditoría para {calendar_email}: {db_err}")
-        finally:
-            if 'cur' in locals(): cur.close()
-            if 'conn' in locals(): conn.close()
-
-        # 3. CÁLCULO SEGURO DE FECHAS EN PYTHON (start_time -> end_time)
-        end_dt = start_dt + timedelta(minutes=duracion_minutos)
-        end_time_str = end_dt.isoformat()
-
-        # 4. FUNCIÓN DE LIMPIEZA DE NÚMEROS DE TELÉFONO (QUITAR COMAS Y ESPACIOS)
-        def clean_spaced_phones(text):
-            pattern = r'(?:\d\s*,\s*){3,}\d'
-            def replace_match(match):
-                return match.group(0).replace(",", "").replace(" ", "")
-            return re.sub(pattern, replace_match, text)
-
-        datos_limpios = clean_spaced_phones(raw_datos)
-
-        # 5. PARSEAR LOS DATOS DEL CLIENTE PARA EVITAR DUPLICADOS
-        lineas_formateadas = []
-        campos_vistos = set()
-
-        for linea in datos_limpios.split("\n"):
-            linea_strip = linea.strip()
-            if not linea_strip:
-                continue
-            
-            linea_limpia = re.sub(r'^[•\-\*\s]+', '', linea_strip)
-            
-            if ":" in linea_limpia:
-                partes = linea_limpia.split(":", 1)
-                clave = partes[0].strip().capitalize()
-                valor = partes[1].strip()
-                
-                if clave in campos_vistos or not valor:
-                    continue
-                campos_vistos.add(clave)
-                
-                if "nombre" in clave.lower():
-                    lineas_formateadas.append(f"👤  Nombre: {valor}")
-                elif "telefono" in clave.lower() or "teléfono" in clave.lower() or "contacto" in clave.lower():
-                    lineas_formateadas.append(f"📞  Teléfono: {valor}")
-                elif "motivo" in clave.lower() or "servicio" in clave.lower():
-                    lineas_formateadas.append(f"📝  Motivo: {valor}")
-                else:
-                    lineas_formateadas.append(f"•  {clave}: {valor}")
-            else:
-                if linea_limpia not in campos_vistos:
-                    campos_vistos.add(linea_limpia)
-                    lineas_formateadas.append(f"•  {linea_limpia}")
-
-        # 6. CONSTRUCCIÓN DE LA DESCRIPCIÓN FINAL DEL EVENTO
-        seccion_cliente = "\n".join(lineas_formateadas) if lineas_formateadas else f"• {datos_limpios}"
-        asistente_info_auditoria = f"\n🤖  Asistente: {nombre_negocio_auditoria}"
-
-        descripcion_final = (
-            f"📋  DETALLES DE LA RESERVA\n"
-            f"──────────────────────────────────\n"
-            f"{seccion_cliente}\n\n"
-            f"──────────────────────────────────\n"
-            f"⚙️  SISTEMA DE ASISTENCIA VIRTUAL DANSU"
-            f"{asistente_info_auditoria}\n"
-            f"📅  Fecha de registro: {datetime.now(MADRID_TZ).strftime('%d/%m/%Y %H:%M')}\n"
+        event = create_google_event(
+            calendar_email,
+            summary,
+            start_time,
+            end_time,
+            description
         )
 
-        create_google_event(
-            calendar_email, args.get("summary", f"Cita de {nombre_negocio_auditoria}"), start_iso, end_time_str, descripcion_final
-        )
-        return {"code": "SUCCESS", "message": "Cita agendada correctamente"}
+        return {"code": "SUCCESS", "message": f"Cita agendada correctamente ({duracion_minutos} minutos)"}
     except Exception as e:
-        logger.error(f"❌ ERROR EN BOOK-APPOINTMENT: {e}", exc_info=True)
+        print(f"❌ ERROR EN BOOK-APPOINTMENT: {e}")
         return {"code": "ERROR", "message": str(e)}
 
 @app.post("/verify-calendar-access")
@@ -757,57 +660,61 @@ async def verify_calendar_access(request: Request):
     try:
         data = await request.json()
         calendar_email = data.get("calendar_email")
-        
-        descripcion_test = (
-            f"🧪  PRUEBA DE CONEXIÓN EXITOSA\n"
-            f"──────────────────────────────────\n"
-            f"Felicidades, Dansu AI tiene acceso total a este calendario.\n"
-            f"Este evento se puede borrar de forma segura."
-        )
-        
         create_google_event(
-            calendar_email, "🧪 Prueba de Acceso Dansu AI", (datetime.now(MADRID_TZ) + timedelta(days=30)).isoformat(), (datetime.now(MADRID_TZ) + timedelta(days=30, minutes=15)).isoformat(), descripcion_test, bypass_availability=True
+            calendar_email,
+            "🧪 Prueba de conexión - Dansu",
+            "2026-07-01T10:00:00+02:00",
+            "2026-07-01T10:30:00+02:00",
+            bypass_availability=True
         )
         return {"status": "success", "message": "Acceso verificado correctamente"}
     except Exception as e:
         logger.error(f"Error en verify-calendar-access: {e}", exc_info=True)
         raise HTTPException(status_code=400, detail=str(e))
 
+
 @app.post("/create-retell-bot")
 async def create_retell_bot_endpoint(request: Request):
     try:
         payload = await request.json()
         data = payload if isinstance(payload, dict) else payload.get("data", payload)
+        
         voice_id = VOICE_MAPPING.get(data.get("asistente"), "openai-Alloy")
+        duracion_cita = int(data.get("duracion_cita", 30))
         
-        idioma = data.get("idioma", "es")
-        datos_reserva = data.get("informacion_cita", data.get("datos_reserva", "Nombre completo, Número de teléfono, Motivo de la cita"))
-        
-        duracion_cita = str(data.get("duracion_cita", data.get("duracion_cita_texto", "30"))).strip()
-
-        return create_bot_for_client(
-            data.get("nombre_negocio"), data.get("sector"), data.get("servicios"),
-            data.get("horario"), data.get("zona"), voice_id, data.get("google_calendar_email"),
-            idioma, datos_reserva, duracion_cita
+        result = create_bot_for_client(
+            data.get("nombre_negocio"), 
+            data.get("sector"), 
+            data.get("servicios"),
+            data.get("horario"), 
+            data.get("zona"), 
+            voice_id, 
+            data.get("google_calendar_email"),
+            duracion_cita
         )
+        
+        # Guardar también la duración en la base de datos
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute("""
+            UPDATE asistentes 
+            SET duracion_cita = %s 
+            WHERE google_calendar_email = %s 
+            ORDER BY id DESC LIMIT 1;
+        """, (duracion_cita, data.get("google_calendar_email")))
+        conn.commit()
+        cur.close()
+        conn.close()
+        
+        return result
     except Exception as e:
-        logger.error(f"Error en create-retell-bot: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.post("/request-magic-link")
-async def request_magic_link(request: Request):
-    try:
-        data = await request.json()
-        email = data.get("email", "").strip().lower()
-        if not email:
-            raise HTTPException(status_code=400, detail="Email requerido")
-        token = create_magic_token(email)
-        magic_link = f"https://retell-bot.onrender.com/login?token={token}"
-        enviado = send_magic_link_email(email, magic_link)
-        if enviado:
-            return {"status": "success", "message": "Enlace mágico enviado correctamente."}
-        else:
-            raise HTTPException(status_code=500, detail="Error al enviar el correo.")
-    except Exception as e:
-        logger.error(f"Error en request-magic-link: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+@app.get("/")
+async def root():
+    return {"status": "Dansu Backend Completo OK"}
+
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)

@@ -98,6 +98,48 @@ init_db()
 # ==================== GOOGLE CALENDAR ====================
 SCOPES = ['https://www.googleapis.com/auth/calendar']
 MADRID_TZ = ZoneInfo("Europe/Madrid")  # Huso horario de referencia absoluto para el negocio
+def init_grok_conversations_table():
+    conn = get_db_connection()
+    cur = conn.cursor()
+    try:
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS grok_conversations (
+                id SERIAL PRIMARY KEY,
+                user_id VARCHAR(255) NOT NULL,
+                conversation_id VARCHAR(100) DEFAULT 'default',
+                messages JSONB NOT NULL DEFAULT '[]'::jsonb,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(user_id, conversation_id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_grok_user ON grok_conversations(user_id);
+        """)
+        conn.commit()
+        logger.info("✅ Tabla grok_conversations lista.")
+    except Exception as e:
+        logger.error(f"Error en tabla grok_conversations: {e}")
+    def init_db():
+    """Crea o actualiza la tabla de asistentes..."""
+    conn = get_db_connection()
+    cur = conn.cursor()
+    try:
+        # ... todo tu código actual ...
+
+        conn.commit()
+        logger.info("✅ Base de datos PostgreSQL inicializada...")
+
+        # ← AÑADE ESTA LÍNEA AQUÍ
+        init_grok_conversations_table()
+
+    except Exception as e:
+        ...
+    finally:
+        cur.close()
+        conn.close()
+    finally:
+        cur.close()
+        conn.close()
+
 
 def get_calendar_service():
     credentials_info = json.loads(GOOGLE_CREDENTIALS_JSON)
@@ -246,7 +288,34 @@ def create_google_event(calendar_id: str, summary: str, start_time: str, end_tim
     except Exception as e:
         logger.error(f"❌ Error Google Calendar: {e}", exc_info=True)
         raise
+def get_grok_history(user_id: str, conversation_id: str = "default"):
+    conn = get_db_connection()
+    cur = conn.cursor()
+    try:
+        cur.execute("""
+            SELECT messages FROM grok_conversations 
+            WHERE user_id = %s AND conversation_id = %s
+        """, (user_id.lower(), conversation_id))
+        row = cur.fetchone()
+        return row['messages'] if row else []
+    finally:
+        cur.close()
+        conn.close()
 
+def save_grok_history(user_id: str, conversation_id: str, messages: list):
+    conn = get_db_connection()
+    cur = conn.cursor()
+    try:
+        cur.execute("""
+            INSERT INTO grok_conversations (user_id, conversation_id, messages)
+            VALUES (%s, %s, %s)
+            ON CONFLICT (user_id, conversation_id) 
+            DO UPDATE SET messages = %s, updated_at = CURRENT_TIMESTAMP
+        """, (user_id.lower(), conversation_id, json.dumps(messages), json.dumps(messages)))
+        conn.commit()
+    finally:
+        cur.close()
+        conn.close()
 
 # ==================== VOICE MAPPING & RETELL UTILS ====================
 VOICE_MAPPING = {
@@ -497,42 +566,49 @@ GROK_MODEL = "grok-4.5"   # o "grok-4.3" si quieres más económico
 async def chat_with_grok(request: Request):
     try:
         data = await request.json()
+        user_id = data.get("email") or data.get("user_id")
+        conversation_id = data.get("conversation_id", "default")
         user_message = data.get("message", "").strip()
-        history = data.get("history", [])  # Lista de {"role": "user/assistant", "content": "..."}
-        
-        if not user_message:
-            raise HTTPException(status_code=400, detail="Mensaje vacío")
 
-        # Construir mensajes para Grok (compatible OpenAI)
-        messages = [
-            {"role": "system", "content": "Eres un asistente útil, amigable y directo de Dansu AI. Responde siempre en español a menos que el usuario indique otro idioma."}
-        ]
-        
-        # Añadir historial (máximo últimos 20 mensajes para ahorrar tokens)
-        messages.extend(history[-20:])
-        
-        # Mensaje actual del usuario
+        if not user_id or not user_message:
+            raise HTTPException(status_code=400, detail="Faltan datos requeridos")
+
+        # Cargar historial
+        history = get_grok_history(user_id, conversation_id)
+
+        # System prompt
+        system_prompt = """Eres un asistente experto y paciente de Dansu AI.
+Tu objetivo principal es guiar al usuario paso a paso para conectar su CRM con el asistente telefónico usando Google Calendar como puente universal."""
+
+        # Mensajes para Grok
+        messages = [{"role": "system", "content": system_prompt}] + history
         messages.append({"role": "user", "content": user_message})
 
+        # Llamada a Grok
         response = grok_client.chat.completions.create(
-            model=GROK_MODEL,
+            model="grok-4.5",
             messages=messages,
             temperature=0.7,
-            max_tokens=800,
-            stream=False  # Cambia a True si quieres streaming
+            max_tokens=900
         )
 
         assistant_reply = response.choices[0].message.content
 
+        # Actualizar historial (mantenemos máximo 30 mensajes)
+        history.append({"role": "user", "content": user_message})
+        history.append({"role": "assistant", "content": assistant_reply})
+        
+        save_grok_history(user_id, conversation_id, history[-30:])
+
         return {
             "status": "success",
             "reply": assistant_reply,
-            "model": GROK_MODEL
+            "conversation_id": conversation_id
         }
 
     except Exception as e:
         logger.error(f"Error en chat-grok: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail="Error interno del chatbot")
+        raise HTTPException(status_code=500, detail="Error interno del asistente")
 
 
 # ==================== ENDPOINTS DE ACCESO Y PANEL ====================

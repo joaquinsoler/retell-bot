@@ -80,18 +80,21 @@ def init_db():
                 fecha_creacion TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
         """)
-        # Migraciones automáticas por si la tabla ya existía sin estas columnas
+        # Migraciones automáticas...
         cur.execute("ALTER TABLE asistentes ADD COLUMN IF NOT EXISTS idioma VARCHAR(50) DEFAULT 'es';")
         cur.execute("ALTER TABLE asistentes ADD COLUMN IF NOT EXISTS datos_reserva TEXT DEFAULT 'Nombre completo, Número de teléfono, Motivo de la cita';")
         cur.execute("ALTER TABLE asistentes ADD COLUMN IF NOT EXISTS duracion_cita INT DEFAULT 30;")
         conn.commit()
         logger.info("✅ Base de datos PostgreSQL inicializada, verified y lista.")
+
+        # ← AÑADE ESTA LÍNEA AQUÍ (con la misma indentación que el logger.info)
+        init_grok_conversations_table()
+
     except Exception as e:
         logger.error(f"❌ Error inicializando la base de datos: {e}", exc_info=True)
     finally:
         cur.close()
         conn.close()
-
 # Inicializamos la estructura de la base de datos al arrancar el backend
 init_db()
 

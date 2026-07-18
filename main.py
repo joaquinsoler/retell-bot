@@ -10,7 +10,9 @@ import requests
 import psycopg2  # Conector nativo de PostgreSQL
 from psycopg2.extras import RealDictCursor
 
-import google.generativeai as genai
+# --- IMPORTACIÓN ACTUALIZADA ---
+from google import genai
+from google.genai import types
 
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
@@ -40,9 +42,8 @@ if not all([RETELL_API_KEY, GOOGLE_CREDENTIALS_JSON, DATABASE_URL, JWT_SECRET_KE
     logger.critical("Faltan variables de entorno críticas en el despliegue.")
     raise Exception("Faltan variables de entorno críticas (RETELL_API_KEY, GOOGLE_CREDENTIALS, DATABASE_URL, JWT_SECRET_KEY, BREVO_API_KEY o GEMINI_API_KEY)")
 
-# Inicialización de Gemini
-genai.configure(api_key=GEMINI_API_KEY)
-model = genai.GenerativeModel('gemini-1.5-flash')
+# Inicialización del cliente de Gemini actualizado
+client = genai.Client(api_key=GEMINI_API_KEY)
 
 # Configuración JWT
 ALGORITHM = "HS256"
@@ -259,7 +260,7 @@ VOICE_MAPPING = {
     "Cimo": "11labs-Adrian", "Brynne": "11labs-Brynne", "Chloe": "11labs-Chloe",
     "Kate": "openai-Nova", "Grace": "openai-Shimmer", "Leland": "11labs-Leland",
     "Marissa": "11labs-Marissa", "Lily": "11labs-Lily", "Della": "11labs-Delia",
-    "Nico": "openai-Nico", "Rita": "11labs-Rita", "Meritt": "11labs-Meritt",
+    "Nico": "openai-Onyx", "Rita": "11labs-Rita", "Meritt": "11labs-Meritt",
     "Willa": "11labs-Willa", "Maren": "11labs-Maren", "Tasmin": "11labs-Tasmin",
     "Ashley": "11labs-Ashley", "Andrea": "openai-Alloy", "Claudia": "11labs-Claudia",
     "Gaby": "11labs-Gaby", "Alejandro": "openai-Echo", "Sloane": "11labs-Sloane"
@@ -774,24 +775,24 @@ async def chat_endpoint(request: Request):
         data = await request.json()
         historial = data.get("historial", [])
         
-        # Convertir historial de frontend al formato esperado por Gemini
-        gemini_history = []
+        # Convertir historial al formato esperado por la nueva librería google-genai
+        contents = []
         for msg in historial:
-            gemini_history.append({
-                "role": "user" if msg["role"] == "user" else "model",
-                "parts": [msg["content"]]
-            })
+            contents.append(types.Content(
+                role="user" if msg["role"] == "user" else "model",
+                parts=[types.Part.from_text(text=msg["content"])]
+            ))
 
-        # Iniciamos el chat con la herramienta de búsqueda habilitada
-        chat = model.start_chat(history=gemini_history)
-        
-        # Enviamos la petición con búsqueda de Google habilitada
-        respuesta = chat.send_message(
-            historial[-1]["content"],
-            tools=[{"google_search_retrieval": {}}] 
+        # Generar respuesta usando el cliente y habilitando Google Search Grounding
+        respuesta = client.models.generate_content(
+            model="gemini-1.5-flash",
+            contents=contents,
+            config=types.GenerateContentConfig(
+                tools=[types.Tool(google_search_retrieval=types.GoogleSearchRetrieval())]
+            )
         )
         
         return {"respuesta": respuesta.text}
     except Exception as e:
-        logger.error(f"Error en chat-endpoint: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail="Error procesando mensaje.")                            
+        logger.error(f"Error en chat-endpoint con google-genai: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Error procesando mensaje.")                           

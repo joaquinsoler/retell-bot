@@ -787,7 +787,7 @@ async def chat_endpoint(request: Request):
 
         # Generar respuesta usando el cliente y habilitando Google Search Grounding
         respuesta = client.models.generate_content(
-            model="gemini-1.5-flash",
+            model="gemini-1.5-flash-001",
             contents=contents,
             config=types.GenerateContentConfig(
                 tools=[types.Tool(google_search_retrieval=types.GoogleSearchRetrieval())]

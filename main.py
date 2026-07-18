@@ -771,13 +771,13 @@ async def request_magic_link(request: Request):
         raise HTTPException(status_code=500, detail=str(e))
 
 # ==================== NUEVO ENDPOINT PARA CHAT WEB CON GEMINI SEARCH ====================
+# ==================== NUEVO ENDPOINT ACTUALIZADO ====================
 @app.post("/chat-endpoint")
 async def chat_endpoint(request: Request):
     try:
         data = await request.json()
         historial = data.get("historial", [])
         
-        # Convertir historial al formato esperado por la nueva librería google-genai
         contents = []
         for msg in historial:
             contents.append(types.Content(
@@ -785,9 +785,9 @@ async def chat_endpoint(request: Request):
                 parts=[types.Part.from_text(text=msg["content"])]
             ))
 
-        # Generar respuesta usando el cliente y habilitando Google Search Grounding
+        # USAMOS EL NOMBRE EXACTO CONFIRMADO POR TU API
         respuesta = client.models.generate_content(
-            model="gemini-1.5-flash-001",
+            model="models/gemini-2.0-flash",
             contents=contents,
             config=types.GenerateContentConfig(
                 tools=[types.Tool(google_search_retrieval=types.GoogleSearchRetrieval())]
@@ -796,5 +796,5 @@ async def chat_endpoint(request: Request):
         
         return {"respuesta": respuesta.text}
     except Exception as e:
-        logger.error(f"Error en chat-endpoint con google-genai: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail="Error procesando mensaje.")                           
+        logger.error(f"Error en chat-endpoint: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Error procesando mensaje.")                         

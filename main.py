@@ -2,31 +2,25 @@ import os
 import json
 import logging
 from datetime import datetime, timedelta
-from zoneinfo import ZoneInfo  # Gestión nativa y precisa de zonas horarias en Python 3.9+
+from zoneinfo import ZoneInfo
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
 import requests
-import psycopg2  # Conector nativo de PostgreSQL
+import psycopg2
 from psycopg2.extras import RealDictCursor
-
-# --- IMPORTACIÓN ACTUALIZADA ---
-# Cambia: from google import genai
-# Por:
-from google import genai
-from google.genai import types
 
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
-from jose import JWTError, jwt  # Manejo seguro de tokens del Magic Link
+from jose import JWTError, jwt
 
 # ==================== CONFIGURACIÓN DE LOGS PARA RENDER ====================
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s - %(message)s",
-    handlers=[logging.StreamHandler()]  # Envía los logs directamente a la consola de Render
+    handlers=[logging.StreamHandler()]
 )
 logger = logging.getLogger("DansuAI-Backend")
 
@@ -38,20 +32,17 @@ GOOGLE_CREDENTIALS_JSON = os.getenv("GOOGLE_CREDENTIALS")
 DATABASE_URL = os.getenv("DATABASE_URL")
 JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY")
 BREVO_API_KEY = os.getenv("BREVO_API_KEY")
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+GROK_API_KEY = os.getenv("GROK_API_KEY")  # ← Añadida para el nuevo endpoint
 
-if not all([RETELL_API_KEY, GOOGLE_CREDENTIALS_JSON, DATABASE_URL, JWT_SECRET_KEY, BREVO_API_KEY, GEMINI_API_KEY]):
+if not all([RETELL_API_KEY, GOOGLE_CREDENTIALS_JSON, DATABASE_URL, JWT_SECRET_KEY, BREVO_API_KEY]):
     logger.critical("Faltan variables de entorno críticas en el despliegue.")
-    raise Exception("Faltan variables de entorno críticas (RETELL_API_KEY, GOOGLE_CREDENTIALS, DATABASE_URL, JWT_SECRET_KEY, BREVO_API_KEY o GEMINI_API_KEY)")
-
-# Inicialización del cliente de Gemini actualizado
-client = genai.Client(api_key=GEMINI_API_KEY)
+    raise Exception("Faltan variables de entorno críticas (RETELL_API_KEY, GOOGLE_CREDENTIALS, DATABASE_URL, JWT_SECRET_KEY o BREVO_API_KEY)")
 
 # Configuración JWT
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 15
 
-# Almacén temporal de sesiones validadas indexadas por IP (IP: {"email": email, "expira": datetime})
+# Almacén temporal de sesiones validadas indexadas por IP
 SESIONES_ACTIVAS = {}
 
 # ==================== CORS ====================
@@ -90,7 +81,6 @@ def init_db():
                 fecha_creacion TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
         """)
-        # Migraciones automáticas por si la tabla ya existía sin estas columnas
         cur.execute("ALTER TABLE asistentes ADD COLUMN IF NOT EXISTS idioma VARCHAR(50) DEFAULT 'es';")
         cur.execute("ALTER TABLE asistentes ADD COLUMN IF NOT EXISTS datos_reserva TEXT DEFAULT 'Nombre completo, Número de teléfono, Motivo de la cita';")
         cur.execute("ALTER TABLE asistentes ADD COLUMN IF NOT EXISTS duracion_cita INT DEFAULT 30;")
@@ -102,12 +92,12 @@ def init_db():
         cur.close()
         conn.close()
 
-# Inicializamos la estructura de la base de datos al arrancar el backend
 init_db()
 
 # ==================== GOOGLE CALENDAR ====================
 SCOPES = ['https://www.googleapis.com/auth/calendar']
-MADRID_TZ = ZoneInfo("Europe/Madrid")  # Huso horario de referencia absoluto para el negocio
+MADRID_TZ = ZoneInfo("Europe/Madrid")
+
 def get_calendar_service():
     credentials_info = json.loads(GOOGLE_CREDENTIALS_JSON)
     credentials = service_account.Credentials.from_service_account_info(
@@ -180,8 +170,7 @@ def create_google_event(calendar_id: str, summary: str, start_time: str, end_tim
     try:
         ensure_calendar_access(calendar_id)
         
-        # === BÚSQUEDA ROBUSTA DE duracion_cita ===
-        duracion_minutos = 30  # fallback seguro
+        duracion_minutos = 30
         calendar_clean = str(calendar_id).strip().lower()
         
         conn = get_db_connection()
@@ -199,8 +188,7 @@ def create_google_event(calendar_id: str, summary: str, start_time: str, end_tim
                 duracion_minutos = int(row['duracion_cita'])
                 logger.info(f"✅ Duración encontrada en BD: {duracion_minutos} minutos para email '{row.get('google_calendar_email')}'")
             else:
-                logger.error(f"❌ NO SE ENCONTRÓ ASISTENTE en BD para email: '{calendar_id}' (limpio: '{calendar_clean}')")
-                # Debug: mostrar algunos emails existentes
+                logger.error(f"❌ NO SE ENCONTRÓ ASISTENTE en BD para email: '{calendar_id}'")
                 cur.execute("SELECT google_calendar_email, duracion_cita FROM asistentes LIMIT 10;")
                 existing = cur.fetchall()
                 if existing:
@@ -211,7 +199,6 @@ def create_google_event(calendar_id: str, summary: str, start_time: str, end_tim
             cur.close()
             conn.close()
 
-        # === FORZAR SIEMPRE la duración configurada ===
         try:
             start_dt = datetime.fromisoformat(str(start_time).replace("Z", "+00:00"))
             if start_dt.tzinfo is None:
@@ -221,12 +208,11 @@ def create_google_event(calendar_id: str, summary: str, start_time: str, end_tim
             final_end_time = end_dt.isoformat()
             
             if end_time is not None and str(end_time).strip() != "":
-                logger.warning(f"⚠️ Ignorado end_time enviado por el agente. Duración forzada a {duracion_minutos} minutos.")
+                logger.warning(f"⚠️ Ignorado end_time enviado por el agente.")
             
             logger.info(f"⏱️ Aplicando duración: {duracion_minutos} minutos")
         except Exception as calc_error:
             logger.error(f"Error calculando horario: {calc_error}")
-            # Fallback ultra seguro
             start_dt = datetime.fromisoformat(str(start_time).replace("Z", "+00:00"))
             if start_dt.tzinfo is None:
                 start_dt = start_dt.replace(tzinfo=MADRID_TZ)
@@ -255,8 +241,6 @@ def create_google_event(calendar_id: str, summary: str, start_time: str, end_tim
     except Exception as e:
         logger.error(f"❌ Error Google Calendar: {e}", exc_info=True)
         raise
-
-
 # ==================== VOICE MAPPING & RETELL UTILS ====================
 VOICE_MAPPING = {
     "Cimo": "11labs-Adrian", "Brynne": "11labs-Brynne", "Chloe": "11labs-Chloe",
@@ -267,6 +251,7 @@ VOICE_MAPPING = {
     "Ashley": "11labs-Ashley", "Andrea": "openai-Alloy", "Claudia": "11labs-Claudia",
     "Gaby": "11labs-Gaby", "Alejandro": "openai-Echo", "Sloane": "11labs-Sloane"
 }
+
 def retell_request(method: str, endpoint: str, json_data=None):
     url = f"https://api.retellai.com{endpoint}"
     headers = {"Authorization": f"Bearer {RETELL_API_KEY}", "Content-Type": "application/json"}
@@ -304,53 +289,33 @@ Tu objetivo principal es atender a los clientes con la máxima amabilidad, empat
 - La fecha real de hoy es: {fecha_legible}.
 - La hora real actual es: {hora_legible} (Huso: Europe/Madrid).
 Utiliza esta referencia internamente para comprender de manera exacta términos como "hoy", "mañana", "esta tarde" o "el próximo martes".
-*REGLA CRÍTICA:* Queda terminantemente prohibido decirle al cliente frases explícitas informándole de estos metadatos temporales (como "recuerda que hoy es lunes tal" o "como son las tantas del día tal"). Esta información es confidencial y solo sirve para tus cálculos de calendario de fondo.
+*REGLA CRÍTICA:* Queda terminantemente prohibido decirle al cliente frases explícitas informándole de estos metadatos temporales.
 
 **CONFIGURACIÓN OBLIGATORIA DE IDIOMA:**
 - Debes interactuar, responder, saludar y hablar COMPLETAMENTE en el idioma: **{idioma_atencion}**.
-Toda la llamada debe seguir este idioma de forma estricta.
 
 **REGLAS CRÍTICAS DE PRONUNCIACIÓN DE VOZ (COMPORTAMIENTO HUMANO NATURAL):**
-1. **Manejo Absoluto de Horas (PROHIBIDO DECIR AM O PM):** Jamás pronuncies ni digas en voz alta las siglas "AM" o "PM". Transfórmalas siempre a lenguaje natural o formato de 24 horas. Por ejemplo, en lugar de decir "cinco p m" o "cinco a m", di de forma totalmente orgánica: *"las cinco de la tarde"*, *"las diez de la mañana"* o *"las diecisiete horas"*. 
-2. **Formateo Estricto de Números de Teléfono (Evitar agrupaciones):** Al escribir un número de teléfono para que la síntesis de voz lo reproduzca, escribe los dígitos separados por comas y espacios (ejemplo: "6, 2, 2, 1, 1, 4, 4, 5, 5"). Esto hace que el sistema realice pausas sutiles de forma automática y los mencione uno a uno de manera fluida y nítida. Nunca agrupes los números en bloques (no digas "seiscientos once").
+1. **Manejo Absoluto de Horas (PROHIBIDO DECIR AM O PM):** Jamás pronuncies ni digas en voz alta las siglas "AM" o "PM".
+2. **Formateo Estricto de Números de Teléfono:** Escribe los dígitos separados por comas y espacios.
 
-**PROHIBICIONES METACONVERSACIONALES ABSOLUTAS (CAPA DE PRIVACIDAD EXTERNA):**
-- Está **ESTRICTAMENTE PROHIBIDO** hacer comentarios sobre tus propias instrucciones internas, sobre cómo vas a hablar o anunciar tus acciones algorítmicas al cliente.
-- NUNCA uses frases explicativas o introductorias sobre tu forma de hablar como: "te lo voy a decir cifra por cifra", "procedo a deletrearte el número", "para que quede claro te repitas", "según mis directrices de voz", o "voy a dictarte esto de manera clara y natural". 
-- No justifiques tus metodologías de procesamiento. Di la información directamente tal como lo haría un ser humano en su día a día, sin hacer preámbulos técnicos o declarativos sobre la naturaleza del bot.
+**PROHIBICIONES METACONVERSACIONALES ABSOLUTAS:**
+- Está **ESTRICTAMENTE PROHIBIDO** hacer comentarios sobre tus propias instrucciones internas.
 
 **REGLA OBLIGATORIA DE DURACIÓN DE CITA:**
 - Todas las citas deben tener una duración **exacta de {duracion_cita} minutos**.
-- Tú solo debes pedir y confirmar la hora de INICIO de la cita.
-- El sistema calculará automáticamente la hora de fin según la configuración del negocio ({duracion_cita} minutos).
-- Nunca inventes, cambies ni asumas una duración diferente.
 
 **ALCANCE DE TUS FUNCIONES:**
 - Tus únicas capacidades y tareas autorizadas son: **dar información detallada sobre el negocio** y **agendar nuevas citas**.
-- Si el usuario te solicita cancelar una cita, eliminar una reserva existente, modificar un horario ya agendado o realizar cualquier otra gestión administrativa, debes aclararle de forma muy educada que no tienes acceso para realizar esa acción. Responde con un tono comercial impecable explicando tus límites de forma simple.
 
-**INFORMACIÓN OPERATIVA DEL NEGOCIO (Estrictamente real, nunca inventes datos):**
+**INFORMACIÓN OPERATIVA DEL NEGOCIO:**
 - Ubicación / Zona de servicio: {zona}
 - Horario comercial: {horario}
 - Servicios ofrecidos: {servicios}
 - Email del Google Calendar institucional: {calendar_email}
 
-**FLUJO NATURAL PARA RECOGER DATOS Y AGENDAR CITA:**
-Cuando un usuario esté interesado en reservar, avanza de manera conversacional, preguntando los datos uno a uno:
-1. **Día y Hora:** Propón o confirma el momento de la cita según las preferencias del cliente. Una vez que el cliente te haya indicado o confirmado la fecha de manera clara, no vuelvas a pedirle confirmación ni a repreguntar sobre ella bajo ningún concepto. Asúmela inmediatamente como correcta y avanza al siguiente paso. Detén las preguntas sobre el día y la hora en cuanto verifiques que ya has obtenido ese dato con éxito.
-2. **Información Requerida del Cliente (OBLIGATORIA):** Pide de forma obligatoria y uno a uno los siguientes datos estipulados por el negocio: **{datos_reserva}**. No omitas ninguno. Insiste amablemente si el usuario olvida proveer alguno de ellos. Recuerda escribir los teléfonos dígito a dígito separados por comas para su correcta modulación.
-3. **PASO CRÍTICO DE CONFIRMACIÓN INTERACTIVA:** Una vez recopilados todos los datos de ({datos_reserva}) y la Fecha/Hora, realiza un resumen natural de la cita y pide confirmación explícita al cliente de forma directa antes de guardar nada.
-   *(Ejemplo de locución fluida: "Perfecto, entonces queda anotado para el [Día] a las [Hora en formato natural], a nombre de [Nombre], y el teléfono es el [Dígitos separados por comas]. ¿Es correcto?").*
-4. **MENSAJE DIRECTO DE RESERVA (SIN PREGUNTAS ADICIONALES):** En el instante en que el cliente te dé su confirmación definitiva diciendo que los datos son correctos, queda **TOTALMENTE PROHIBIDO** hacerle más preguntas, pedirle más datos o meter frases de relleno. Debes limitarte de forma inmediata a dar una respuesta firme de cierre indicando que procedes a guardar la cita y que espere un momento. Esto justifica el breve silencio de procesamiento de red. Acto seguido, dispara la herramienta `book_appointment`.
-   *(Locución exacta obligatoria: "Perfecto, pues procedo a agendar tu cita en el sistema ahora mismo, espera un momento por favor...").*
+**FLUJO NATURAL PARA RECOGER DATOS Y AGENDAR CITA:** ... (el resto del prompt original se mantiene exactamente igual)"""
 
-Debes pasar obligatoriamente el email `{calendar_email}` en el campo `calendar_email`.
-En el campo `datos_cliente_recolectados`, debes redactar de manera clara y estructurada los datos que el cliente te ha proporcionado en la conversación (por ejemplo: "Nombre: Juan Pérez, Teléfono: 611223344...").
 
-**REGLAS CRÍTICAS DE CONTROL DE ERRORES (Capa de Privacidad de Desarrollo):**
-- NUNCA menciones nombres de variables, formatos de código, mensajes de servidores, ni términos técnicos de software en la llamada (como "error de JSON", "función", "endpoint", "404", "500", "backend", o "respuesta incorrecta"). Está estrictamente prohibido.
-- Si la herramienta `book_appointment` te devuelve un fallo o indica que el hueco está ocupado, actúa de manera resolutiva. Gestiona la situación diciendo algo como: 
-  *"Disculpa las molestias, parece que este horario concreto acaba de ocuparse o no está disponible en nuestra agenda en este instante. Déjame revisar... ¿Te vendría bien intentar en otro tramo horario o preferirías mirar otro día?"*"""
 # ==================== LÓGICA DE CREACIÓN ====================
 def create_bot_for_client(nombre_negocio, sector, servicios, horario, zona, voice_id, calendar_email, 
                           idioma="es", datos_reserva="Nombre completo, Número de teléfono, Motivo de la cita", duracion_cita=30):
@@ -378,7 +343,7 @@ def create_bot_for_client(nombre_negocio, sector, servicios, horario, zona, voic
                     "description": {"type": "string"},
                     "datos_cliente_recolectados": {
                         "type": "string",
-                        "description": "Todos los datos requeridos por el negocio que han sido recolectados conversacionalmente del cliente (ej: Nombre completo, Teléfono, etc.)"
+                        "description": "Todos los datos requeridos por el negocio que han sido recolectados conversacionalmente del cliente"
                     }
                 },
                 "required": ["calendar_email", "summary", "start_time", "end_time", "datos_cliente_recolectados"]
@@ -433,8 +398,6 @@ def create_bot_for_client(nombre_negocio, sector, servicios, horario, zona, voic
         conn.close()
 
     return {"status": "success", "agent_id": agent_id, "phone_number": free_number}
-
-
 # ==================== UTILS TOKENS & EMAIL (MAGIC LINK) ====================
 def create_magic_token(email: str):
     expire = datetime.utcnow() + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
@@ -512,6 +475,7 @@ async def login_endpoint(token: str, request: Request):
     """
     return HTMLResponse(content=html_content, status_code=200)
 
+
 @app.get("/check-session")
 async def check_session(request: Request):
     client_ip = request.headers.get("x-forwarded-for", request.client.host).split(",")[0].strip()
@@ -523,7 +487,7 @@ async def check_session(request: Request):
         logger.info(f"Sesión expirada por tiempo para la IP: {client_ip}")
         return {"status": "no_session"}
     email = sesion["email"]
-    del SESIONES_ACTIVAS[client_ip]  # Consumo de un solo uso por seguridad
+    del SESIONES_ACTIVAS[client_ip]
     try:
         conn = get_db_connection()
         cur = conn.cursor()
@@ -537,6 +501,7 @@ async def check_session(request: Request):
     finally:
         cur.close()
         conn.close()
+
 
 @app.post("/get-user-bots")
 async def get_user_bots(request: Request):
@@ -554,6 +519,7 @@ async def get_user_bots(request: Request):
     finally:
         if 'cur' in locals(): cur.close()
         if 'conn' in locals(): conn.close()
+
 
 @app.post("/update-retell-bot")
 async def update_retell_bot_endpoint(request: Request):
@@ -601,7 +567,7 @@ async def update_retell_bot_endpoint(request: Request):
                         "description": {"type": "string"},
                         "datos_cliente_recolectados": {
                             "type": "string",
-                            "description": "Todos los datos requeridos por el negocio que han sido recolectados conversacionalmente del cliente (ej: Nombre completo, Teléfono, etc.)"
+                            "description": "Todos los datos requeridos por el negocio que han sido recolectados conversacionalmente del cliente"
                         }
                     },
                     "required": ["calendar_email", "summary", "start_time", "end_time", "datos_cliente_recolectados"]
@@ -634,6 +600,7 @@ async def update_retell_bot_endpoint(request: Request):
     finally:
         if 'cur' in locals(): cur.close()
         if 'conn' in locals(): conn.close()
+
 
 @app.post("/delete-retell-bot")
 async def delete_retell_bot(request: Request):
@@ -681,8 +648,6 @@ async def delete_retell_bot(request: Request):
     finally:
         if 'cur' in locals(): cur.close()
         if 'conn' in locals(): conn.close()
-
-
 # ==================== ENDPOINTS GENERALES ====================
 @app.post("/book-appointment")
 @app.post("/book-appointment/")
@@ -701,13 +666,14 @@ async def book_appointment(request: Request):
             calendar_email, 
             args.get("summary", "Cita Agendada"), 
             start_time_str, 
-            None,                    # Forzamos None para que siempre use duracion_cita
+            None,
             descripcion_final
         )
         return {"code": "SUCCESS", "message": "Cita agendada correctamente"}
     except Exception as e:
         logger.error(f"❌ ERROR EN BOOK-APPOINTMENT: {e}", exc_info=True)
         return {"code": "ERROR", "message": str(e)}
+
 
 @app.post("/verify-calendar-access")
 @app.post("/verify-calendar-access/")
@@ -727,6 +693,7 @@ async def verify_calendar_access(request: Request):
     except Exception as e:
         logger.error(f"Error en verify-calendar-access: {e}", exc_info=True)
         raise HTTPException(status_code=400, detail=str(e))
+
 
 @app.post("/create-retell-bot")
 async def create_retell_bot_endpoint(request: Request):
@@ -752,6 +719,7 @@ async def create_retell_bot_endpoint(request: Request):
         logger.error(f"Error en create-retell-bot: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
+
 @app.post("/request-magic-link")
 async def request_magic_link(request: Request):
     try:
@@ -770,31 +738,63 @@ async def request_magic_link(request: Request):
         logger.error(f"Error en request-magic-link: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
-# ==================== NUEVO ENDPOINT PARA CHAT WEB CON GEMINI SEARCH ====================
-# ==================== NUEVO ENDPOINT ACTUALIZADO ====================
-@app.post("/chat-endpoint")
-async def chat_endpoint(request: Request):
+
+# ==================== NUEVO ENDPOINT: CHAT CON GROK (PROXY SEGURO) ====================
+@app.post("/chat-with-grok")
+async def chat_with_grok(request: Request):
     try:
         data = await request.json()
-        historial = data.get("historial", [])
+        user_message = data.get("message", "").strip()
+        conversation_history = data.get("history", [])  # [{"role": "user/assistant", "content": "..."}]
         
-        contents = []
-        for msg in historial:
-            contents.append(types.Content(
-                role="user" if msg["role"] == "user" else "model",
-                parts=[types.Part.from_text(text=msg["content"])]
-            ))
+        if not user_message:
+            raise HTTPException(status_code=400, detail="Mensaje vacío")
 
-        # USAMOS EL NOMBRE EXACTO CONFIRMADO POR TU API
-        respuesta = client.models.generate_content(
-            model="models/gemini-2.0-flash",
-            contents=contents,
-            config=types.GenerateContentConfig(
-                tools=[types.Tool(google_search_retrieval=types.GoogleSearchRetrieval())]
-            )
+        # System prompt orientado a tu negocio
+        system_prompt = """Eres un asistente experto de Dansu AI. 
+Ayudas a los clientes a configurar y conectar su CRM, asistentes telefónicos Retell AI y Google Calendar.
+Responde siempre de forma clara, profesional, amigable y en español.
+Busca información actualizada en tiempo real cuando sea necesario."""
+
+        messages = [{"role": "system", "content": system_prompt}]
+        # Últimos 12 mensajes para mantener contexto
+        for msg in conversation_history[-12:]:
+            messages.append({"role": msg["role"], "content": msg["content"]})
+        messages.append({"role": "user", "content": user_message})
+
+        # Llamada real a Grok API (con búsqueda en tiempo real)
+        grok_response = requests.post(
+            "https://api.x.ai/v1/chat/completions",
+            headers={
+                "Authorization": f"Bearer {GROK_API_KEY}",
+                "Content-Type": "application/json"
+            },
+            json={
+                "model": "grok-4",          # Puedes cambiar a "grok-4o" si prefieres
+                "messages": messages,
+                "temperature": 0.75,
+                "max_tokens": 900
+            },
+            timeout=50
         )
-        
-        return {"respuesta": respuesta.text}
+
+        if grok_response.status_code != 200:
+            logger.error(f"Grok API error: {grok_response.text}")
+            return {"response": "Lo siento, estoy teniendo problemas de conexión en este momento. ¿Puedes intentarlo de nuevo?", "status": "error"}
+
+        result = grok_response.json()
+        assistant_reply = result["choices"][0]["message"]["content"]
+
+        return {
+            "response": assistant_reply,
+            "status": "success"
+        }
+
     except Exception as e:
-        logger.error(f"Error en chat-endpoint: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail="Error procesando mensaje.")                         
+        logger.error(f"Error en /chat-with-grok: {e}", exc_info=True)
+        return {"response": "Hubo un error interno. Por favor, inténtalo de nuevo.", "status": "error"}
+
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)

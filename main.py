@@ -10,6 +10,8 @@ import requests
 import psycopg2  # Conector nativo de PostgreSQL
 from psycopg2.extras import RealDictCursor
 
+import google.generativeai as genai
+
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
@@ -32,10 +34,15 @@ GOOGLE_CREDENTIALS_JSON = os.getenv("GOOGLE_CREDENTIALS")
 DATABASE_URL = os.getenv("DATABASE_URL")
 JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY")
 BREVO_API_KEY = os.getenv("BREVO_API_KEY")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
-if not all([RETELL_API_KEY, GOOGLE_CREDENTIALS_JSON, DATABASE_URL, JWT_SECRET_KEY, BREVO_API_KEY]):
+if not all([RETELL_API_KEY, GOOGLE_CREDENTIALS_JSON, DATABASE_URL, JWT_SECRET_KEY, BREVO_API_KEY, GEMINI_API_KEY]):
     logger.critical("Faltan variables de entorno críticas en el despliegue.")
-    raise Exception("Faltan variables de entorno críticas (RETELL_API_KEY, GOOGLE_CREDENTIALS, DATABASE_URL, JWT_SECRET_KEY o BREVO_API_KEY)")
+    raise Exception("Faltan variables de entorno críticas (RETELL_API_KEY, GOOGLE_CREDENTIALS, DATABASE_URL, JWT_SECRET_KEY, BREVO_API_KEY o GEMINI_API_KEY)")
+
+# Inicialización de Gemini
+genai.configure(api_key=GEMINI_API_KEY)
+model = genai.GenerativeModel('gemini-1.5-flash')
 
 # Configuración JWT
 ALGORITHM = "HS256"
@@ -98,7 +105,6 @@ init_db()
 # ==================== GOOGLE CALENDAR ====================
 SCOPES = ['https://www.googleapis.com/auth/calendar']
 MADRID_TZ = ZoneInfo("Europe/Madrid")  # Huso horario de referencia absoluto para el negocio
-
 def get_calendar_service():
     credentials_info = json.loads(GOOGLE_CREDENTIALS_JSON)
     credentials = service_account.Credentials.from_service_account_info(
@@ -253,12 +259,11 @@ VOICE_MAPPING = {
     "Cimo": "11labs-Adrian", "Brynne": "11labs-Brynne", "Chloe": "11labs-Chloe",
     "Kate": "openai-Nova", "Grace": "openai-Shimmer", "Leland": "11labs-Leland",
     "Marissa": "11labs-Marissa", "Lily": "11labs-Lily", "Della": "11labs-Delia",
-    "Nico": "openai-Onyx", "Rita": "11labs-Rita", "Meritt": "11labs-Meritt",
+    "Nico": "openai-Nico", "Rita": "11labs-Rita", "Meritt": "11labs-Meritt",
     "Willa": "11labs-Willa", "Maren": "11labs-Maren", "Tasmin": "11labs-Tasmin",
     "Ashley": "11labs-Ashley", "Andrea": "openai-Alloy", "Claudia": "11labs-Claudia",
     "Gaby": "11labs-Gaby", "Alejandro": "openai-Echo", "Sloane": "11labs-Sloane"
 }
-
 def retell_request(method: str, endpoint: str, json_data=None):
     url = f"https://api.retellai.com{endpoint}"
     headers = {"Authorization": f"Bearer {RETELL_API_KEY}", "Content-Type": "application/json"}
@@ -343,8 +348,6 @@ En el campo `datos_cliente_recolectados`, debes redactar de manera clara y estru
 - NUNCA menciones nombres de variables, formatos de código, mensajes de servidores, ni términos técnicos de software en la llamada (como "error de JSON", "función", "endpoint", "404", "500", "backend", o "respuesta incorrecta"). Está estrictamente prohibido.
 - Si la herramienta `book_appointment` te devuelve un fallo o indica que el hueco está ocupado, actúa de manera resolutiva. Gestiona la situación diciendo algo como: 
   *"Disculpa las molestias, parece que este horario concreto acaba de ocuparse o no está disponible en nuestra agenda en este instante. Déjame revisar... ¿Te vendría bien intentar en otro tramo horario o preferirías mirar otro día?"*"""
-
-
 # ==================== LÓGICA DE CREACIÓN ====================
 def create_bot_for_client(nombre_negocio, sector, servicios, horario, zona, voice_id, calendar_email, 
                           idioma="es", datos_reserva="Nombre completo, Número de teléfono, Motivo de la cita", duracion_cita=30):
@@ -353,7 +356,6 @@ def create_bot_for_client(nombre_negocio, sector, servicios, horario, zona, voic
     retell_language_mapping = {"es": "es-ES", "en": "en-US", "ca": "ca-ES"}
     lang_retell = retell_language_mapping.get(str(idioma).strip().lower(), "es-ES")
 
-    # Mantenemos el modelo gpt-4o de rendimiento avanzado
     llm_res = retell_request("POST", "/create-retell-llm", {
         "model": "gpt-4o",
         "general_prompt": custom_prompt,
@@ -764,3 +766,32 @@ async def request_magic_link(request: Request):
     except Exception as e:
         logger.error(f"Error en request-magic-link: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
+
+# ==================== NUEVO ENDPOINT PARA CHAT WEB CON GEMINI SEARCH ====================
+@app.post("/chat-endpoint")
+async def chat_endpoint(request: Request):
+    try:
+        data = await request.json()
+        historial = data.get("historial", [])
+        
+        # Convertir historial de frontend al formato esperado por Gemini
+        gemini_history = []
+        for msg in historial:
+            gemini_history.append({
+                "role": "user" if msg["role"] == "user" else "model",
+                "parts": [msg["content"]]
+            })
+
+        # Iniciamos el chat con la herramienta de búsqueda habilitada
+        chat = model.start_chat(history=gemini_history)
+        
+        # Enviamos la petición con búsqueda de Google habilitada
+        respuesta = chat.send_message(
+            historial[-1]["content"],
+            tools=[{"google_search_retrieval": {}}] 
+        )
+        
+        return {"respuesta": respuesta.text}
+    except Exception as e:
+        logger.error(f"Error en chat-endpoint: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Error procesando mensaje.")                            

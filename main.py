@@ -11,6 +11,8 @@ import psycopg2  # Conector nativo de PostgreSQL
 from psycopg2.extras import RealDictCursor
 
 # --- IMPORTACIÓN ACTUALIZADA ---
+# Cambia: from google import genai
+# Por:
 from google import genai
 from google.genai import types
 

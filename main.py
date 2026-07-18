@@ -740,29 +740,27 @@ async def request_magic_link(request: Request):
 
 
 # ==================== NUEVO ENDPOINT: CHAT CON GROK (PROXY SEGURO) ====================
+# ==================== NUEVO ENDPOINT: CHAT CON GROK (CON BÚSQUEDA EN TIEMPO REAL FORZADA) ====================
 @app.post("/chat-with-grok")
 async def chat_with_grok(request: Request):
     try:
         data = await request.json()
         user_message = data.get("message", "").strip()
-        conversation_history = data.get("history", [])  # [{"role": "user/assistant", "content": "..."}]
+        conversation_history = data.get("history", [])
         
         if not user_message:
             raise HTTPException(status_code=400, detail="Mensaje vacío")
 
-        # System prompt orientado a tu negocio
         system_prompt = """Eres un asistente experto de Dansu AI. 
 Ayudas a los clientes a configurar y conectar su CRM, asistentes telefónicos Retell AI y Google Calendar.
 Responde siempre de forma clara, profesional, amigable y en español.
-Busca información actualizada en tiempo real cuando sea necesario."""
+**IMPORTANTE:** Siempre que la información pueda estar desactualizada (precios, métodos, integraciones, fechas, etc.), usa tu herramienta de búsqueda web para obtener datos en tiempo real."""
 
         messages = [{"role": "system", "content": system_prompt}]
-        # Últimos 12 mensajes para mantener contexto
         for msg in conversation_history[-12:]:
             messages.append({"role": msg["role"], "content": msg["content"]})
         messages.append({"role": "user", "content": user_message})
 
-        # Llamada real a Grok API (con búsqueda en tiempo real)
         grok_response = requests.post(
             "https://api.x.ai/v1/chat/completions",
             headers={
@@ -770,17 +768,28 @@ Busca información actualizada en tiempo real cuando sea necesario."""
                 "Content-Type": "application/json"
             },
             json={
-                "model": "grok-4",          # Puedes cambiar a "grok-4o" si prefieres
+                "model": "grok-4",           # grok-4 tiene excelente soporte de tools
                 "messages": messages,
-                "temperature": 0.75,
-                "max_tokens": 900
+                "temperature": 0.7,
+                "max_tokens": 950,
+                # Forzar herramientas de búsqueda
+                "tools": [
+                    {
+                        "type": "web_search",
+                        "function": {
+                            "name": "web_search",
+                            "description": "Busca información actualizada en internet"
+                        }
+                    }
+                ],
+                "tool_choice": "auto"   # Grok decide cuándo buscar
             },
-            timeout=50
+            timeout=60
         )
 
         if grok_response.status_code != 200:
             logger.error(f"Grok API error: {grok_response.text}")
-            return {"response": "Lo siento, estoy teniendo problemas de conexión en este momento. ¿Puedes intentarlo de nuevo?", "status": "error"}
+            return {"response": "Lo siento, estoy teniendo problemas de conexión. ¿Puedes intentarlo de nuevo?", "status": "error"}
 
         result = grok_response.json()
         assistant_reply = result["choices"][0]["message"]["content"]

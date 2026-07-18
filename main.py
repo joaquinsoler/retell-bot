@@ -15,7 +15,10 @@ from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
 from jose import JWTError, jwt  # Manejo seguro de tokens del Magic Link
-
+from jose import JWTError, jwt
+import httpx
+from pydantic import BaseModel
+from typing import List, Optional
 # ==================== CONFIGURACIÓN DE LOGS PARA RENDER ====================
 logging.basicConfig(
     level=logging.INFO,
@@ -32,6 +35,7 @@ GOOGLE_CREDENTIALS_JSON = os.getenv("GOOGLE_CREDENTIALS")
 DATABASE_URL = os.getenv("DATABASE_URL")
 JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY")
 BREVO_API_KEY = os.getenv("BREVO_API_KEY")
+GROK_API_KEY = os.getenv("GROK_API_KEY")
 
 if not all([RETELL_API_KEY, GOOGLE_CREDENTIALS_JSON, DATABASE_URL, JWT_SECRET_KEY, BREVO_API_KEY]):
     logger.critical("Faltan variables de entorno críticas en el despliegue.")
@@ -43,6 +47,14 @@ ACCESS_TOKEN_EXPIRE_MINUTES = 15
 
 # Almacén temporal de sesiones validadas indexadas por IP (IP: {"email": email, "expira": datetime})
 SESIONES_ACTIVAS = {}
+# ==================== MODELOS PARA CHAT GROK ====================
+class Message(BaseModel):
+    role: str      # "user" o "assistant"
+    content: str
+
+class GrokChatRequest(BaseModel):
+    messages: List[Message]
+    user_identifier: Optional[str] = "wix-visitor"
 
 # ==================== CORS ====================
 app.add_middleware(
@@ -88,6 +100,32 @@ def init_db():
         logger.info("✅ Base de datos PostgreSQL inicializada, verified y lista.")
     except Exception as e:
         logger.error(f"❌ Error inicializando la base de datos: {e}", exc_info=True)
+# ==================== GROK API ====================
+async def call_grok_api(messages: List[dict]):
+    """Llama a la API de Grok con el historial completo"""
+    if not GROK_API_KEY:
+        return "Lo siento, el chatbot no está configurado correctamente en este momento."
+    
+    try:
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            response = await client.post(
+                "https://api.x.ai/v1/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {GROK_API_KEY}",
+                    "Content-Type": "application/json"
+                },
+                json={
+                    "model": "grok-4",           # Puedes cambiar a grok-beta u otro si prefieres
+                    "messages": messages,
+                    "temperature": 0.75,
+                    "max_tokens": 1200
+                }
+            )
+            response.raise_for_status()
+            return response.json()["choices"][0]["message"]["content"]
+    except Exception as e:
+        logger.error(f"❌ Error llamando a Grok API: {e}", exc_info=True)
+        return "Lo siento, estoy teniendo problemas para responder en este momento. ¿Puedes intentarlo de nuevo?"
     finally:
         cur.close()
         conn.close()
@@ -746,6 +784,20 @@ async def create_retell_bot_endpoint(request: Request):
     except Exception as e:
         logger.error(f"Error en create-retell-bot: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
+@app.post("/chat/grok")
+async def chat_with_grok(request: GrokChatRequest):
+    """Endpoint para el chatbot Grok en la web"""
+    if not GROK_API_KEY:
+        raise HTTPException(status_code=503, detail="Grok API no configurada en el servidor")
+
+    # Convertir a formato simple para la API
+    messages_for_api = [{"role": msg.role, "content": msg.content} for msg in request.messages]
+    
+    grok_response = await call_grok_api(messages_for_api)
+    
+    return {
+        "response": grok_response
+    }
 
 @app.post("/request-magic-link")
 async def request_magic_link(request: Request):

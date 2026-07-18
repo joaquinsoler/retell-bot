@@ -741,67 +741,7 @@ async def request_magic_link(request: Request):
 
 # ==================== NUEVO ENDPOINT: CHAT CON GROK (PROXY SEGURO) ====================
 # ==================== NUEVO ENDPOINT: CHAT CON GROK (CON BÚSQUEDA EN TIEMPO REAL FORZADA) ====================
-@app.post("/chat-with-grok")
-async def chat_with_grok(request: Request):
-    try:
-        data = await request.json()
-        user_message = data.get("message", "").strip()
-        conversation_history = data.get("history", [])
-        
-        if not user_message:
-            raise HTTPException(status_code=400, detail="Mensaje vacío")
-
-        system_prompt = """Eres un asistente experto de Dansu AI. 
-Ayudas a los clientes a configurar y conectar su CRM, asistentes telefónicos Retell AI y Google Calendar.
-Responde siempre de forma clara, profesional, amigable y en español.
-**IMPORTANTE:** Siempre que la información pueda estar desactualizada (precios, métodos, integraciones, fechas, etc.), usa tu herramienta de búsqueda web para obtener datos en tiempo real."""
-
-        messages = [{"role": "system", "content": system_prompt}]
-        for msg in conversation_history[-12:]:
-            messages.append({"role": msg["role"], "content": msg["content"]})
-        messages.append({"role": "user", "content": user_message})
-
-        grok_response = requests.post(
-            "https://api.x.ai/v1/chat/completions",
-            headers={
-                "Authorization": f"Bearer {GROK_API_KEY}",
-                "Content-Type": "application/json"
-            },
-            json={
-                "model": "grok-4",           # grok-4 tiene excelente soporte de tools
-                "messages": messages,
-                "temperature": 0.7,
-                "max_tokens": 950,
-                # Forzar herramientas de búsqueda
-                "tools": [
-                    {
-                        "type": "web_search",
-                        "function": {
-                            "name": "web_search",
-                            "description": "Busca información actualizada en internet"
-                        }
-                    }
-                ],
-                "tool_choice": "auto"   # Grok decide cuándo buscar
-            },
-            timeout=60
-        )
-
-        if grok_response.status_code != 200:
-            logger.error(f"Grok API error: {grok_response.text}")
-            return {"response": "Lo siento, estoy teniendo problemas de conexión. ¿Puedes intentarlo de nuevo?", "status": "error"}
-
-        result = grok_response.json()
-        assistant_reply = result["choices"][0]["message"]["content"]
-
-        return {
-            "response": assistant_reply,
-            "status": "success"
-        }
-
-    except Exception as e:
-        logger.error(f"Error en /chat-with-grok: {e}", exc_info=True)
-        return {"response": "Hubo un error interno. Por favor, inténtalo de nuevo.", "status": "error"}
+2026-07-18 21:32:33,973 [ERROR] DansuAI-Backend - Grok API error: Failed to deserialize the JSON body into the target type: tools[0].type: unknown variant `web_search`, expected `function` or `live_search` at line 1 column 644
 
 
 if __name__ == "__main__":

@@ -100,36 +100,9 @@ def init_db():
         logger.info("✅ Base de datos PostgreSQL inicializada, verified y lista.")
     except Exception as e:
         logger.error(f"❌ Error inicializando la base de datos: {e}", exc_info=True)
-# ==================== GROK API ====================
-async def call_grok_api(messages: List[dict]):
-    """Llama a la API de Grok con el historial completo"""
-    if not GROK_API_KEY:
-        return "Lo siento, el chatbot no está configurado correctamente en este momento."
-    
-    try:
-        async with httpx.AsyncClient(timeout=60.0) as client:
-            response = await client.post(
-                "https://api.x.ai/v1/chat/completions",
-                headers={
-                    "Authorization": f"Bearer {GROK_API_KEY}",
-                    "Content-Type": "application/json"
-                },
-                json={
-                    "model": "grok-4",           # Puedes cambiar a grok-beta u otro si prefieres
-                    "messages": messages,
-                    "temperature": 0.75,
-                    "max_tokens": 1200
-                }
-            )
-            response.raise_for_status()
-            return response.json()["choices"][0]["message"]["content"]
-    except Exception as e:
-        logger.error(f"❌ Error llamando a Grok API: {e}", exc_info=True)
-        return "Lo siento, estoy teniendo problemas para responder en este momento. ¿Puedes intentarlo de nuevo?"
-    finally:
-        cur.close()
-        conn.close()
-
+import httpx
+from pydantic import BaseModel
+from typing import List, Optional
 # Inicializamos la estructura de la base de datos al arrancar el backend
 init_db()
 

@@ -8,3 +8,4 @@ google-auth-oauthlib
 python-jose[cryptography]
 google-generativeai
 openai>=1.0.0
+google-genai

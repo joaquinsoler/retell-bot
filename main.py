@@ -2,28 +2,28 @@ import os
 import json
 import logging
 from datetime import datetime, timedelta
-from zoneinfo import ZoneInfo  # Gestión nativa y precisa de zonas horarias en Python 3.9+
+from zoneinfo import ZoneInfo
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
 import requests
-import psycopg2  # Conector nativo de PostgreSQL
+import psycopg2
 from psycopg2.extras import RealDictCursor
+import httpx
+from pydantic import BaseModel
+from typing import List, Optional
 
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
-from jose import JWTError, jwt  # Manejo seguro de tokens del Magic Link
 from jose import JWTError, jwt
-import httpx
-from pydantic import BaseModel
-from typing import List, Optional
+
 # ==================== CONFIGURACIÓN DE LOGS PARA RENDER ====================
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s - %(message)s",
-    handlers=[logging.StreamHandler()]  # Envía los logs directamente a la consola de Render
+    handlers=[logging.StreamHandler()]
 )
 logger = logging.getLogger("DansuAI-Backend")
 
@@ -45,11 +45,12 @@ if not all([RETELL_API_KEY, GOOGLE_CREDENTIALS_JSON, DATABASE_URL, JWT_SECRET_KE
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 15
 
-# Almacén temporal de sesiones validadas indexadas por IP (IP: {"email": email, "expira": datetime})
+# Almacén temporal de sesiones validadas indexadas por IP
 SESIONES_ACTIVAS = {}
+
 # ==================== MODELOS PARA CHAT GROK ====================
 class Message(BaseModel):
-    role: str      # "user" o "assistant"
+    role: str
     content: str
 
 class GrokChatRequest(BaseModel):
@@ -92,7 +93,6 @@ def init_db():
                 fecha_creacion TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
         """)
-        # Migraciones automáticas por si la tabla ya existía sin estas columnas
         cur.execute("ALTER TABLE asistentes ADD COLUMN IF NOT EXISTS idioma VARCHAR(50) DEFAULT 'es';")
         cur.execute("ALTER TABLE asistentes ADD COLUMN IF NOT EXISTS datos_reserva TEXT DEFAULT 'Nombre completo, Número de teléfono, Motivo de la cita';")
         cur.execute("ALTER TABLE asistentes ADD COLUMN IF NOT EXISTS duracion_cita INT DEFAULT 30;")
@@ -100,15 +100,15 @@ def init_db():
         logger.info("✅ Base de datos PostgreSQL inicializada, verified y lista.")
     except Exception as e:
         logger.error(f"❌ Error inicializando la base de datos: {e}", exc_info=True)
-import httpx
-from pydantic import BaseModel
-from typing import List, Optional
+    finally:
+        cur.close()
+        conn.close()
+
 # Inicializamos la estructura de la base de datos al arrancar el backend
 init_db()
-
 # ==================== GOOGLE CALENDAR ====================
 SCOPES = ['https://www.googleapis.com/auth/calendar']
-MADRID_TZ = ZoneInfo("Europe/Madrid")  # Huso horario de referencia absoluto para el negocio
+MADRID_TZ = ZoneInfo("Europe/Madrid")
 
 def get_calendar_service():
     credentials_info = json.loads(GOOGLE_CREDENTIALS_JSON)
@@ -183,7 +183,7 @@ def create_google_event(calendar_id: str, summary: str, start_time: str, end_tim
         ensure_calendar_access(calendar_id)
         
         # === BÚSQUEDA ROBUSTA DE duracion_cita ===
-        duracion_minutos = 30  # fallback seguro
+        duracion_minutos = 30
         calendar_clean = str(calendar_id).strip().lower()
         
         conn = get_db_connection()
@@ -202,7 +202,6 @@ def create_google_event(calendar_id: str, summary: str, start_time: str, end_tim
                 logger.info(f"✅ Duración encontrada en BD: {duracion_minutos} minutos para email '{row.get('google_calendar_email')}'")
             else:
                 logger.error(f"❌ NO SE ENCONTRÓ ASISTENTE en BD para email: '{calendar_id}' (limpio: '{calendar_clean}')")
-                # Debug: mostrar algunos emails existentes
                 cur.execute("SELECT google_calendar_email, duracion_cita FROM asistentes LIMIT 10;")
                 existing = cur.fetchall()
                 if existing:
@@ -228,7 +227,6 @@ def create_google_event(calendar_id: str, summary: str, start_time: str, end_tim
             logger.info(f"⏱️ Aplicando duración: {duracion_minutos} minutos")
         except Exception as calc_error:
             logger.error(f"Error calculando horario: {calc_error}")
-            # Fallback ultra seguro
             start_dt = datetime.fromisoformat(str(start_time).replace("Z", "+00:00"))
             if start_dt.tzinfo is None:
                 start_dt = start_dt.replace(tzinfo=MADRID_TZ)
@@ -257,8 +255,6 @@ def create_google_event(calendar_id: str, summary: str, start_time: str, end_tim
     except Exception as e:
         logger.error(f"❌ Error Google Calendar: {e}", exc_info=True)
         raise
-
-
 # ==================== VOICE MAPPING & RETELL UTILS ====================
 VOICE_MAPPING = {
     "Cimo": "11labs-Adrian", "Brynne": "11labs-Brynne", "Chloe": "11labs-Chloe",
@@ -364,7 +360,6 @@ def create_bot_for_client(nombre_negocio, sector, servicios, horario, zona, voic
     retell_language_mapping = {"es": "es-ES", "en": "en-US", "ca": "ca-ES"}
     lang_retell = retell_language_mapping.get(str(idioma).strip().lower(), "es-ES")
 
-    # Mantenemos el modelo gpt-4o de rendimiento avanzado
     llm_res = retell_request("POST", "/create-retell-llm", {
         "model": "gpt-4o",
         "general_prompt": custom_prompt,
@@ -439,8 +434,6 @@ def create_bot_for_client(nombre_negocio, sector, servicios, horario, zona, voic
         conn.close()
 
     return {"status": "success", "agent_id": agent_id, "phone_number": free_number}
-
-
 # ==================== UTILS TOKENS & EMAIL (MAGIC LINK) ====================
 def create_magic_token(email: str):
     expire = datetime.utcnow() + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
@@ -529,7 +522,7 @@ async def check_session(request: Request):
         logger.info(f"Sesión expirada por tiempo para la IP: {client_ip}")
         return {"status": "no_session"}
     email = sesion["email"]
-    del SESIONES_ACTIVAS[client_ip]  # Consumo de un solo uso por seguridad
+    del SESIONES_ACTIVAS[client_ip]
     try:
         conn = get_db_connection()
         cur = conn.cursor()
@@ -689,6 +682,41 @@ async def delete_retell_bot(request: Request):
         if 'conn' in locals(): conn.close()
 
 
+# ==================== GROK CHAT ====================
+async def call_grok_api(messages: List[dict]):
+    if not GROK_API_KEY:
+        return "Lo siento, el chatbot no está configurado correctamente en este momento."
+    try:
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            response = await client.post(
+                "https://api.x.ai/v1/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {GROK_API_KEY}",
+                    "Content-Type": "application/json"
+                },
+                json={
+                    "model": "grok-4",
+                    "messages": messages,
+                    "temperature": 0.75,
+                    "max_tokens": 1200
+                }
+            )
+            response.raise_for_status()
+            return response.json()["choices"][0]["message"]["content"]
+    except Exception as e:
+        logger.error(f"❌ Error llamando a Grok API: {e}", exc_info=True)
+        return "Lo siento, estoy teniendo problemas para responder en este momento. ¿Puedes intentarlo de nuevo?"
+
+
+@app.post("/chat/grok")
+async def chat_with_grok(request: GrokChatRequest):
+    if not GROK_API_KEY:
+        raise HTTPException(status_code=503, detail="Grok API no configurada en el servidor")
+    messages_for_api = [{"role": msg.role, "content": msg.content} for msg in request.messages]
+    grok_response = await call_grok_api(messages_for_api)
+    return {"response": grok_response}
+
+
 # ==================== ENDPOINTS GENERALES ====================
 @app.post("/book-appointment")
 @app.post("/book-appointment/")
@@ -707,7 +735,7 @@ async def book_appointment(request: Request):
             calendar_email, 
             args.get("summary", "Cita Agendada"), 
             start_time_str, 
-            None,                    # Forzamos None para que siempre use duracion_cita
+            None,
             descripcion_final
         )
         return {"code": "SUCCESS", "message": "Cita agendada correctamente"}
@@ -757,20 +785,6 @@ async def create_retell_bot_endpoint(request: Request):
     except Exception as e:
         logger.error(f"Error en create-retell-bot: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
-@app.post("/chat/grok")
-async def chat_with_grok(request: GrokChatRequest):
-    """Endpoint para el chatbot Grok en la web"""
-    if not GROK_API_KEY:
-        raise HTTPException(status_code=503, detail="Grok API no configurada en el servidor")
-
-    # Convertir a formato simple para la API
-    messages_for_api = [{"role": msg.role, "content": msg.content} for msg in request.messages]
-    
-    grok_response = await call_grok_api(messages_for_api)
-    
-    return {
-        "response": grok_response
-    }
 
 @app.post("/request-magic-link")
 async def request_magic_link(request: Request):

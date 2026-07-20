@@ -27,7 +27,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger("DansuAI-Backend")
 
-app = FastAPI(title="Dansu Backend Completo con Magic Link")
+app = FastAPI(title="Dansu Backend Completo con Magic Link y Grok Chat")
 
 # ==================== VARIABLES DE ENTORNO ====================
 RETELL_API_KEY = os.getenv("RETELL_API_KEY")
@@ -203,7 +203,6 @@ def create_google_event(calendar_id: str, summary: str, start_time: str, end_tim
                 logger.info(f"✅ Duración encontrada en BD: {duracion_minutos} minutos para email '{row.get('google_calendar_email')}'")
             else:
                 logger.error(f"❌ NO SE ENCONTRÓ ASISTENTE en BD para email: '{calendar_id}' (limpio: '{calendar_clean}')")
-                # Debug: mostrar algunos emails existentes
                 cur.execute("SELECT google_calendar_email, duracion_cita FROM asistentes LIMIT 10;")
                 existing = cur.fetchall()
                 if existing:
@@ -229,7 +228,6 @@ def create_google_event(calendar_id: str, summary: str, start_time: str, end_tim
             logger.info(f"⏱️ Aplicando duración: {duracion_minutos} minutos")
         except Exception as calc_error:
             logger.error(f"Error calculando horario: {calc_error}")
-            # Fallback ultra seguro
             start_dt = datetime.fromisoformat(str(start_time).replace("Z", "+00:00"))
             if start_dt.tzinfo is None:
                 start_dt = start_dt.replace(tzinfo=MADRID_TZ)
@@ -258,7 +256,9 @@ def create_google_event(calendar_id: str, summary: str, start_time: str, end_tim
     except Exception as e:
         logger.error(f"❌ Error Google Calendar: {e}", exc_info=True)
         raise
-    # ==================== VOICE MAPPING & RETELL UTILS ====================
+
+
+# ==================== VOICE MAPPING & RETELL UTILS ====================
 VOICE_MAPPING = {
     "Cimo": "11labs-Adrian", "Brynne": "11labs-Brynne", "Chloe": "11labs-Chloe",
     "Kate": "openai-Nova", "Grace": "openai-Shimmer", "Leland": "11labs-Leland",
@@ -684,8 +684,6 @@ async def delete_retell_bot(request: Request):
     finally:
         if 'cur' in locals(): cur.close()
         if 'conn' in locals(): conn.close()
-
-
 # ==================== ENDPOINTS GENERALES ====================
 @app.post("/book-appointment")
 @app.post("/book-appointment/")

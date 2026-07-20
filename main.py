@@ -258,7 +258,7 @@ def create_google_event(calendar_id: str, summary: str, start_time: str, end_tim
     except Exception as e:
         logger.error(f"❌ Error Google Calendar: {e}", exc_info=True)
         raise
-# ==================== VOICE MAPPING & RETELL UTILS ====================
+    # ==================== VOICE MAPPING & RETELL UTILS ====================
 VOICE_MAPPING = {
     "Cimo": "11labs-Adrian", "Brynne": "11labs-Brynne", "Chloe": "11labs-Chloe",
     "Kate": "openai-Nova", "Grace": "openai-Shimmer", "Leland": "11labs-Leland",
@@ -352,7 +352,7 @@ En el campo `datos_cliente_recolectados`, debes redactar de manera clara y estru
 **REGLAS CRÍTICAS DE CONTROL DE ERRORES (Capa de Privacidad de Desarrollo):**
 - NUNCA menciones nombres de variables, formatos de código, mensajes de servidores, ni términos técnicos de software en la llamada (como "error de JSON", "función", "endpoint", "404", "500", "backend", o "respuesta incorrecta"). Está estrictamente prohibido.
 - Si la herramienta `book_appointment` te devuelve un fallo o indica que el hueco está ocupado, actúa de manera resolutiva. Gestiona la situación diciendo algo como: 
-  *"Disculpa las molestias, parece que este horario concreto acaba de ocuparse o no está disponible en nuestra agenda en este instante. Déjame revisar... ¿Te vendría bien intentar en otro tramo horario o preferirías mirar otro día?"*""
+  *"Disculpa las molestias, parece que este horario concreto acaba de ocuparse o no está disponible en nuestra agenda en este instante. Déjame revisar... ¿Te vendría bien intentar en otro tramo horario o preferirías mirar otro día?"*"""
 # ==================== LÓGICA DE CREACIÓN ====================
 def create_bot_for_client(nombre_negocio, sector, servicios, horario, zona, voice_id, calendar_email, 
                           idioma="es", datos_reserva="Nombre completo, Número de teléfono, Motivo de la cita", duracion_cita=30):
@@ -817,4 +817,4 @@ async def chat_with_grok(request: Request):
 
     except Exception as e:
         logger.error(f"❌ Error en /chat-grok: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e))                            

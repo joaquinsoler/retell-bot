@@ -803,9 +803,9 @@ Flujo obligatorio al empezar una nueva conversación:
 4. Después de compartir, espera 5 minutos y confirma.
 5. Finalmente pregunta: "¿Cuál es tu CRM principal?" y guía la integración de ese CRM paso a paso.
 
-Mantén siempre el control: un paso corto → confirmación → siguiente paso.
+Mantén siempre el control: un paso corto -> confirmación -> siguiente paso.
 
-Sé empático: "Perfecto, vamos uno a uno para que sea fácil.""""
+Se empático: "Perfecto, vamos uno a uno para que sea fácil.""""
 
         messages = [
             {"role": "system", "content": system_prompt}

@@ -805,7 +805,7 @@ Flujo obligatorio al empezar una nueva conversacion:
 
 Mantén siempre el control: un paso corto -> confirmacion -> siguiente paso.
 
-Se empatico: "Perfecto, vamos uno a uno para que sea facil.""""
+Se empatico: "Perfecto, vamos uno a uno para que sea facil." """
 
         messages = [
             {"role": "system", "content": system_prompt}

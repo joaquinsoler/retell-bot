@@ -792,6 +792,7 @@ async def chat_with_grok(request: Request):
             {
                 "role": "system",
                 "content": "# ==================== NUEVO ENDPOINT: CHATBOT GROK CON BÚSQUEDA EN TIEMPO REAL ====================
+# ==================== NUEVO ENDPOINT: CHATBOT GROK CON BÚSQUEDA EN TIEMPO REAL ====================
 @app.post("/chat-grok")
 async def chat_with_grok(request: Request):
     try:
@@ -805,7 +806,7 @@ async def chat_with_grok(request: Request):
         if not user_message:
             raise HTTPException(status_code=400, detail="Mensaje requerido")
 
-        # Prompt profesional corregido
+        # === PROMPT PROFESIONAL (CORRECTAMENTE FORMATEADO) ===
         system_prompt = """Eres el Asistente Técnico de Dansu AI, un experto amable, paciente, profesional y cercano especializado en ayudar a dueños de negocios a conectar su CRM con su asistente telefónico virtual.
 
 REGLAS OBLIGATORIAS Y PRIORIDAD ABSOLUTA:
@@ -831,16 +832,13 @@ REGLAS OBLIGATORIAS Y PRIORIDAD ABSOLUTA:
    - Pregunta amablemente: "¿Cuál es tu CRM principal? (HubSpot, Salesforce, Pipedrive, Zoho, etc.)"
    - Una vez que te diga el CRM, busca información actualizada en tiempo real y guía al usuario paso a paso, con instrucciones cortas y claras.
    - Después de cada paso importante, pide confirmación explícita antes de continuar al siguiente paso.
-   - Mantén un tono profesional pero cercano, empático y paciente.
-   - Si el usuario se desvía del tema, redirige amablemente la conversación hacia la integración.
+   - Si el usuario se desvía del tema, redirige amablemente hacia la integración.
 
 Estilo de comunicación:
-- Sé extremadamente claro, usa lenguaje sencillo y evita jerga técnica innecesaria.
-- Usa viñetas o numeración cuando expliques pasos.
-- Sé proactivo guiando la conversación hacia el objetivo: conectar su CRM con el asistente telefónico a través de Google Calendar.
-- Muestra empatía: "Entiendo que puede parecer un poco tedioso al principio, pero te voy a guiar paso a paso para que sea muy sencillo."
-
-Tu único objetivo en esta conversación es ayudar al cliente a completar la integración de su CRM con éxito."""
+- Sé extremadamente claro y usa lenguaje sencillo.
+- Usa viñetas o numeración para los pasos.
+- Muestra empatía: "Entiendo que puede parecer tedioso al principio, pero te voy a guiar paso a paso."
+Tu objetivo principal es completar la integración del CRM con éxito."""
 
         messages = [
             {"role": "system", "content": system_prompt}
@@ -880,43 +878,4 @@ Tu único objetivo en esta conversación es ayudar al cliente a completar la int
 
     except Exception as e:
         logger.error(f"❌ Error en /chat-grok: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))"
-            }
-        ] + conversation_history + [{"role": "user", "content": user_message}]
-
-        response = grok_client.chat.completions.create(
-            model="grok-4.5",  
-            messages=messages,
-            # Formato corregido para activar búsqueda en tiempo real
-            tools=[{
-                "type": "function",
-                "function": {
-                    "name": "web_search",
-                    "description": "Busca información actualizada en internet",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "query": {"type": "string", "description": "La consulta de búsqueda"}
-                        },
-                        "required": ["query"]
-                    }
-                }
-            }],
-            tool_choice="auto",
-            temperature=0.7,
-            max_tokens=2048
-        )
-
-        assistant_reply = response.choices[0].message.content
-
-        return {
-            "reply": assistant_reply,
-            "history": conversation_history + [
-                {"role": "user", "content": user_message},
-                {"role": "assistant", "content": assistant_reply}
-            ]
-        }
-
-    except Exception as e:
-        logger.error(f"❌ Error en /chat-grok: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))                    
+        raise HTTPException(status_code=500, detail=str(e))               

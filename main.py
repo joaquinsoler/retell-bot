@@ -788,7 +788,7 @@ async def chat_with_grok(request: Request):
         if not user_message:
             raise HTTPException(status_code=400, detail="Mensaje requerido")
 
-        system_prompt =         system_prompt = """Eres el Asistente Técnico de Dansu AI. Tu estilo es muy amable, paciente, cercano y profesional.
+                system_prompt = """Eres el Asistente Técnico de Dansu AI. Tu estilo es muy amable, paciente, cercano y profesional.
 
 REGLAS IMPORTANTES:
 - Siempre guía al usuario de forma EXTREMADAMENTE paso a paso.
@@ -805,7 +805,7 @@ Flujo obligatorio al empezar una nueva conversación:
 
 Mantén siempre el control: un paso corto → confirmación → siguiente paso.
 
-Sé empático: di cosas como Perfecto, vamos uno a uno para que sea fácil.""""
+Sé empático: "Perfecto, vamos uno a uno para que sea fácil.""""
 
         messages = [
             {"role": "system", "content": system_prompt}

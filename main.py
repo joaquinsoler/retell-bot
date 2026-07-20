@@ -792,7 +792,6 @@ async def chat_with_grok(request: Request):
             {
                 "role": "system",
                 "content": "# ==================== NUEVO ENDPOINT: CHATBOT GROK CON BÚSQUEDA EN TIEMPO REAL ====================
-# ==================== NUEVO ENDPOINT: CHATBOT GROK CON BÚSQUEDA EN TIEMPO REAL ====================
 @app.post("/chat-grok")
 async def chat_with_grok(request: Request):
     try:
@@ -806,39 +805,22 @@ async def chat_with_grok(request: Request):
         if not user_message:
             raise HTTPException(status_code=400, detail="Mensaje requerido")
 
-        # === PROMPT PROFESIONAL (CORRECTAMENTE FORMATEADO) ===
         system_prompt = """Eres el Asistente Técnico de Dansu AI, un experto amable, paciente, profesional y cercano especializado en ayudar a dueños de negocios a conectar su CRM con su asistente telefónico virtual.
 
 REGLAS OBLIGATORIAS Y PRIORIDAD ABSOLUTA:
 
 1. Primer Paso Obligatorio en TODA conversación nueva:
    - Siempre comienza guiando al usuario paso a paso para que comparta su calendario personal de Google con nuestra cuenta de servicio.
-   - Explícale claramente que es obligatorio usar una cuenta personal de Google (no cuenta de empresa / Google Workspace) como intermediario.
+   - Explícale claramente que es obligatorio usar una cuenta personal de Google (no cuenta de empresa).
 
-2. Instrucciones exactas que debes dar al cliente (paso a paso, corto y claro):
+2. Instrucciones exactas que debes dar:
+   - Entra a tu Google Calendar personal.
+   - Arriba a la izquierda pulsa "+" Crear → Nombre: "Asistente Dansu" + elige zona horaria.
+   - En "Mis calendarios" → tres puntos de "Asistente Dansu" → Configurar y compartir.
+   - "Añadir personas y grupos" → pega: asistente-virtual@asistente-virtual-500413.iam.gserviceaccount.com
+   - Permisos: "Hacer cambios y gestionar el uso compartido" → Enviar y espera 5 minutos.
 
-   - Primero: Entra a tu Google Calendar personal (calendar.google.com).
-   - Arriba a la izquierda, haz clic en el botón "+" Crear.
-   - Ponle como nombre: "Asistente Dansu".
-   - Selecciona la zona horaria que deseas que use tu asistente virtual.
-   - Una vez creado, en el menú de la izquierda bajo "Mis calendarios", busca "Asistente Dansu", haz clic en los tres puntos (...) → "Configurar y compartir".
-   - En la sección "Compartido con", haz clic en "Añadir personas y grupos".
-   - En el campo de correo electrónico pega exactamente: 
-     asistente-virtual@asistente-virtual-500413.iam.gserviceaccount.com
-   - En permisos, selecciona: "Hacer cambios y gestionar el uso compartido".
-   - Haz clic en Enviar y espera 5 minutos para que se apliquen los permisos.
-
-3. Flujo de conversación:
-   - Pregunta amablemente: "¿Cuál es tu CRM principal? (HubSpot, Salesforce, Pipedrive, Zoho, etc.)"
-   - Una vez que te diga el CRM, busca información actualizada en tiempo real y guía al usuario paso a paso, con instrucciones cortas y claras.
-   - Después de cada paso importante, pide confirmación explícita antes de continuar al siguiente paso.
-   - Si el usuario se desvía del tema, redirige amablemente hacia la integración.
-
-Estilo de comunicación:
-- Sé extremadamente claro y usa lenguaje sencillo.
-- Usa viñetas o numeración para los pasos.
-- Muestra empatía: "Entiendo que puede parecer tedioso al principio, pero te voy a guiar paso a paso."
-Tu objetivo principal es completar la integración del CRM con éxito."""
+3. Después pregunta: "¿Cuál es tu CRM?" y guía paso a paso pidiendo confirmación en cada uno."""
 
         messages = [
             {"role": "system", "content": system_prompt}
@@ -847,20 +829,7 @@ Tu objetivo principal es completar la integración del CRM con éxito."""
         response = grok_client.chat.completions.create(
             model="grok-4.5",
             messages=messages,
-            tools=[{
-                "type": "function",
-                "function": {
-                    "name": "web_search",
-                    "description": "Busca información actualizada en internet",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "query": {"type": "string", "description": "La consulta de búsqueda"}
-                        },
-                        "required": ["query"]
-                    }
-                }
-            }],
+            tools=[{"type": "function", "function": {"name": "web_search", "description": "Buscar información actualizada", "parameters": {"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]}}}],
             tool_choice="auto",
             temperature=0.7,
             max_tokens=2048
@@ -878,4 +847,4 @@ Tu objetivo principal es completar la integración del CRM con éxito."""
 
     except Exception as e:
         logger.error(f"❌ Error en /chat-grok: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))               
+        raise HTTPException(status_code=500, detail=str(e))

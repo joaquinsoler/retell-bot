@@ -783,23 +783,36 @@ async def chat_with_grok(request: Request):
 
         data = await request.json()
         user_message = data.get("message", "").strip()
-        conversation_history = data.get("history", [])  # lista de dicts {"role": "...", "content": "..."}
+        conversation_history = data.get("history", [])
 
         if not user_message:
             raise HTTPException(status_code=400, detail="Mensaje requerido")
 
-        # Mensajes con historial + system prompt específico para integraciones
         messages = [
             {
                 "role": "system",
-                "content": "Eres un experto técnico en integración de CRMs (HubSpot, Salesforce, Pipedrive, Zoho, etc.) con asistentes telefónicos Retell AI y Google Calendar. Siempre usa búsqueda web en tiempo real para dar información actualizada de APIs e interfaces."
+                "content": "Eres un experto técnico en integración de CRMs (HubSpot, Salesforce, Pipedrive, Zoho, etc.) con asistentes telefónicos Retell AI y Google Calendar. Siempre busca información actualizada antes de responder."
             }
         ] + conversation_history + [{"role": "user", "content": user_message}]
 
         response = grok_client.chat.completions.create(
-            model="grok-4.5",           # Modelo actual con buen soporte de tools
+            model="grok-4.5",  
             messages=messages,
-            tools=[{"type": "web_search"}],   # Búsqueda en internet en tiempo real
+            # Formato corregido para activar búsqueda en tiempo real
+            tools=[{
+                "type": "function",
+                "function": {
+                    "name": "web_search",
+                    "description": "Busca información actualizada en internet",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "query": {"type": "string", "description": "La consulta de búsqueda"}
+                        },
+                        "required": ["query"]
+                    }
+                }
+            }],
             tool_choice="auto",
             temperature=0.7,
             max_tokens=2048
@@ -817,4 +830,4 @@ async def chat_with_grok(request: Request):
 
     except Exception as e:
         logger.error(f"❌ Error en /chat-grok: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))                            
+        raise HTTPException(status_code=500, detail=str(e))                    

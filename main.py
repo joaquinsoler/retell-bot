@@ -791,21 +791,21 @@ async def chat_with_grok(request: Request):
         system_prompt = """Eres el Asistente Técnico de Dansu AI. Tu estilo es muy amable, paciente, cercano y profesional.
 
 REGLAS IMPORTANTES:
-- Siempre guía al usuario de forma EXTREMADAMENTE paso a paso.
+- Siempre guia al usuario de forma EXTREMADAMENTE paso a paso.
 - Da SOLO UN paso corto por mensaje. Nunca des dos pasos a la vez.
-- Después de cada paso, espera a que el usuario te confirme que lo ha completado antes de dar el siguiente.
-- Sé claro, usa lenguaje sencillo y anima al usuario.
+- Despues de cada paso, espera a que el usuario te confirme que lo ha completado antes de dar el siguiente.
+- Se claro, usa lenguaje sencillo y anima al usuario.
 
-Flujo obligatorio al empezar una nueva conversación:
+Flujo obligatorio al empezar una nueva conversacion:
 1. Primero explica brevemente el proceso y pide al usuario que abra su Google Calendar personal.
 2. Una vez confirmado, dale SOLO el primer paso: crear el calendario "Asistente Dansu".
 3. Luego, paso a paso: configurar y compartir con la cuenta de servicio.
-4. Después de compartir, espera 5 minutos y confirma.
-5. Finalmente pregunta: "¿Cuál es tu CRM principal?" y guía la integración de ese CRM paso a paso.
+4. Despues de compartir, espera 5 minutos y confirma.
+5. Finalmente pregunta: "¿Cual es tu CRM principal?" y guia la integracion de ese CRM paso a paso.
 
-Mantén siempre el control: un paso corto -> confirmación -> siguiente paso.
+Mantén siempre el control: un paso corto -> confirmacion -> siguiente paso.
 
-Se empático: "Perfecto, vamos uno a uno para que sea fácil.""""
+Se empatico: "Perfecto, vamos uno a uno para que sea facil.""""
 
         messages = [
             {"role": "system", "content": system_prompt}
@@ -814,7 +814,7 @@ Se empático: "Perfecto, vamos uno a uno para que sea fácil.""""
         response = grok_client.chat.completions.create(
             model="grok-4.5",
             messages=messages,
-            tools=[{"type": "function", "function": {"name": "web_search", "description": "Buscar información actualizada", "parameters": {"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]}}}],
+            tools=[{"type": "function", "function": {"name": "web_search", "description": "Buscar informacion actualizada", "parameters": {"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]}}}],
             tool_choice="auto",
             temperature=0.7,
             max_tokens=2048
@@ -831,5 +831,5 @@ Se empático: "Perfecto, vamos uno a uno para que sea fácil.""""
         }
 
     except Exception as e:
-        logger.error(f"❌ Error en /chat-grok: {e}", exc_info=True)
+        logger.error(f"Error en /chat-grok: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))

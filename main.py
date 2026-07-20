@@ -774,7 +774,7 @@ async def request_magic_link(request: Request):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-# ==================== NUEVO ENDPOINT: CHATBOT GROK CON BÚSQUEDA EN TIEMPO REAL ====================
+# ==================== ENDPOINT CHAT GROK ====================
 @app.post("/chat-grok")
 async def chat_with_grok(request: Request):
     try:
@@ -788,50 +788,22 @@ async def chat_with_grok(request: Request):
         if not user_message:
             raise HTTPException(status_code=400, detail="Mensaje requerido")
 
-        messages = [
-            {
-                "role": "system",
-                "content": "# ==================== NUEVO ENDPOINT: CHATBOT GROK CON BÚSQUEDA EN TIEMPO REAL ====================
-@app.post("/chat-grok")
-async def chat_with_grok(request: Request):
-    try:
-        if not grok_client:
-            raise HTTPException(status_code=500, detail="GROK_API_KEY no configurada")
-
-        data = await request.json()
-        user_message = data.get("message", "").strip()
-        conversation_history = data.get("history", [])
-
-        if not user_message:
-            raise HTTPException(status_code=400, detail="Mensaje requerido")
-
-        system_prompt =         system_prompt = """Eres el Asistente Técnico de Dansu AI, un experto amable, paciente, profesional y cercano especializado en ayudar a dueños de negocios a conectar su CRM con su asistente telefónico virtual.
+        system_prompt = """Eres el Asistente Técnico de Dansu AI, un experto amable, paciente, profesional y cercano especializado en ayudar a dueños de negocios a conectar su CRM con su asistente telefónico virtual.
 
 REGLAS OBLIGATORIAS Y PRIORIDAD ABSOLUTA:
 
 1. Primer Paso Obligatorio en TODA conversación nueva:
    - Siempre comienza guiando al usuario paso a paso para que comparta su calendario personal de Google con nuestra cuenta de servicio.
-   - Explícale claramente que es obligatorio usar una cuenta personal de Google (no cuenta de empresa / Google Workspace) como intermediario.
+   - Explícale claramente que es obligatorio usar una cuenta personal de Google (no cuenta de empresa).
 
-2. Instrucciones exactas que debes dar al cliente (paso a paso, corto y claro):
+2. Instrucciones exactas:
+   - Entra a tu Google Calendar personal.
+   - Arriba a la izquierda pulsa '+' Crear → Nombre: 'Asistente Dansu' + zona horaria.
+   - En 'Mis calendarios' → tres puntos → Configurar y compartir.
+   - 'Añadir personas' → pega: asistente-virtual@asistente-virtual-500413.iam.gserviceaccount.com
+   - Permisos: 'Hacer cambios y gestionar el uso compartido' → espera 5 minutos.
 
-   - Primero: Entra a tu Google Calendar personal (calendar.google.com).
-   - Arriba a la izquierda, haz clic en el botón '+' Crear.
-   - Ponle como nombre: 'Asistente Dansu'.
-   - Selecciona la zona horaria que deseas que use tu asistente virtual.
-   - Una vez creado, en el menú de la izquierda bajo 'Mis calendarios', busca 'Asistente Dansu', haz clic en los tres puntos (...) → 'Configurar y compartir'.
-   - En la sección 'Compartido con', haz clic en 'Añadir personas y grupos'.
-   - En el campo de correo electrónico pega exactamente: 
-     asistente-virtual@asistente-virtual-500413.iam.gserviceaccount.com
-   - En permisos, selecciona: 'Hacer cambios y gestionar el uso compartido'.
-   - Haz clic en Enviar y espera 5 minutos para que se apliquen los permisos.
-
-3. Flujo de conversación:
-   - Pregunta amablemente: '¿Cuál es tu CRM principal? (HubSpot, Salesforce, Pipedrive, Zoho, etc.)'
-   - Una vez que te diga el CRM, busca información actualizada en tiempo real y guía al usuario paso a paso, con instrucciones cortas y claras.
-   - Después de cada paso importante, pide confirmación explícita antes de continuar al siguiente paso.
-   - Si el usuario se desvía del tema, redirige amablemente la conversación hacia la integración."""
-
+3. Después pregunta el CRM y guía paso a paso pidiendo confirmación."""
 
         messages = [
             {"role": "system", "content": system_prompt}

@@ -47,3 +47,10 @@ def guardar_google_auth(payload: AuthPayload):
     except Exception as e:
         logger.error(f" Excepción crítica al procesar la autenticación de Google: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
+@app.get("/")
+def read_root():
+    return {
+        "status": "online",
+        "message": "Servidor de Retell & Nango activo",
+        "database": "dpg-d8r99pmrnols73f4ecmg-a"
+    }

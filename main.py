@@ -7,18 +7,18 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-// ========== NANGO ==========
+// Nango
 const nango = new Nango({ 
   secretKey: process.env.NANGO_API_KEY 
 });
 
-// ========== BASE DE DATOS (Render Postgres) ==========
+// Base de datos
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: { rejectUnauthorized: false }
 });
 
-// Crear tabla automáticamente al arrancar
+// Crear tabla al arrancar
 async function initDB() {
   try {
     await pool.query(`
@@ -31,15 +31,14 @@ async function initDB() {
         created_at TIMESTAMP DEFAULT NOW()
       );
     `);
-    console.log('✅ Tabla nango_connections lista');
+    console.log('Tabla nango_connections lista');
   } catch (err) {
-    console.error('❌ Error creando tabla:', err.message);
+    console.error('Error creando tabla:', err.message);
   }
 }
 initDB();
 
-// ========== ENDPOINT PARA EL FRONTEND ==========
-// El frontend llama a este endpoint para obtener el sessionToken
+// Endpoint para el frontend
 app.post('/session-token', async (req, res) => {
   try {
     const { data } = await nango.createConnectSession({
@@ -57,12 +56,11 @@ app.post('/session-token', async (req, res) => {
   }
 });
 
-// ========== WEBHOOK DE NANGO ==========
-// Aquí se recibe la confirmación de autenticación y se guarda en la DB
+// Webhook de Nango
 app.post('/nango-webhook', async (req, res) => {
   const payload = req.body;
 
-  console.log('🔔 Webhook recibido de Nango:');
+  console.log('Webhook recibido de Nango:');
   console.log(JSON.stringify(payload, null, 2));
 
   if (payload.type === 'auth' && payload.operation === 'creation' && payload.success === true) {
@@ -80,9 +78,9 @@ app.post('/nango-webhook', async (req, res) => {
         ]
       );
 
-      console.log(`✅ Autenticación Google guardada → connectionId: ${payload.connectionId}`);
+      console.log('Autenticacion Google guardada - connectionId: ' + payload.connectionId);
     } catch (err) {
-      console.error('❌ Error guardando en la base de datos:', err.message);
+      console.error('Error guardando en la base de datos:', err.message);
     }
   }
 
@@ -97,5 +95,5 @@ app.get('/', (req, res) => {
 // Arrancar servidor
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-  console.log(`🚀 Servidor corriendo en puerto ${PORT}`);
+  console.log('Servidor corriendo en puerto ' + PORT);
 });

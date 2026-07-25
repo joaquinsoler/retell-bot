@@ -57,7 +57,6 @@ class SessionRequest(BaseModel):
     userId: Optional[str] = None
     email: Optional[str] = None
 
-# ========== ENDPOINT: crear session token ==========
 @app.post("/session-token")
 async def create_session_token(body: SessionRequest):
     try:
@@ -66,12 +65,18 @@ async def create_session_token(body: SessionRequest):
             "Content-Type": "application/json"
         }
 
+        # Construimos los tags sin valores null
+        tags = {
+            "end_user_id": body.userId or f"user-{os.urandom(4).hex()}"
+        }
+
+        # Solo añadimos el email si realmente viene un valor
+        if body.email:
+            tags["end_user_email"] = body.email
+
         payload = {
             "allowed_integrations": ["google"],
-            "tags": {
-                "end_user_id": body.userId or f"user-{os.urandom(4).hex()}",
-                "end_user_email": body.email
-            }
+            "tags": tags
         }
 
         response = requests.post(
@@ -89,7 +94,7 @@ async def create_session_token(body: SessionRequest):
         token = data.get("data", {}).get("token") or data.get("token")
 
         if not token:
-            raise HTTPException(status_code=500, detail="No se recibió token de Nango")
+            raise HTTPException(status_code=500, detail="No se recibio token de Nango")
 
         return {"sessionToken": token}
 

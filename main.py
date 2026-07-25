@@ -1,56 +1,101 @@
-import os
-import requests
-import logging
-from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel
+const express = require('express');
+const cors = require('cors');
+const { Nango } = require('@nangohq/node');
+const { Pool } = require('pg');
 
-app = FastAPI()
-logger = logging.getLogger(__name__)
+const app = express();
+app.use(cors());
+app.use(express.json());
 
-NANGO_SECRET_KEY = os.getenv("NANGO_SECRET_KEY", "b744da8a-42f8-4a47-935b-928a3743b192")
+// ========== NANGO ==========
+const nango = new Nango({ 
+  secretKey: process.env.NANGO_API_KEY 
+});
 
-class AuthPayload(BaseModel):
-    connection_id: str
+// ========== BASE DE DATOS (Render Postgres) ==========
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: { rejectUnauthorized: false }
+});
 
-@app.post('/api/guardar-google-auth')
-def guardar_google_auth(payload: AuthPayload):
-    connection_id = payload.connection_id
-    
-    try:
-        headers = {
-            "Authorization": f"Bearer {NANGO_SECRET_KEY}",
-            "Content-Type": "application/json"
-        }
-        nango_url = f"https://api.nango.dev/connection/{connection_id}?provider_config_key=google"
-        response = requests.get(nango_url, headers=headers)
-        
-        if response.status_code != 200:
-            logger.error(f"Error al obtener datos de Nango: {response.text}")
-            raise HTTPException(status_code=500, detail="No se pudo recuperar la sesión de Nango")
+// Crear tabla automáticamente al arrancar
+async function initDB() {
+  try {
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS nango_connections (
+        id SERIAL PRIMARY KEY,
+        connection_id VARCHAR(255) UNIQUE NOT NULL,
+        provider_config_key VARCHAR(255),
+        provider VARCHAR(100),
+        tags JSONB,
+        created_at TIMESTAMP DEFAULT NOW()
+      );
+    `);
+    console.log('✅ Tabla nango_connections lista');
+  } catch (err) {
+    console.error('❌ Error creando tabla:', err.message);
+  }
+}
+initDB();
 
-        conn_data = response.json()
-        credentials = conn_data.get("credentials", {})
-        raw_data = credentials.get("raw", {})
-        user_email = raw_data.get("email") or credentials.get("user_id") or "desconocido"
-        access_token = credentials.get("access_token")
+// ========== ENDPOINT PARA EL FRONTEND ==========
+// El frontend llama a este endpoint para obtener el sessionToken
+app.post('/session-token', async (req, res) => {
+  try {
+    const { data } = await nango.createConnectSession({
+      allowed_integrations: ['google'],
+      tags: {
+        end_user_id: req.body.userId || 'user-' + Date.now(),
+        end_user_email: req.body.email || null
+      }
+    });
 
-        # Log obligatorio demostrando el éxito
-        logger.info(f" [DB SUCCESS] ¡Datos de sesión de Google guardados en PostgreSQL (Base de datos: dpg-d8r99pmrnols73f4ecmg-a) para el usuario: {user_email} | Connection ID: {connection_id}!")
+    res.json({ sessionToken: data.token });
+  } catch (err) {
+    console.error('Error creando session token:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
 
-        return {
-            "status": "success",
-            "message": "Autenticación de Google guardada correctamente en base de datos",
-            "email": user_email,
-            "connection_id": connection_id
-        }
+// ========== WEBHOOK DE NANGO ==========
+// Aquí se recibe la confirmación de autenticación y se guarda en la DB
+app.post('/nango-webhook', async (req, res) => {
+  const payload = req.body;
 
-    except Exception as e:
-        logger.error(f" Excepción crítica al procesar la autenticación de Google: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
-@app.get("/")
-def read_root():
-    return {
-        "status": "online",
-        "message": "Servidor de Retell & Nango activo",
-        "database": "dpg-d8r99pmrnols73f4ecmg-a"
+  console.log('🔔 Webhook recibido de Nango:');
+  console.log(JSON.stringify(payload, null, 2));
+
+  if (payload.type === 'auth' && payload.operation === 'creation' && payload.success === true) {
+    try {
+      await pool.query(
+        `INSERT INTO nango_connections 
+         (connection_id, provider_config_key, provider, tags)
+         VALUES ($1, $2, $3, $4)
+         ON CONFLICT (connection_id) DO NOTHING`,
+        [
+          payload.connectionId,
+          payload.providerConfigKey,
+          payload.provider,
+          JSON.stringify(payload.tags || {})
+        ]
+      );
+
+      console.log(`✅ Autenticación Google guardada → connectionId: ${payload.connectionId}`);
+    } catch (err) {
+      console.error('❌ Error guardando en la base de datos:', err.message);
     }
+  }
+
+  res.status(200).send('OK');
+});
+
+// Health check
+app.get('/', (req, res) => {
+  res.send('Servidor Nango + Google OAuth funcionando correctamente');
+});
+
+// Arrancar servidor
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => {
+  console.log(`🚀 Servidor corriendo en puerto ${PORT}`);
+});

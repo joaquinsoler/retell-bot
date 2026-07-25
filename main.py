@@ -1,99 +1,148 @@
-const express = require('express');
-const cors = require('cors');
-const { Nango } = require('@nangohq/node');
-const { Pool } = require('pg');
+from fastapi import FastAPI, Request, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
+import os
+import requests
+import psycopg2
+from psycopg2.extras import RealDictCursor
+from typing import Optional
+import json
 
-const app = express();
-app.use(cors());
-app.use(express.json());
+app = FastAPI()
 
-// Nango
-const nango = new Nango({ 
-  secretKey: process.env.NANGO_API_KEY 
-});
+# CORS (necesario para el frontend)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
-// Base de datos
-const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
-  ssl: { rejectUnauthorized: false }
-});
+# ========== CONFIGURACIÓN ==========
+NANGO_API_KEY = os.getenv("NANGO_API_KEY")
+DATABASE_URL = os.getenv("DATABASE_URL")
+NANGO_API_URL = "https://api.nango.dev"
 
-// Crear tabla al arrancar
-async function initDB() {
-  try {
-    await pool.query(`
-      CREATE TABLE IF NOT EXISTS nango_connections (
-        id SERIAL PRIMARY KEY,
-        connection_id VARCHAR(255) UNIQUE NOT NULL,
-        provider_config_key VARCHAR(255),
-        provider VARCHAR(100),
-        tags JSONB,
-        created_at TIMESTAMP DEFAULT NOW()
-      );
-    `);
-    console.log('Tabla nango_connections lista');
-  } catch (err) {
-    console.error('Error creando tabla:', err.message);
-  }
-}
-initDB();
+# ========== BASE DE DATOS ==========
+def get_db_connection():
+    return psycopg2.connect(DATABASE_URL, sslmode="require")
 
-// Endpoint para el frontend
-app.post('/session-token', async (req, res) => {
-  try {
-    const { data } = await nango.createConnectSession({
-      allowed_integrations: ['google'],
-      tags: {
-        end_user_id: req.body.userId || 'user-' + Date.now(),
-        end_user_email: req.body.email || null
-      }
-    });
+def init_db():
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS nango_connections (
+                id SERIAL PRIMARY KEY,
+                connection_id VARCHAR(255) UNIQUE NOT NULL,
+                provider_config_key VARCHAR(255),
+                provider VARCHAR(100),
+                tags JSONB,
+                created_at TIMESTAMP DEFAULT NOW()
+            );
+        """)
+        conn.commit()
+        cur.close()
+        conn.close()
+        print("Tabla nango_connections lista")
+    except Exception as e:
+        print(f"Error creando tabla: {e}")
 
-    res.json({ sessionToken: data.token });
-  } catch (err) {
-    console.error('Error creando session token:', err.message);
-    res.status(500).json({ error: err.message });
-  }
-});
+# Crear la tabla al arrancar
+init_db()
 
-// Webhook de Nango
-app.post('/nango-webhook', async (req, res) => {
-  const payload = req.body;
+# ========== MODELOS ==========
+class SessionRequest(BaseModel):
+    userId: Optional[str] = None
+    email: Optional[str] = None
 
-  console.log('Webhook recibido de Nango:');
-  console.log(JSON.stringify(payload, null, 2));
+# ========== ENDPOINT: crear session token ==========
+@app.post("/session-token")
+async def create_session_token(body: SessionRequest):
+    try:
+        headers = {
+            "Authorization": f"Bearer {NANGO_API_KEY}",
+            "Content-Type": "application/json"
+        }
 
-  if (payload.type === 'auth' && payload.operation === 'creation' && payload.success === true) {
-    try {
-      await pool.query(
-        `INSERT INTO nango_connections 
-         (connection_id, provider_config_key, provider, tags)
-         VALUES ($1, $2, $3, $4)
-         ON CONFLICT (connection_id) DO NOTHING`,
-        [
-          payload.connectionId,
-          payload.providerConfigKey,
-          payload.provider,
-          JSON.stringify(payload.tags || {})
-        ]
-      );
+        payload = {
+            "allowed_integrations": ["google"],
+            "tags": {
+                "end_user_id": body.userId or f"user-{os.urandom(4).hex()}",
+                "end_user_email": body.email
+            }
+        }
 
-      console.log('Autenticacion Google guardada - connectionId: ' + payload.connectionId);
-    } catch (err) {
-      console.error('Error guardando en la base de datos:', err.message);
-    }
-  }
+        response = requests.post(
+            f"{NANGO_API_URL}/connect/sessions",
+            headers=headers,
+            json=payload,
+            timeout=15
+        )
 
-  res.status(200).send('OK');
-});
+        if response.status_code not in (200, 201):
+            print("Error de Nango:", response.text)
+            raise HTTPException(status_code=500, detail=response.text)
 
-// Health check
-app.get('/', (req, res) => {
-  res.send('Servidor Nango + Google OAuth funcionando correctamente');
-});
+        data = response.json()
+        token = data.get("data", {}).get("token") or data.get("token")
 
-// Arrancar servidor
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-  console.log('Servidor corriendo en puerto ' + PORT);
-});
+        if not token:
+            raise HTTPException(status_code=500, detail="No se recibió token de Nango")
+
+        return {"sessionToken": token}
+
+    except Exception as e:
+        print(f"Error creando session token: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+# ========== WEBHOOK de Nango ==========
+@app.post("/nango-webhook")
+async def nango_webhook(request: Request):
+    try:
+        payload = await request.json()
+        print("Webhook recibido de Nango:")
+        print(json.dumps(payload, indent=2))
+
+        if (
+            payload.get("type") == "auth"
+            and payload.get("operation") == "creation"
+            and payload.get("success") is True
+        ):
+            connection_id = payload.get("connectionId")
+            provider_config_key = payload.get("providerConfigKey")
+            provider = payload.get("provider")
+            tags = payload.get("tags") or {}
+
+            conn = get_db_connection()
+            cur = conn.cursor()
+
+            cur.execute("""
+                INSERT INTO nango_connections 
+                (connection_id, provider_config_key, provider, tags)
+                VALUES (%s, %s, %s, %s)
+                ON CONFLICT (connection_id) DO NOTHING
+            """, (
+                connection_id,
+                provider_config_key,
+                provider,
+                json.dumps(tags)
+            ))
+
+            conn.commit()
+            cur.close()
+            conn.close()
+
+            print(f"Autenticacion Google guardada - connectionId: {connection_id}")
+
+        return {"status": "ok"}
+
+    except Exception as e:
+        print(f"Error en webhook: {e}")
+        return {"status": "error", "message": str(e)}
+
+# ========== Health check ==========
+@app.get("/")
+async def root():
+    return {"message": "Servidor Nango + Google OAuth funcionando correctamente"}

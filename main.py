@@ -1,153 +1,269 @@
-from fastapi import FastAPI, Request, HTTPException
+import os
+import logging
+from typing import Optional
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-import os
 import requests
-import psycopg2
-from psycopg2.extras import RealDictCursor
-from typing import Optional
-import json
 
-app = FastAPI()
+# Configuración de logs
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-# CORS (necesario para el frontend)
+app = FastAPI(title="Retell Bot - Apideck HubSpot")
+
+# CORS (necesario para el frontend HTML)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["*"],  # En producción pon solo tu dominio
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# ========== CONFIGURACIÓN ==========
-NANGO_API_KEY = os.getenv("NANGO_API_KEY")
-DATABASE_URL = os.getenv("DATABASE_URL")
-NANGO_API_URL = "https://api.nango.dev"
+# ======================
+# VARIABLES DE ENTORNO
+# ======================
+APIDECK_API_KEY = os.getenv("APIDECK_API_KEY")          # sk_live_...
+APIDECK_APP_ID = os.getenv("APIDECK_APP_ID")            # BtPS5QsuQzTziOUpoC8NBPyfv87x382r9XpPoC9I
+APIDECK_BASE = "https://unify.apideck.com"
 
-# ========== BASE DE DATOS ==========
-def get_db_connection():
-    return psycopg2.connect(DATABASE_URL, sslmode="require")
+if not APIDECK_API_KEY or not APIDECK_APP_ID:
+    logger.warning("Faltan APIDECK_API_KEY o APIDECK_APP_ID en las variables de entorno")
 
-def init_db():
+
+# ======================
+# MODELOS
+# ======================
+class CreateSessionRequest(BaseModel):
+    consumer_id: str                    # ID único del cliente (ej: user-123 o el id de tu BD)
+    redirect_uri: Optional[str] = None  # A dónde volver después de conectar
+    user_name: Optional[str] = None
+    account_name: Optional[str] = None
+
+
+# ======================
+# HELPERS
+# ======================
+def apideck_headers(consumer_id: str):
+    return {
+        "Authorization": f"Bearer {APIDECK_API_KEY}",
+        "x-apideck-app-id": APIDECK_APP_ID,
+        "x-apideck-consumer-id": consumer_id,
+        "Content-Type": "application/json",
+    }
+
+
+# ======================
+# 1. CREAR SESIÓN DE VAULT (para que el cliente conecte HubSpot)
+# ======================
+@app.post("/apideck/session")
+async def create_vault_session(body: CreateSessionRequest):
+    """
+    El frontend llama a este endpoint.
+    Devuelve una session_uri para que el usuario vaya a conectar HubSpot.
+    """
+    if not APIDECK_API_KEY or not APIDECK_APP_ID:
+        raise HTTPException(status_code=500, detail="Apideck no configurado")
+
+    payload = {
+        "redirect_uri": body.redirect_uri or "https://retell-bot.onrender.com/connected",
+        "consumer_metadata": {
+            "account_name": body.account_name or "Cliente",
+            "user_name": body.user_name or body.consumer_id,
+        },
+        "settings": {
+            "unified_apis": ["crm"],          # Solo mostramos CRM
+            "auto_redirect": True,
+            "isolation_mode": True,           # Experiencia más limpia
+            "hide_guides": True,
+        },
+    }
+
     try:
-        conn = get_db_connection()
-        cur = conn.cursor()
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS nango_connections (
-                id SERIAL PRIMARY KEY,
-                connection_id VARCHAR(255) UNIQUE NOT NULL,
-                provider_config_key VARCHAR(255),
-                provider VARCHAR(100),
-                tags JSONB,
-                created_at TIMESTAMP DEFAULT NOW()
-            );
-        """)
-        conn.commit()
-        cur.close()
-        conn.close()
-        print("Tabla nango_connections lista")
-    except Exception as e:
-        print(f"Error creando tabla: {e}")
-
-# Crear la tabla al arrancar
-init_db()
-
-# ========== MODELOS ==========
-class SessionRequest(BaseModel):
-    userId: Optional[str] = None
-    email: Optional[str] = None
-
-@app.post("/session-token")
-async def create_session_token(body: SessionRequest):
-    try:
-        headers = {
-            "Authorization": f"Bearer {NANGO_API_KEY}",
-            "Content-Type": "application/json"
-        }
-
-        # Construimos los tags sin valores null
-        tags = {
-            "end_user_id": body.userId or f"user-{os.urandom(4).hex()}"
-        }
-
-        # Solo añadimos el email si realmente viene un valor
-        if body.email:
-            tags["end_user_email"] = body.email
-
-        payload = {
-            "allowed_integrations": ["google"],
-            "tags": tags
-        }
-
         response = requests.post(
-            f"{NANGO_API_URL}/connect/sessions",
-            headers=headers,
+            f"{APIDECK_BASE}/vault/sessions",
+            headers=apideck_headers(body.consumer_id),
             json=payload,
-            timeout=15
+            timeout=15,
+        )
+        response.raise_for_status()
+        data = response.json().get("data", {})
+
+        session_uri = data.get("session_uri")
+        session_token = data.get("session_token")
+
+        logger.info(f"Sesión Vault creada para consumer_id={body.consumer_id}")
+
+        return {
+            "success": True,
+            "consumer_id": body.consumer_id,
+            "session_uri": session_uri,       # ← Abre esta URL en el navegador del cliente
+            "session_token": session_token,   # ← Si quieres usar Vault JS embebido
+        }
+
+    except requests.exceptions.RequestException as e:
+        logger.error(f"Error creando sesión Vault: {e}")
+        raise HTTPException(status_code=500, detail=f"Error creando sesión: {str(e)}")
+
+
+# ======================
+# 2. COMPROBAR SI HUBSPOT ESTÁ CONECTADO
+# ======================
+@app.get("/apideck/connection-status/{consumer_id}")
+async def check_hubspot_connection(consumer_id: str):
+    """
+    Comprueba si el cliente ya tiene HubSpot conectado y en estado 'callable'.
+    Escribe en los logs el resultado.
+    """
+    try:
+        response = requests.get(
+            f"{APIDECK_BASE}/vault/connections/crm/hubspot",
+            headers=apideck_headers(consumer_id),
+            timeout=10,
         )
 
-        if response.status_code not in (200, 201):
-            print("Error de Nango:", response.text)
-            raise HTTPException(status_code=500, detail=response.text)
+        if response.status_code == 404:
+            logger.info(f"[{consumer_id}] HubSpot NO está conectado")
+            return {"connected": False, "state": None, "message": "HubSpot no conectado"}
 
-        data = response.json()
-        token = data.get("data", {}).get("token") or data.get("token")
+        response.raise_for_status()
+        data = response.json().get("data", {})
 
-        if not token:
-            raise HTTPException(status_code=500, detail="No se recibio token de Nango")
+        state = data.get("state")
+        enabled = data.get("enabled", False)
 
-        return {"sessionToken": token}
+        is_connected = state == "callable" and enabled
 
-    except Exception as e:
-        print(f"Error creando session token: {e}")
+        if is_connected:
+            logger.info(f"[{consumer_id}] HubSpot CONECTADO correctamente (state=callable)")
+        else:
+            logger.info(f"[{consumer_id}] HubSpot existe pero state={state}")
+
+        return {
+            "connected": is_connected,
+            "state": state,
+            "enabled": enabled,
+            "service_id": data.get("service_id"),
+            "name": data.get("name"),
+        }
+
+    except requests.exceptions.RequestException as e:
+        logger.error(f"Error comprobando conexión: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-# ========== WEBHOOK de Nango ==========
-@app.post("/nango-webhook")
-async def nango_webhook(request: Request):
-    try:
-        payload = await request.json()
-        print("Webhook recibido de Nango:")
-        print(json.dumps(payload, indent=2))
 
-        if (
-            payload.get("type") == "auth"
-            and payload.get("operation") == "creation"
-            and payload.get("success") is True
-        ):
-            connection_id = payload.get("connectionId")
-            provider_config_key = payload.get("providerConfigKey")
-            provider = payload.get("provider")
-            tags = payload.get("tags") or {}
+# ======================
+# 3. ESTRUCTURA DE LA API (para Retell)
+# ======================
+@app.get("/apideck/crm-schema/{consumer_id}")
+async def get_crm_schema(consumer_id: str):
+    """
+    Devuelve la estructura de recursos y campos principales
+    que el asistente de Retell puede usar.
+    """
+    # Primero comprobamos que esté conectado
+    status = await check_hubspot_connection(consumer_id)
+    if not status.get("connected"):
+        raise HTTPException(status_code=400, detail="HubSpot no está conectado para este consumer")
 
-            conn = get_db_connection()
-            cur = conn.cursor()
+    # Estructura unificada de Apideck CRM (la que realmente usará Retell)
+    schema = {
+        "provider": "hubspot",
+        "via": "apideck",
+        "unified_api": "crm",
+        "base_url": "https://unify.apideck.com/crm",
+        "resources": {
+            "contacts": {
+                "description": "Contactos / Personas",
+                "endpoints": {
+                    "list": "GET /crm/contacts",
+                    "get": "GET /crm/contacts/{id}",
+                    "create": "POST /crm/contacts",
+                    "update": "PATCH /crm/contacts/{id}",
+                },
+                "main_fields": [
+                    "id", "first_name", "last_name", "name", "emails", "phone_numbers",
+                    "company_id", "title", "owner_id", "created_at", "updated_at"
+                ],
+            },
+            "companies": {
+                "description": "Empresas",
+                "endpoints": {
+                    "list": "GET /crm/companies",
+                    "get": "GET /crm/companies/{id}",
+                    "create": "POST /crm/companies",
+                    "update": "PATCH /crm/companies/{id}",
+                },
+                "main_fields": [
+                    "id", "name", "website", "phone_numbers", "emails",
+                    "industry", "owner_id", "created_at", "updated_at"
+                ],
+            },
+            "opportunities": {
+                "description": "Oportunidades / Deals",
+                "endpoints": {
+                    "list": "GET /crm/opportunities",
+                    "get": "GET /crm/opportunities/{id}",
+                    "create": "POST /crm/opportunities",
+                    "update": "PATCH /crm/opportunities/{id}",
+                },
+                "main_fields": [
+                    "id", "title", "description", "amount", "currency",
+                    "stage", "pipeline_id", "status", "contact_id", "company_id",
+                    "owner_id", "close_date", "created_at", "updated_at"
+                ],
+            },
+            "activities": {
+                "description": "Actividades (llamadas, emails, reuniones, tareas)",
+                "endpoints": {
+                    "list": "GET /crm/activities",
+                    "get": "GET /crm/activities/{id}",
+                    "create": "POST /crm/activities",
+                },
+                "main_fields": [
+                    "id", "type", "title", "description", "duration_seconds",
+                    "start_datetime", "end_datetime", "contact_id", "company_id",
+                    "opportunity_id", "owner_id", "created_at"
+                ],
+            },
+            "notes": {
+                "description": "Notas",
+                "endpoints": {
+                    "list": "GET /crm/notes",
+                    "create": "POST /crm/notes",
+                },
+                "main_fields": ["id", "title", "content", "contact_id", "company_id", "opportunity_id"],
+            },
+            "users": {
+                "description": "Usuarios / Owners del CRM",
+                "endpoints": {
+                    "list": "GET /crm/users",
+                },
+                "main_fields": ["id", "first_name", "last_name", "email", "status"],
+            },
+        },
+        "headers_required": {
+            "Authorization": "Bearer {APIDECK_API_KEY}",
+            "x-apideck-app-id": "{APIDECK_APP_ID}",
+            "x-apideck-consumer-id": "{consumer_id}",
+            "x-apideck-service-id": "hubspot",   # importante
+        },
+        "notes_for_retell": [
+            "Siempre incluir el header x-apideck-service-id: hubspot",
+            "Usar el consumer_id del cliente en todas las peticiones",
+            "Los campos están unificados por Apideck (no son los nombres originales de HubSpot)",
+            "Para crear una actividad de tipo llamada usar type='call'",
+        ],
+    }
 
-            cur.execute("""
-                INSERT INTO nango_connections 
-                (connection_id, provider_config_key, provider, tags)
-                VALUES (%s, %s, %s, %s)
-                ON CONFLICT (connection_id) DO NOTHING
-            """, (
-                connection_id,
-                provider_config_key,
-                provider,
-                json.dumps(tags)
-            ))
+    logger.info(f"[{consumer_id}] Schema CRM solicitado y devuelto")
+    return schema
 
-            conn.commit()
-            cur.close()
-            conn.close()
 
-            print(f"Autenticacion Google guardada - connectionId: {connection_id}")
-
-        return {"status": "ok"}
-
-    except Exception as e:
-        print(f"Error en webhook: {e}")
-        return {"status": "error", "message": str(e)}
-
-# ========== Health check ==========
+# ======================
+# Health check
+# ======================
 @app.get("/")
 async def root():
-    return {"message": "Servidor Nango + Google OAuth funcionando correctamente"}
+    return {"status": "ok", "service": "retell-bot-apideck"}

@@ -130,13 +130,12 @@ async def create_vault_session(body: CreateSessionRequest):
 
 
 # ======================
-# 2. COMPROBAR ESTADO DE CONEXIÓN Y OBTENER SCHEMA REAL
+# 2. COMPROBAR ESTADO DE CONEXIÓN
 # ======================
 @app.get("/apideck/connection-status/{consumer_id}")
 async def check_hubspot_connection(consumer_id: str):
     """
-    Comprueba si HubSpot está conectado, obtiene su estado y solicita
-    la estructura/metadata real desde Apideck si está disponible.
+    Comprueba si HubSpot está conectado y en estado 'callable'.
     """
     logger.info(f"Comprobando conexión HubSpot | consumer_id={consumer_id}")
 
@@ -164,22 +163,6 @@ async def check_hubspot_connection(consumer_id: str):
         enabled = data.get("enabled", False)
         is_connected = state == "callable" and enabled
 
-        if is_connected:
-            logger.info(f"[{consumer_id}] HubSpot CONECTADO correctamente (state=callable)")
-            
-            # **SOLICITAR ESTRUCTURA/METADATA A APIDECK E IMPRIMIR EN PANTALLA**
-            try:
-                meta_res = requests.get(
-                    f"{APIDECK_BASE}/crm/contacts", # Consultamos los contactos para forzar a Apideck a consultar la API de HubSpot del cliente
-                    headers={**apideck_headers(consumer_id), "x-apideck-service-id": "hubspot"},
-                    params={"limit": 1},
-                    timeout=10
-                )
-                logger.info(f"=== ESTRUCTURA DE CONTACTOS / API OBTENIDA DE HUBSPOT PARA [{consumer_id}] ===")
-                logger.info(meta_res.text)
-            except Exception as meta_err:
-                logger.warning(f"No se pudo descargar la metadata avanzada: {str(meta_err)}")
-
         return {
             "connected": is_connected,
             "state": state,
@@ -194,41 +177,89 @@ async def check_hubspot_connection(consumer_id: str):
 
 
 # ======================
-# 3. WEBHOOK DE APIDECK (Con soporte de validación)
+# 3. ENDPOINT CLAVE: OBTENER ESTRUCTURA DE LA API Y VOLCAR A LOGS
+# ======================
+@app.get("/apideck/sync-schema/{consumer_id}")
+async def sync_crm_schema_to_logs(consumer_id: str):
+    """
+    Se ejecuta tras volver de dar permisos en la web. Valida la conexión
+    con HubSpot y extrae la estructura completa/metadatos de la API del CRM
+    imprimiéndolo de forma detallada en los logs de Render.
+    """
+    logger.info(f"=== INICIANDO SINCRONIZACIÓN DE SCHEMA PARA CONSUMER: {consumer_id} ===")
+
+    # Verificar estado de conexión
+    status = await check_hubspot_connection(consumer_id)
+    if not status.get("connected"):
+        logger.warning(f"[{consumer_id}] Intento de sincronización sin conexión 'callable' a HubSpot.")
+        raise HTTPException(status_code=400, detail="HubSpot no está conectado o listo todavía.")
+
+    headers_hubspot = {
+        **apideck_headers(consumer_id),
+        "x-apideck-service-id": "hubspot"
+    }
+
+    schema_results = {}
+
+    # Recursos principales de CRM a consultar para extraer la estructura/datos
+    resources = ["contacts", "companies", "opportunities", "leads"]
+
+    for resource in resources:
+        try:
+            logger.info(f"[{consumer_id}] Solicitando estructura del recurso CRM: '{resource}' ...")
+            res = requests.get(
+                f"{APIDECK_BASE}/crm/{resource}",
+                headers=headers_hubspot,
+                params={"limit": 1},
+                timeout=10
+            )
+            
+            if res.status_code < 400:
+                schema_results[resource] = res.json()
+                logger.info(f"\n--- [HUBSPOT SCHEMA] RECURSO: {resource.upper()} ---")
+                logger.info(res.text)
+                logger.info(f"--------------------------------------------------\n")
+            else:
+                logger.warning(f"[{consumer_id}] No se pudo obtener '{resource}': Status {res.status_code} - {res.text}")
+        except Exception as err:
+            logger.error(f"[{consumer_id}] Error consultando recurso {resource}: {str(err)}")
+
+    logger.info(f"=== FIN DE SINCRONIZACIÓN DE SCHEMA PARA [{consumer_id}] ===")
+    
+    return {
+        "success": True,
+        "message": "Estructura de la API del CRM solicitada y volcada con éxito en los logs de Render.",
+        "consumer_id": consumer_id,
+        "resources_fetched": list(schema_results.keys())
+    }
+
+
+# ======================
+# 4. WEBHOOK DE APIDECK
 # ======================
 @app.api_route("/apideck/webhook", methods=["GET", "POST"])
 async def apideck_webhook(request: Request):
-    """
-    Soporta tanto la verificación inicial de la URL por parte de Apideck (GET/POST con challenge)
-    como la recepción posterior de eventos de Vault.
-    """
-    # Si Apideck envía una petición de validación (suele usar un parámetro tipo 'challenge' o un GET)
     if request.method == "GET":
         challenge = request.query_params.get("challenge", "ok")
-        logger.info("Validación de webhook de Apideck respondida con éxito.")
         return {"challenge": challenge}
 
     try:
         body = await request.json()
-        
-        # Por si mandan el challenge dentro de un POST de verificación
         if "challenge" in body:
             return {"challenge": body["challenge"]}
 
         event_type = body.get("event")
         consumer_id = body.get("consumer_id")
         
-        logger.info(f"Webhook recibido de Apideck: evento={event_type} | consumer_id={consumer_id}")
+        logger.info(f"Webhook recibido: evento={event_type} | consumer_id={consumer_id}")
 
-        # Si la conexión se completa o pasa a estar lista
-        if event_type in ["vault.connection.added", "vault.connection.callable"]:
-            logger.info(f"¡El cliente {consumer_id} ha concedido permisos a HubSpot exitosamente!")
-            if consumer_id:
-                await check_hubspot_connection(consumer_id)
+        if event_type in ["vault.connection.added", "vault.connection.callable"] and consumer_id:
+            # Opcional: si prefieres automatizarlo por webhook también
+            logger.info(f"Conexión establecida por webhook para {consumer_id}")
 
         return {"status": "received"}
     except Exception as e:
-        logger.error(f"Error procesando webhook: {str(e)}")
+        logger.error(f"Error en webhook: {str(e)}")
         return {"status": "error", "message": str(e)}
 
 

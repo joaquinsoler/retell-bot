@@ -1,7 +1,7 @@
 import os
 import logging
 from typing import Optional
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import requests
@@ -34,7 +34,7 @@ APIDECK_APP_ID = os.getenv("APIDECK_APP_ID")
 APIDECK_BASE = "https://unify.apideck.com"
 
 if not APIDECK_API_KEY or not APIDECK_APP_ID:
-    logger.error("FALTAN variables de entorno APIDECK_API_KEY o APIDECK_APP_ID")
+    logger.error("FALTAN variables de entorno APIDECK_API_KEY o APP_ID")
 else:
     logger.info("Variables de entorno Apideck cargadas correctamente")
 
@@ -59,6 +59,8 @@ def apideck_headers(consumer_id: str) -> dict:
         "x-apideck-consumer-id": consumer_id,
         "Content-Type": "application/json",
     }
+
+
 # ======================
 # 1. CREAR SESIÓN DE VAULT
 # ======================
@@ -73,7 +75,6 @@ async def create_vault_session(body: CreateSessionRequest):
         logger.error("Apideck no está configurado (faltan API_KEY o APP_ID)")
         raise HTTPException(status_code=500, detail="Apideck no configurado en el servidor")
 
-    # URL de retorno por defecto (cámbiala si quieres otra)
     redirect_uri = body.redirect_uri or "https://retell-bot.onrender.com"
 
     payload = {
@@ -99,8 +100,6 @@ async def create_vault_session(body: CreateSessionRequest):
             timeout=15,
         )
 
-        logger.info(f"Respuesta Apideck status={response.status_code}")
-
         if response.status_code >= 400:
             logger.error(f"Error de Apideck: {response.text}")
             raise HTTPException(
@@ -117,7 +116,6 @@ async def create_vault_session(body: CreateSessionRequest):
             raise HTTPException(status_code=500, detail="No se recibió session_uri de Apideck")
 
         logger.info(f"Sesión Vault creada correctamente | consumer_id={body.consumer_id}")
-        logger.info(f"session_uri = {session_uri}")
 
         return {
             "success": True,
@@ -132,12 +130,13 @@ async def create_vault_session(body: CreateSessionRequest):
 
 
 # ======================
-# 2. COMPROBAR ESTADO DE CONEXIÓN
+# 2. COMPROBAR ESTADO DE CONEXIÓN Y OBTENER SCHEMA REAL
 # ======================
 @app.get("/apideck/connection-status/{consumer_id}")
 async def check_hubspot_connection(consumer_id: str):
     """
-    Comprueba si HubSpot está conectado y en estado 'callable'.
+    Comprueba si HubSpot está conectado, obtiene su estado y solicita
+    la estructura/metadata real desde Apideck si está disponible.
     """
     logger.info(f"Comprobando conexión HubSpot | consumer_id={consumer_id}")
 
@@ -163,13 +162,23 @@ async def check_hubspot_connection(consumer_id: str):
         data = response.json().get("data", {})
         state = data.get("state")
         enabled = data.get("enabled", False)
-
         is_connected = state == "callable" and enabled
 
         if is_connected:
             logger.info(f"[{consumer_id}] HubSpot CONECTADO correctamente (state=callable)")
-        else:
-            logger.info(f"[{consumer_id}] HubSpot existe pero state={state}")
+            
+            # **SOLICITAR ESTRUCTURA/METADATA A APIDECK E IMPRIMIR EN PANTALLA**
+            try:
+                meta_res = requests.get(
+                    f"{APIDECK_BASE}/crm/contacts", # Consultamos los contactos para forzar a Apideck a consultar la API de HubSpot del cliente
+                    headers={**apideck_headers(consumer_id), "x-apideck-service-id": "hubspot"},
+                    params={"limit": 1},
+                    timeout=10
+                )
+                logger.info(f"=== ESTRUCTURA DE CONTACTOS / API OBTENIDA DE HUBSPOT PARA [{consumer_id}] ===")
+                logger.info(meta_res.text)
+            except Exception as meta_err:
+                logger.warning(f"No se pudo descargar la metadata avanzada: {str(meta_err)}")
 
         return {
             "connected": is_connected,
@@ -182,124 +191,45 @@ async def check_hubspot_connection(consumer_id: str):
     except requests.exceptions.RequestException as e:
         logger.error(f"Error de red al comprobar conexión: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
 # ======================
-# 3. ESTRUCTURA DE LA API (para Retell)
+# 3. WEBHOOK DE APIDECK (Con soporte de validación)
 # ======================
-@app.get("/apideck/crm-schema/{consumer_id}")
-async def get_crm_schema(consumer_id: str):
+@app.api_route("/apideck/webhook", methods=["GET", "POST"])
+async def apideck_webhook(request: Request):
     """
-    Devuelve la estructura de recursos y campos principales
-    que el asistente de Retell puede usar.
+    Soporta tanto la verificación inicial de la URL por parte de Apideck (GET/POST con challenge)
+    como la recepción posterior de eventos de Vault.
     """
-    logger.info(f"[{consumer_id}] Solicitando schema del CRM")
+    # Si Apideck envía una petición de validación (suele usar un parámetro tipo 'challenge' o un GET)
+    if request.method == "GET":
+        challenge = request.query_params.get("challenge", "ok")
+        logger.info("Validación de webhook de Apideck respondida con éxito.")
+        return {"challenge": challenge}
 
-    # Comprobamos primero que esté conectado
-    status_response = await check_hubspot_connection(consumer_id)
-    if not status_response.get("connected"):
-        logger.warning(f"[{consumer_id}] Intentó pedir schema sin tener HubSpot conectado")
-        raise HTTPException(
-            status_code=400,
-            detail="HubSpot no está conectado para este consumer_id"
-        )
+    try:
+        body = await request.json()
+        
+        # Por si mandan el challenge dentro de un POST de verificación
+        if "challenge" in body:
+            return {"challenge": body["challenge"]}
 
-    schema = {
-        "provider": "hubspot",
-        "via": "apideck",
-        "unified_api": "crm",
-        "base_url": "https://unify.apideck.com/crm",
-        "resources": {
-            "contacts": {
-                "description": "Contactos / Personas",
-                "endpoints": {
-                    "list": "GET /crm/contacts",
-                    "get": "GET /crm/contacts/{id}",
-                    "create": "POST /crm/contacts",
-                    "update": "PATCH /crm/contacts/{id}",
-                },
-                "main_fields": [
-                    "id", "first_name", "last_name", "name", "emails",
-                    "phone_numbers", "company_id", "title", "owner_id",
-                    "created_at", "updated_at"
-                ],
-            },
-            "companies": {
-                "description": "Empresas",
-                "endpoints": {
-                    "list": "GET /crm/companies",
-                    "get": "GET /crm/companies/{id}",
-                    "create": "POST /crm/companies",
-                    "update": "PATCH /crm/companies/{id}",
-                },
-                "main_fields": [
-                    "id", "name", "website", "phone_numbers", "emails",
-                    "industry", "owner_id", "created_at", "updated_at"
-                ],
-            },
-            "opportunities": {
-                "description": "Oportunidades / Deals",
-                "endpoints": {
-                    "list": "GET /crm/opportunities",
-                    "get": "GET /crm/opportunities/{id}",
-                    "create": "POST /crm/opportunities",
-                    "update": "PATCH /crm/opportunities/{id}",
-                },
-                "main_fields": [
-                    "id", "title", "description", "amount", "currency",
-                    "stage", "pipeline_id", "status", "contact_id",
-                    "company_id", "owner_id", "close_date",
-                    "created_at", "updated_at"
-                ],
-            },
-            "activities": {
-                "description": "Actividades (llamadas, emails, reuniones, tareas)",
-                "endpoints": {
-                    "list": "GET /crm/activities",
-                    "get": "GET /crm/activities/{id}",
-                    "create": "POST /crm/activities",
-                },
-                "main_fields": [
-                    "id", "type", "title", "description", "duration_seconds",
-                    "start_datetime", "end_datetime", "contact_id",
-                    "company_id", "opportunity_id", "owner_id", "created_at"
-                ],
-            },
-            "notes": {
-                "description": "Notas",
-                "endpoints": {
-                    "list": "GET /crm/notes",
-                    "create": "POST /crm/notes",
-                },
-                "main_fields": [
-                    "id", "title", "content", "contact_id",
-                    "company_id", "opportunity_id"
-                ],
-            },
-            "users": {
-                "description": "Usuarios / Owners del CRM",
-                "endpoints": {
-                    "list": "GET /crm/users",
-                },
-                "main_fields": [
-                    "id", "first_name", "last_name", "email", "status"
-                ],
-            },
-        },
-        "headers_required": {
-            "Authorization": "Bearer {APIDECK_API_KEY}",
-            "x-apideck-app-id": "{APIDECK_APP_ID}",
-            "x-apideck-consumer-id": "{consumer_id}",
-            "x-apideck-service-id": "hubspot",
-        },
-        "notes_for_retell": [
-            "Siempre incluir el header x-apideck-service-id: hubspot",
-            "Usar el consumer_id del cliente en todas las peticiones",
-            "Los campos están unificados por Apideck (no son los nombres originales de HubSpot)",
-            "Para crear una actividad de tipo llamada usar type='call'",
-        ],
-    }
+        event_type = body.get("event")
+        consumer_id = body.get("consumer_id")
+        
+        logger.info(f"Webhook recibido de Apideck: evento={event_type} | consumer_id={consumer_id}")
 
-    logger.info(f"[{consumer_id}] Schema CRM devuelto correctamente")
-    return schema
+        # Si la conexión se completa o pasa a estar lista
+        if event_type in ["vault.connection.added", "vault.connection.callable"]:
+            logger.info(f"¡El cliente {consumer_id} ha concedido permisos a HubSpot exitosamente!")
+            if consumer_id:
+                await check_hubspot_connection(consumer_id)
+
+        return {"status": "received"}
+    except Exception as e:
+        logger.error(f"Error procesando webhook: {str(e)}")
+        return {"status": "error", "message": str(e)}
 
 
 # ======================

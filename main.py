@@ -7,8 +7,6 @@ from pydantic import BaseModel
 import requests
 import psycopg2
 import json
-import csv
-import io
 
 # ======================
 # LOGGING
@@ -42,7 +40,7 @@ NANGO_API_URL = "https://api.nango.dev"
 DATABASE_URL = os.getenv("DATABASE_URL")
 
 # ======================
-# BASE DE DATOS
+# BASE DE DATOS (EMAIL COMO IDENTIFICADOR ÚNICO)
 # ======================
 def get_db_connection():
     return psycopg2.connect(DATABASE_URL, sslmode="require")
@@ -52,11 +50,11 @@ def init_db():
         conn = get_db_connection()
         cur = conn.cursor()
         
+        # 1. Tabla de Usuarios: El email es la clave única (evita duplicados si el usuario ya existe)
         cur.execute("""
             CREATE TABLE IF NOT EXISTS users (
                 id SERIAL PRIMARY KEY,
-                user_id VARCHAR(255) UNIQUE NOT NULL,
-                email VARCHAR(255),
+                email VARCHAR(255) UNIQUE NOT NULL,
                 google_connection_id VARCHAR(255),
                 apideck_consumer_id VARCHAR(255),
                 crm_provider VARCHAR(100),
@@ -64,11 +62,12 @@ def init_db():
             );
         """)
 
+        # 2. Tabla de Asistentes: Relación 1 a N basada en el email del usuario (permite múltiples asistentes por cuenta)
         cur.execute("""
             CREATE TABLE IF NOT EXISTS assistants (
                 id SERIAL PRIMARY KEY,
                 assistant_id VARCHAR(255) UNIQUE NOT NULL,
-                user_id VARCHAR(255) NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+                email VARCHAR(255) NOT NULL REFERENCES users(email) ON DELETE CASCADE,
                 assistant_name VARCHAR(255),
                 crm_schema_data JSONB,
                 created_at TIMESTAMP DEFAULT NOW()
@@ -117,8 +116,8 @@ async def create_nango_session_token(body: SessionRequest):
             "Authorization": f"Bearer {NANGO_API_KEY}",
             "Content-Type": "application/json"
         }
-        user_id = body.userId or f"user-{os.urandom(4).hex()}"
-        tags = {"end_user_id": user_id}
+        user_identifier = body.email or body.userId or f"user-{os.urandom(4).hex()}"
+        tags = {"end_user_id": user_identifier}
         if body.email:
             tags["end_user_email"] = body.email
 
@@ -142,7 +141,7 @@ async def create_nango_session_token(body: SessionRequest):
         if not token:
             raise HTTPException(status_code=500, detail="No se recibió token de Nango")
 
-        return {"sessionToken": token, "userId": user_id}
+        return {"sessionToken": token, "userId": user_identifier}
 
     except Exception as e:
         logger.error(f"Error creando session token de Nango: {e}")
@@ -159,41 +158,43 @@ async def nango_webhook(request: Request):
         ):
             connection_id = payload.get("connectionId")
             tags = payload.get("tags") or {}
-            user_id = tags.get("end_user_id")
             
+            # Extraer el email real devuelto por la autenticación de Google en Nango
             email = tags.get("end_user_email")
             if not email:
                 connection_config = payload.get("connectionConfig") or {}
                 end_user = connection_config.get("end_user") or {}
-                email = end_user.get("email") or payload.get("endUserEmail") or "usuario_autenticado@google.com"
+                email = end_user.get("email") or payload.get("endUserEmail")
 
-            if user_id:
+            if not email:
+                auth_details = payload.get("auth") or {}
+                email = auth_details.get("email") or payload.get("connectionConfig", {}).get("email")
+
+            if email:
                 conn = get_db_connection()
                 cur = conn.cursor()
+                # Upsert estricto basado en el EMAIL: si ya existe, no crea usuario nuevo, actualiza su conexión
                 cur.execute("""
-                    INSERT INTO users (user_id, email, google_connection_id, apideck_consumer_id)
-                    VALUES (%s, %s, %s, %s)
-                    ON CONFLICT (user_id) DO UPDATE 
+                    INSERT INTO users (email, google_connection_id, apideck_consumer_id)
+                    VALUES (%s, %s, %s)
+                    ON CONFLICT (email) DO UPDATE 
                     SET google_connection_id = EXCLUDED.google_connection_id,
-                        email = COALESCE(EXCLUDED.email, users.email),
                         apideck_consumer_id = EXCLUDED.apideck_consumer_id
-                """, (user_id, email, connection_id, user_id))
+                """, (email, connection_id, email))
                 conn.commit()
                 cur.close()
                 conn.close()
-                logger.info(f"Usuario registrado/actualizado en BD: {user_id}")
+                logger.info(f"Usuario autenticado por Gmail guardado/actualizado (sin duplicar): {email}")
 
         return {"status": "ok"}
     except Exception as e:
         logger.error(f"Error en webhook de Nango: {e}")
         return {"status": "error", "message": str(e)}
-
 # ======================
 # 2. CRM APIDECK (HUBSPOT)
 # ======================
 @app.post("/apideck/session")
 async def create_vault_session(body: ApideckSessionRequest):
-    # REDIRECCIÓN CONFIGURADA A dansu.info
     redirect_uri = "https://dansu.info"
     
     payload = {
@@ -248,31 +249,30 @@ async def check_hubspot_connection(consumer_id: str):
         raise HTTPException(status_code=500, detail=str(e))
 
 # ======================
-# 3. SINCRONIZACIÓN Y LOGS CSV
+# 3. SINCRONIZACIÓN Y CREACIÓN DE NUEVOS ASISTENTES (RELACIÓN 1 A N)
 # ======================
 @app.get("/apideck/sync-schema/{consumer_id}")
 async def sync_crm_schema_to_logs(consumer_id: str):
-    logger.info(f"=== INICIANDO PROCESO UNIFICADO PARA CONSUMER: {consumer_id} ===")
+    logger.info(f"=== INICIANDO SINCRONIZACIÓN Y CREACIÓN DE ASISTENTE PARA: {consumer_id} ===")
+
+    user_email = consumer_id
 
     try:
         conn = get_db_connection()
         cur = conn.cursor()
         
+        # Garantizar que el usuario base existe por su email
         cur.execute("""
-            INSERT INTO users (user_id, email, apideck_consumer_id)
-            VALUES (%s, %s, %s)
-            ON CONFLICT (user_id) DO NOTHING
-        """, (consumer_id, "usuario_temporal@google.com", consumer_id))
-        
-        cur.execute("SELECT email FROM users WHERE user_id = %s", (consumer_id,))
-        row = cur.fetchone()
-        user_email = row[0] if row else "Sin email"
+            INSERT INTO users (email, apideck_consumer_id)
+            VALUES (%s, %s)
+            ON CONFLICT (email) DO NOTHING
+        """, (user_email, user_email))
         
         conn.commit()
         cur.close()
         conn.close()
     except Exception as db_err:
-        logger.error(f"Error asegurando usuario en BD: {db_err}")
+        logger.error(f"Error asegurando usuario por email en BD: {db_err}")
 
     headers_hubspot = {**apideck_headers(consumer_id), "x-apideck-service-id": "hubspot"}
     resources = ["contacts", "companies", "opportunities", "leads"]
@@ -288,36 +288,37 @@ async def sync_crm_schema_to_logs(consumer_id: str):
         except Exception as err:
             schema_results[resource] = {"error": str(err)}
 
-    assistant_id = f"ast-{consumer_id}"
+    # Generar un identificador completamente único para permitir múltiples asistentes por el mismo usuario
+    assistant_id = f"ast-{os.urandom(4).hex()}"
     try:
         conn = get_db_connection()
         cur = conn.cursor()
+        # Inserta un nuevo registro de asistente asociado al email del usuario (relación 1 a N)
         cur.execute("""
-            INSERT INTO assistants (assistant_id, user_id, assistant_name, crm_schema_data)
+            INSERT INTO assistants (assistant_id, email, assistant_name, crm_schema_data)
             VALUES (%s, %s, %s, %s)
-            ON CONFLICT (assistant_id) DO UPDATE 
-            SET crm_schema_data = EXCLUDED.crm_schema_data
-        """, (assistant_id, consumer_id, "Asistente Principal HubSpot", json.dumps(schema_results)))
+        """, (assistant_id, user_email, f"Asistente HubSpot - {assistant_id[:6]}", json.dumps(schema_results)))
         conn.commit()
         cur.close()
         conn.close()
-        logger.info(f"Esquema CRM guardado en la tabla 'assistants' para el asistente: {assistant_id}")
+        logger.info(f"Nuevo asistente único ({assistant_id}) creado y vinculado correctamente al usuario: {user_email}")
     except Exception as db_err:
-        logger.error(f"Error guardando esquema en assistants: {db_err}")
+        logger.error(f"Error guardando nuevo asistente en BD: {db_err}")
 
+    # Generar salida CSV para logs
     csv_buffer = io.StringIO()
     csv_writer = csv.writer(csv_buffer, delimiter=';')
-    csv_writer.writerow(["user_id", "email", "assistant_id", "crm_provider", "recurso", "estado"])
+    csv_writer.writerow(["email", "assistant_id", "crm_provider", "recurso", "estado"])
     
     for resource in resources:
         status_text = "Disponible / Estructurado OK" if "error" not in str(schema_results[resource]) else "Error de esquema"
-        csv_writer.writerow([consumer_id, user_email, assistant_id, "hubspot", resource, status_text])
+        csv_writer.writerow([user_email, assistant_id, "hubspot", resource, status_text])
 
     csv_output = csv_buffer.getvalue().strip()
 
     logger.info(
         f"\n==================================================\n"
-        f"✅ ÉXITO: ASISTENTE CREADO Y ESQUEMA CRM ALMACENADO\n"
+        f"✅ ÉXITO: NUEVO ASISTENTE CREADO PARA EL USUARIO\n"
         f"--------------------------------------------------\n"
         f"{csv_output}\n"
         f"=================================================="
@@ -325,7 +326,7 @@ async def sync_crm_schema_to_logs(consumer_id: str):
 
     return {
         "success": True,
-        "message": "Esquema sincronizado y guardado en la tabla assistants correctamente.",
+        "message": "Nuevo asistente creado con éxito y vinculado al usuario por email.",
         "assistant_id": assistant_id
     }
 

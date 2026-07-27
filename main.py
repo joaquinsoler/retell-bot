@@ -193,8 +193,8 @@ async def nango_webhook(request: Request):
 # ======================
 @app.post("/apideck/session")
 async def create_vault_session(body: ApideckSessionRequest):
-    # REDIRECCIÓN: Cambia esto por tu dominio final (ej. "https://dansu.info") donde se aloja el frontend
-    redirect_uri = os.getenv("FRONTEND_REDIRECT_URI", "https://retell-bot.onrender.com")
+    # REDIRECCIÓN CONFIGURADA A dansu.info
+    redirect_uri = "https://dansu.info"
     
     payload = {
         "redirect_uri": redirect_uri,
@@ -258,7 +258,6 @@ async def sync_crm_schema_to_logs(consumer_id: str):
         conn = get_db_connection()
         cur = conn.cursor()
         
-        # SEGURIDAD: Asegurar que el usuario existe en la tabla 'users' antes de insertar el asistente
         cur.execute("""
             INSERT INTO users (user_id, email, apideck_consumer_id)
             VALUES (%s, %s, %s)

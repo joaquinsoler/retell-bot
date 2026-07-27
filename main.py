@@ -42,7 +42,7 @@ NANGO_API_URL = "https://api.nango.dev"
 DATABASE_URL = os.getenv("DATABASE_URL")
 
 # ======================
-# BASE DE DATOS (ESTRUCTURA 1 A N)
+# BASE DE DATOS
 # ======================
 def get_db_connection():
     return psycopg2.connect(DATABASE_URL, sslmode="require")
@@ -52,7 +52,6 @@ def init_db():
         conn = get_db_connection()
         cur = conn.cursor()
         
-        # 1. Tabla de Usuarios (Identidad global y conexiones)
         cur.execute("""
             CREATE TABLE IF NOT EXISTS users (
                 id SERIAL PRIMARY KEY,
@@ -65,7 +64,6 @@ def init_db():
             );
         """)
 
-        # 2. Tabla de Asistentes (Relación 1 a N con el usuario, almacena esquema CRM)
         cur.execute("""
             CREATE TABLE IF NOT EXISTS assistants (
                 id SERIAL PRIMARY KEY,
@@ -195,8 +193,9 @@ async def nango_webhook(request: Request):
 # ======================
 @app.post("/apideck/session")
 async def create_vault_session(body: ApideckSessionRequest):
-    # Redirigir de vuelta a la raíz de la web tras completar la autorización con éxito
-    redirect_uri = "https://retell-bot.onrender.com"
+    # REDIRECCIÓN: Cambia esto por tu dominio final (ej. "https://dansu.info") donde se aloja el frontend
+    redirect_uri = os.getenv("FRONTEND_REDIRECT_URI", "https://retell-bot.onrender.com")
+    
     payload = {
         "redirect_uri": redirect_uri,
         "consumer_metadata": {
@@ -249,24 +248,32 @@ async def check_hubspot_connection(consumer_id: str):
         raise HTTPException(status_code=500, detail=str(e))
 
 # ======================
-# 3. SINCRONIZACIÓN, REGISTRO EN ASISTENTES Y LOGS CSV
+# 3. SINCRONIZACIÓN Y LOGS CSV
 # ======================
 @app.get("/apideck/sync-schema/{consumer_id}")
 async def sync_crm_schema_to_logs(consumer_id: str):
     logger.info(f"=== INICIANDO PROCESO UNIFICADO PARA CONSUMER: {consumer_id} ===")
 
-    user_email = "Sin email"
     try:
         conn = get_db_connection()
         cur = conn.cursor()
+        
+        # SEGURIDAD: Asegurar que el usuario existe en la tabla 'users' antes de insertar el asistente
+        cur.execute("""
+            INSERT INTO users (user_id, email, apideck_consumer_id)
+            VALUES (%s, %s, %s)
+            ON CONFLICT (user_id) DO NOTHING
+        """, (consumer_id, "usuario_temporal@google.com", consumer_id))
+        
         cur.execute("SELECT email FROM users WHERE user_id = %s", (consumer_id,))
         row = cur.fetchone()
-        if row:
-            user_email = row[0] or "Sin email"
+        user_email = row[0] if row else "Sin email"
+        
+        conn.commit()
         cur.close()
         conn.close()
     except Exception as db_err:
-        logger.error(f"Error consultando usuario en BD: {db_err}")
+        logger.error(f"Error asegurando usuario en BD: {db_err}")
 
     headers_hubspot = {**apideck_headers(consumer_id), "x-apideck-service-id": "hubspot"}
     resources = ["contacts", "companies", "opportunities", "leads"]
@@ -282,7 +289,6 @@ async def sync_crm_schema_to_logs(consumer_id: str):
         except Exception as err:
             schema_results[resource] = {"error": str(err)}
 
-    # Guardar o actualizar la estructura del CRM en la tabla 'assistants' (ej. Asistente Principal por defecto)
     assistant_id = f"ast-{consumer_id}"
     try:
         conn = get_db_connection()
@@ -300,7 +306,6 @@ async def sync_crm_schema_to_logs(consumer_id: str):
     except Exception as db_err:
         logger.error(f"Error guardando esquema en assistants: {db_err}")
 
-    # Generar salida CSV para logs
     csv_buffer = io.StringIO()
     csv_writer = csv.writer(csv_buffer, delimiter=';')
     csv_writer.writerow(["user_id", "email", "assistant_id", "crm_provider", "recurso", "estado"])

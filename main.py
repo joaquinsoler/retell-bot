@@ -1,11 +1,12 @@
 # ============================================================
 # BACKEND COMPLETO - PARTE 1/3
-# Retell Bot + Google OAuth + Apideck CRM
-# Solución robusta: el backend sirve el frontend en /
+# Dansu - Google OAuth + Apideck CRM
 # ============================================================
 
 import os
 import logging
+import io
+import csv
 from typing import Optional
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -29,7 +30,7 @@ logger = logging.getLogger("retell-bot")
 # ============================================================
 # APP + CORS
 # ============================================================
-app = FastAPI(title="Retell Bot - Google OAuth + Apideck CRM")
+app = FastAPI(title="Dansu - Google OAuth + Apideck CRM")
 
 app.add_middleware(
     CORSMiddleware,
@@ -56,10 +57,22 @@ else:
 logger.info(f"✅ Google Client ID configurado: {GOOGLE_CLIENT_ID[:20]}...")
 
 # ============================================================
-# MODELOS
+# ALMACÉN TEMPORAL EN MEMORIA (solo para logs)
+# ============================================================
+google_sessions = {}   # consumer_id → {name, email, google_id, picture}
+
+# ============================================================
+# MODELOS PYDANTIC
 # ============================================================
 class TokenRequest(BaseModel):
     token: str
+
+class AssociateRequest(BaseModel):
+    consumer_id: str
+    email: str
+    name: Optional[str] = None
+    google_id: Optional[str] = None
+    picture: Optional[str] = None
 
 class CreateSessionRequest(BaseModel):
     consumer_id: str
@@ -79,7 +92,7 @@ def apideck_headers(consumer_id: str) -> dict:
     }
 # ============================================================
 # BACKEND COMPLETO - PARTE 2/3
-# Endpoints: Google + Session + Status + Sync + Disconnect + Webhook
+# Endpoints de Google + Apideck
 # ============================================================
 
 # ============================================================
@@ -133,7 +146,22 @@ async def google_auth(body: TokenRequest):
 
 
 # ============================================================
-# 2. CREAR SESIÓN DE VAULT
+# 1b. ASOCIAR DATOS DE GOOGLE AL CONSUMER_ID (para los logs)
+# ============================================================
+@app.post("/api/auth/google/associate")
+async def associate_google(body: AssociateRequest):
+    google_sessions[body.consumer_id] = {
+        "name": body.name,
+        "email": body.email,
+        "google_id": body.google_id,
+        "picture": body.picture
+    }
+    logger.info(f"🔗 Asociado Google → consumer_id={body.consumer_id} | email={body.email}")
+    return {"status": "ok"}
+
+
+# ============================================================
+# 2. CREAR SESIÓN DE VAULT (Apideck)
 # ============================================================
 @app.post("/apideck/session")
 async def create_vault_session(body: CreateSessionRequest):
@@ -143,7 +171,6 @@ async def create_vault_session(body: CreateSessionRequest):
         logger.error("❌ Apideck no está configurado (faltan API_KEY o APP_ID)")
         raise HTTPException(status_code=500, detail="Apideck no configurado en el servidor")
 
-    # Siempre redirigimos a la raíz del backend (que ahora sirve el frontend)
     redirect_uri = body.redirect_uri or "https://retell-bot.onrender.com"
 
     payload = {
@@ -256,13 +283,47 @@ async def check_hubspot_connection(consumer_id: str):
 
 
 # ============================================================
-# 4. SINCRONIZAR SCHEMA DEL CRM → LOGS
+# 4. HABILITAR CONEXIÓN (cuando está en 'available')
+# ============================================================
+@app.post("/apideck/enable/{consumer_id}")
+async def enable_crm_connection(consumer_id: str):
+    logger.info(f"⚡ Intentando habilitar conexión CRM | consumer_id={consumer_id}")
+
+    if not APIDECK_API_KEY or not APIDECK_APP_ID:
+        raise HTTPException(status_code=500, detail="Apideck no configurado")
+
+    try:
+        response = requests.patch(
+            f"{APIDECK_BASE}/vault/connections/crm/hubspot",
+            headers=apideck_headers(consumer_id),
+            json={"enabled": True},
+            timeout=10,
+        )
+
+        logger.info(f"Respuesta enable → {response.status_code} | {response.text[:300]}")
+
+        if response.status_code >= 400:
+            raise HTTPException(status_code=response.status_code, detail=response.text)
+
+        data = response.json().get("data", {})
+        return {
+            "success": True,
+            "state": data.get("state"),
+            "enabled": data.get("enabled"),
+            "message": "Intento de habilitación realizado"
+        }
+
+    except requests.exceptions.RequestException as e:
+        logger.error(f"❌ Error de red al habilitar: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ============================================================
+# 5. SINCRONIZAR SCHEMA + IMPRESIÓN ESTILO REGISTRO + DATOS GOOGLE
 # ============================================================
 @app.get("/apideck/sync-schema/{consumer_id}")
 async def sync_crm_schema_to_logs(consumer_id: str):
-    logger.info("=" * 60)
-    logger.info(f"=== INICIANDO SINCRONIZACIÓN DE SCHEMA | consumer_id={consumer_id} ===")
-    logger.info("=" * 60)
+    logger.info(f"=== INICIANDO SINCRONIZACIÓN DE SCHEMA PARA: {consumer_id} ===")
 
     try:
         status = await check_hubspot_connection(consumer_id)
@@ -271,61 +332,85 @@ async def sync_crm_schema_to_logs(consumer_id: str):
         raise HTTPException(status_code=500, detail=f"Error verificando conexión: {str(e)}")
 
     if not status.get("connected"):
-        logger.warning(f"[{consumer_id}] Intento de sincronización sin conexión 'callable' a HubSpot.")
-        raise HTTPException(
-            status_code=400,
-            detail="HubSpot no está conectado o listo todavía."
-        )
+        logger.warning(f"[{consumer_id}] Intento de sincronización sin conexión 'callable'.")
+        raise HTTPException(status_code=400, detail="HubSpot no está conectado o listo todavía.")
 
     headers_hubspot = {
         **apideck_headers(consumer_id),
         "x-apideck-service-id": "hubspot"
     }
 
-    schema_results = {}
     resources = ["contacts", "companies", "opportunities", "leads"]
+    schema_results = {}
 
     for resource in resources:
         try:
-            logger.info(f"[{consumer_id}] Solicitando estructura del recurso CRM: '{resource}' ...")
             res = requests.get(
                 f"{APIDECK_BASE}/crm/{resource}",
                 headers=headers_hubspot,
                 params={"limit": 1},
                 timeout=12
             )
-
             if res.status_code < 400:
                 schema_results[resource] = res.json()
-                logger.info(f"\n--- [HUBSPOT SCHEMA] RECURSO: {resource.upper()} ---")
-                logger.info(res.text)
-                logger.info("-" * 50)
             else:
-                logger.warning(
-                    f"[{consumer_id}] No se pudo obtener '{resource}': "
-                    f"Status {res.status_code} - {res.text}"
-                )
-        except requests.exceptions.RequestException as err:
-            logger.error(f"[{consumer_id}] Error de red consultando recurso {resource}: {str(err)}")
+                schema_results[resource] = {"status": res.status_code, "error": res.text}
         except Exception as err:
-            logger.error(f"[{consumer_id}] Error inesperado consultando recurso {resource}: {str(err)}")
+            schema_results[resource] = {"error": str(err)}
 
-    logger.info("=" * 60)
-    logger.info(f"=== FIN DE SINCRONIZACIÓN DE SCHEMA | consumer_id={consumer_id} ===")
-    logger.info(f"Recursos obtenidos: {list(schema_results.keys())}")
-    logger.info("=" * 60)
+    # Identificador de asistente (igual que REGISTRO)
+    assistant_id = f"ast-{os.urandom(4).hex()}"
+
+    # Salida tipo CSV (exactamente igual que el código REGISTRO)
+    csv_buffer = io.StringIO()
+    csv_writer = csv.writer(csv_buffer, delimiter=';')
+    csv_writer.writerow(["email / consumer_id", "assistant_id", "crm_provider", "recurso", "estado"])
+
+    for resource in resources:
+        status_text = "Disponible / Estructurado OK" if "error" not in str(schema_results.get(resource, {})) else "Error de esquema"
+        csv_writer.writerow([consumer_id, assistant_id, "hubspot", resource, status_text])
+
+    csv_output = csv_buffer.getvalue().strip()
+
+    # Datos de Google asociados
+    google_info = google_sessions.get(consumer_id, {})
+    google_name  = google_info.get("name", "No disponible en esta sesión")
+    google_email = google_info.get("email", consumer_id)
+    google_id    = google_info.get("google_id", "-")
+
+    # LOG FINAL (estilo REGISTRO + datos de Google)
+    logger.info(
+        f"\n"
+        f"==================================================\n"
+        f"✅ ÉXITO: NUEVO ASISTENTE CREADO / SCHEMA EXTRAÍDO\n"
+        f"--------------------------------------------------\n"
+        f"DATOS DE GOOGLE:\n"
+        f"  • Nombre     : {google_name}\n"
+        f"  • Email      : {google_email}\n"
+        f"  • Google ID  : {google_id}\n"
+        f"--------------------------------------------------\n"
+        f"DATOS DEL CRM (HubSpot):\n"
+        f"{csv_output}\n"
+        f"=================================================="
+    )
+
+    # Schema completo de cada recurso (para depuración)
+    for resource, data in schema_results.items():
+        logger.info(f"\n--- [HUBSPOT SCHEMA] RECURSO: {resource.upper()} ---")
+        logger.info(str(data)[:2000])
+        logger.info("-" * 50)
 
     return {
         "success": True,
-        "message": "Estructura de la API del CRM solicitada y volcada con éxito en los logs de Render.",
+        "message": "Nuevo asistente / schema extraído con éxito y volcado a los logs.",
+        "assistant_id": assistant_id,
         "consumer_id": consumer_id,
-        "resources_fetched": list(schema_results.keys()),
-        "crm_name": status.get("name", "HubSpot")
+        "resources_fetched": list(schema_results.keys())
     }
 
 
 # ============================================================
-# 5. ELIMINAR CONEXIÓN CRM
+# 6. ELIMINAR CONEXIÓN CRM
 # ============================================================
 @app.delete("/apideck/disconnect/{consumer_id}")
 async def disconnect_crm(consumer_id: str):
@@ -344,6 +429,8 @@ async def disconnect_crm(consumer_id: str):
 
         if response.status_code in (204, 404):
             logger.info(f"✅ Conexión CRM eliminada (o no existía) | consumer_id={consumer_id}")
+            # Limpiamos también la sesión de Google en memoria
+            google_sessions.pop(consumer_id, None)
             return {
                 "success": True,
                 "message": "Conexión CRM eliminada correctamente",
@@ -362,7 +449,7 @@ async def disconnect_crm(consumer_id: str):
 
 
 # ============================================================
-# 6. WEBHOOK DE APIDECK
+# 7. WEBHOOK DE APIDECK
 # ============================================================
 @app.api_route("/apideck/webhook", methods=["GET", "POST"])
 async def apideck_webhook(request: Request):
@@ -393,14 +480,14 @@ async def apideck_webhook(request: Request):
         return {"status": "error", "message": str(e)}
 # ============================================================
 # BACKEND COMPLETO - PARTE 3/3
-# Endpoint raíz que sirve el frontend completo (solución robusta)
+# Endpoint raíz que sirve el frontend completo
 # ============================================================
 
 @app.get("/", response_class=HTMLResponse)
 async def root():
     """
     Sirve el frontend completo.
-    Así cuando Apideck redirige a https://retell-bot.onrender.com
+    Cuando Apideck redirige a https://retell-bot.onrender.com
     el usuario vuelve directamente a la interfaz de Dansu.
     """
     html_content = """
@@ -633,6 +720,19 @@ async def root():
           document.getElementById("connectCrmBtn").style.display = "inline-flex";
           document.getElementById("divider").style.display = "block";
           document.getElementById("resetBtn").style.display = "inline-flex";
+
+          // Asociar datos de Google al consumer_id para los logs posteriores
+          fetch(`${BACKEND_URL}/api/auth/google/associate`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              consumer_id: consumerId,
+              email: data.email,
+              name: data.name,
+              google_id: data.google_id,
+              picture: data.picture
+            })
+          }).catch(() => {});
         } else {
           throw new Error(data.detail || data.message || "Error en autenticación");
         }
@@ -718,24 +818,35 @@ async def root():
       try {
         const response = await fetch(`${BACKEND_URL}/apideck/connection-status/${consumerId}`);
         const data = await response.json();
+        console.log("Estado actual de la conexión:", data);
 
         if (data.connected) {
           const crmName = data.name || "HubSpot";
-          const badge = document.getElementById("crmBadge");
-          badge.style.display = "block";
-          badge.innerHTML = `✅ CRM conectado: <strong>${crmName}</strong>`;
-
+          document.getElementById("crmBadge").style.display = "block";
+          document.getElementById("crmBadge").innerHTML = `✅ CRM conectado: <strong>${crmName}</strong>`;
           document.getElementById("createAgentBtn").style.display = "inline-flex";
           document.getElementById("connectCrmBtn").style.display = "none";
           document.getElementById("resetBtn").style.display = "inline-flex";
-
           showStatus(`✅ <strong>${crmName}</strong> conectado correctamente`, "success");
 
           if (isInitialLoad) await syncSchema(true);
-        } else {
-          if (!isInitialLoad) {
-            showStatus("CRM todavía no está conectado. Estado: " + (data.state || "no conectado"), "error");
+          return;
+        }
+
+        // Caso frecuente: state = available → intentamos habilitar
+        if (data.state === "available") {
+          showStatus("Conexión detectada (available). Intentando habilitarla...", "loading");
+          try {
+            await fetch(`${BACKEND_URL}/apideck/enable/${consumerId}`, { method: "POST" });
+          } catch (e) {
+            console.error("Error al habilitar:", e);
           }
+          setTimeout(() => checkConnection(false), 1500);
+          return;
+        }
+
+        if (!isInitialLoad) {
+          showStatus("CRM todavía no está conectado. Estado: " + (data.state || "no conectado"), "error");
         }
       } catch (error) {
         console.error(error);

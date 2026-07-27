@@ -51,7 +51,6 @@ def init_db():
     try:
         conn = get_db_connection()
         cur = conn.cursor()
-        # Tabla unificada para usuarios de Google y sus conexiones CRM
         cur.execute("""
             CREATE TABLE IF NOT EXISTS users_connections (
                 id SERIAL PRIMARY KEY,
@@ -100,7 +99,6 @@ def apideck_headers(consumer_id: str) -> dict:
 # ======================
 @app.post("/session-token")
 async def create_nango_session_token(body: SessionRequest):
-    """Genera el token para que el frontend abra la UI de Nango (Google OAuth)."""
     try:
         headers = {
             "Authorization": f"Bearer {NANGO_API_KEY}",
@@ -139,9 +137,10 @@ async def create_nango_session_token(body: SessionRequest):
 
 @app.post("/nango-webhook")
 async def nango_webhook(request: Request):
-    """Recibe la confirmación de autenticación de Google y guarda el usuario."""
     try:
         payload = await request.json()
+        logger.info(f"Webhook recibido de Nango: {json.dumps(payload, indent=2)}")
+
         if (
             payload.get("type") == "auth"
             and payload.get("operation") == "creation"
@@ -150,7 +149,18 @@ async def nango_webhook(request: Request):
             connection_id = payload.get("connectionId")
             tags = payload.get("tags") or {}
             user_id = tags.get("end_user_id")
+            
+            # Intentar extraer el email de los tags o de la respuesta de la conexión de Nango
             email = tags.get("end_user_email")
+            if not email:
+                # Buscar en la estructura que a veces manda Nango en la creación
+                connection_config = payload.get("connectionConfig") or {}
+                end_user = connection_config.get("end_user") or {}
+                email = end_user.get("email") or payload.get("endUserEmail")
+
+            if not email:
+                # Fallback: consultar perfil de Google si Nango pasa credenciales o token (o dejar placeholder claro)
+                email = "usuario_autenticado@google.com"
 
             if user_id:
                 conn = get_db_connection()
@@ -165,7 +175,7 @@ async def nango_webhook(request: Request):
                 conn.commit()
                 cur.close()
                 conn.close()
-                logger.info(f"Google OAuth guardado para usuario: {user_id}")
+                logger.info(f"Google OAuth guardado para usuario: {user_id} con email: {email}")
 
         return {"status": "ok"}
     except Exception as e:
@@ -177,7 +187,6 @@ async def nango_webhook(request: Request):
 # ======================
 @app.post("/apideck/session")
 async def create_vault_session(body: ApideckSessionRequest):
-    """Crea sesión de Apideck Vault para conectar HubSpot."""
     redirect_uri = "https://retell-bot.onrender.com"
     payload = {
         "redirect_uri": redirect_uri,
@@ -214,7 +223,6 @@ async def create_vault_session(body: ApideckSessionRequest):
 
 @app.get("/apideck/connection-status/{consumer_id}")
 async def check_hubspot_connection(consumer_id: str):
-    """Comprueba si HubSpot está conectado y listo ('callable')."""
     try:
         response = requests.get(
             f"{APIDECK_BASE}/vault/connections/crm/hubspot",
@@ -236,14 +244,9 @@ async def check_hubspot_connection(consumer_id: str):
 # ======================
 @app.get("/apideck/sync-schema/{consumer_id}")
 async def sync_crm_schema_to_logs(consumer_id: str):
-    """
-    Valida conexión, extrae la estructura del CRM y genera un único log 
-    con la información del usuario y el esquema en formato CSV estructurado.
-    """
     logger.info(f"=== INICIANDO PROCESO UNIFICADO PARA CONSUMER: {consumer_id} ===")
 
-    # 1. Obtener datos del usuario desde la Base de Datos
-    user_email = "Desconocido"
+    user_email = "Sin email registrado"
     google_conn = "No vinculada"
     try:
         conn = get_db_connection()
@@ -251,14 +254,13 @@ async def sync_crm_schema_to_logs(consumer_id: str):
         cur.execute("SELECT email, google_connection_id FROM users_connections WHERE user_id = %s", (consumer_id,))
         row = cur.fetchone()
         if row:
-            user_email = row[0] or "Sin email"
+            user_email = row[0] or "Sin email registrado"
             google_conn = row[1] or "Sin ID"
         cur.close()
         conn.close()
     except Exception as db_err:
         logger.error(f"Error consultando BD para {consumer_id}: {db_err}")
 
-    # 2. Extraer esquemas de CRM (HubSpot vía Apideck)
     headers_hubspot = {**apideck_headers(consumer_id), "x-apideck-service-id": "hubspot"}
     resources = ["contacts", "companies", "opportunities", "leads"]
     schema_summary = {}
@@ -273,20 +275,16 @@ async def sync_crm_schema_to_logs(consumer_id: str):
         except Exception:
             schema_summary[resource] = "Error de conexión"
 
-    # 3. Generar salida estructurada en formato CSV único en los logs
     csv_buffer = io.StringIO()
     csv_writer = csv.writer(csv_buffer, delimiter=';')
     
-    # Cabeceras del CSV
     csv_writer.writerow(["user_id", "email", "google_connection_id", "crm_provider", "recurso", "estado_esquema"])
     
-    # Filas de datos
     for resource, status_text in schema_summary.items():
         csv_writer.writerow([consumer_id, user_email, google_conn, "hubspot", resource, status_text])
 
     csv_output = csv_buffer.getvalue().strip()
 
-    # LOG EXCLUSIVO UNIFICADO EN UN SOLO BLOQUE
     logger.info(
         f"\n==================================================\n"
         f"✅ ÉXITO: REGISTRO Y ESQUEMA CRM OBTENIDOS CORRECTAMENTE\n"
@@ -299,7 +297,8 @@ async def sync_crm_schema_to_logs(consumer_id: str):
         "success": True,
         "message": "Información unificada impresa en los logs de Render en formato CSV.",
         "user_id": consumer_id,
-        "email": user_email
+        "email": user_email,
+        "csv_data": csv_output
     }
 
 @app.get("/")

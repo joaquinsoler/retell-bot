@@ -394,7 +394,45 @@ async def root():
         "google_configured": bool(GOOGLE_CLIENT_ID),
         "apideck_configured": bool(APIDECK_API_KEY and APIDECK_APP_ID)
     }
+# ============================================================
+# 7. ELIMINAR CONEXIÓN CRM (para poder empezar de cero)
+# ============================================================
+@app.delete("/apideck/disconnect/{consumer_id}")
+async def disconnect_crm(consumer_id: str):
+    """
+    Elimina la conexión de HubSpot del consumer para poder repetir el flujo.
+    """
+    logger.info(f"🗑️ Solicitando eliminación de conexión CRM | consumer_id={consumer_id}")
 
+    if not APIDECK_API_KEY or not APIDECK_APP_ID:
+        logger.error("❌ Apideck no configurado")
+        raise HTTPException(status_code=500, detail="Apideck no configurado")
+
+    try:
+        response = requests.delete(
+            f"{APIDECK_BASE}/vault/connections/crm/hubspot",
+            headers=apideck_headers(consumer_id),
+            timeout=10,
+        )
+
+        # 204 = eliminado correctamente | 404 = ya no existía
+        if response.status_code in (204, 404):
+            logger.info(f"✅ Conexión CRM eliminada (o no existía) | consumer_id={consumer_id}")
+            return {
+                "success": True,
+                "message": "Conexión CRM eliminada correctamente",
+                "consumer_id": consumer_id
+            }
+
+        logger.error(f"❌ Error al eliminar conexión: {response.status_code} | {response.text}")
+        raise HTTPException(status_code=response.status_code, detail=response.text)
+
+    except requests.exceptions.RequestException as e:
+        logger.error(f"❌ Error de red al eliminar conexión: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+    except Exception as e:
+        logger.error(f"❌ Error inesperado al eliminar conexión: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 # ============================================================
 # FIN DEL BACKEND

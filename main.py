@@ -5,17 +5,21 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import requests
+import psycopg2
+import json
+import csv
+import io
 
 # ======================
-# LOGGING REFORZADO
+# LOGGING
 # ======================
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)s | %(message)s"
 )
-logger = logging.getLogger("apideck")
+logger = logging.getLogger("dansu-saas")
 
-app = FastAPI(title="Retell Bot - Apideck HubSpot")
+app = FastAPI(title="Dansu SaaS - Google OAuth & Apideck CRM")
 
 # CORS
 app.add_middleware(
@@ -33,21 +37,52 @@ APIDECK_API_KEY = os.getenv("APIDECK_API_KEY")
 APIDECK_APP_ID = os.getenv("APIDECK_APP_ID")
 APIDECK_BASE = "https://unify.apideck.com"
 
-if not APIDECK_API_KEY or not APIDECK_APP_ID:
-    logger.error("FALTAN variables de entorno APIDECK_API_KEY o APP_ID")
-else:
-    logger.info("Variables de entorno Apideck cargadas correctamente")
-
+NANGO_API_KEY = os.getenv("NANGO_API_KEY")
+NANGO_API_URL = "https://api.nango.dev"
+DATABASE_URL = os.getenv("DATABASE_URL")
 
 # ======================
-# MODELOS
+# BASE DE DATOS
 # ======================
-class CreateSessionRequest(BaseModel):
+def get_db_connection():
+    return psycopg2.connect(DATABASE_URL, sslmode="require")
+
+def init_db():
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        # Tabla unificada para usuarios de Google y sus conexiones CRM
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS users_connections (
+                id SERIAL PRIMARY KEY,
+                user_id VARCHAR(255) UNIQUE NOT NULL,
+                email VARCHAR(255),
+                google_connection_id VARCHAR(255),
+                apideck_consumer_id VARCHAR(255),
+                crm_provider VARCHAR(100),
+                created_at TIMESTAMP DEFAULT NOW()
+            );
+        """)
+        conn.commit()
+        cur.close()
+        conn.close()
+        logger.info("Base de datos y tabla 'users_connections' inicializadas correctamente.")
+    except Exception as e:
+        logger.error(f"Error creando tabla en base de datos: {e}")
+
+init_db()
+
+# ======================
+# MODELOS PYDANTIC
+# ======================
+class SessionRequest(BaseModel):
+    userId: Optional[str] = None
+    email: Optional[str] = None
+
+class ApideckSessionRequest(BaseModel):
     consumer_id: str
-    redirect_uri: Optional[str] = None
     user_name: Optional[str] = None
     account_name: Optional[str] = None
-
 
 # ======================
 # HELPERS
@@ -60,23 +95,90 @@ def apideck_headers(consumer_id: str) -> dict:
         "Content-Type": "application/json",
     }
 
+# ======================
+# 1. GOOGLE OAUTH (NANGO)
+# ======================
+@app.post("/session-token")
+async def create_nango_session_token(body: SessionRequest):
+    """Genera el token para que el frontend abra la UI de Nango (Google OAuth)."""
+    try:
+        headers = {
+            "Authorization": f"Bearer {NANGO_API_KEY}",
+            "Content-Type": "application/json"
+        }
+        user_id = body.userId or f"user-{os.urandom(4).hex()}"
+        tags = {"end_user_id": user_id}
+        if body.email:
+            tags["end_user_email"] = body.email
+
+        payload = {
+            "allowed_integrations": ["google"],
+            "tags": tags
+        }
+
+        response = requests.post(
+            f"{NANGO_API_URL}/connect/sessions",
+            headers=headers,
+            json=payload,
+            timeout=15
+        )
+
+        if response.status_code not in (200, 201):
+            raise HTTPException(status_code=500, detail=response.text)
+
+        data = response.json()
+        token = data.get("data", {}).get("token") or data.get("token")
+        if not token:
+            raise HTTPException(status_code=500, detail="No se recibió token de Nango")
+
+        return {"sessionToken": token, "userId": user_id}
+
+    except Exception as e:
+        logger.error(f"Error creando session token de Nango: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/nango-webhook")
+async def nango_webhook(request: Request):
+    """Recibe la confirmación de autenticación de Google y guarda el usuario."""
+    try:
+        payload = await request.json()
+        if (
+            payload.get("type") == "auth"
+            and payload.get("operation") == "creation"
+            and payload.get("success") is True
+        ):
+            connection_id = payload.get("connectionId")
+            tags = payload.get("tags") or {}
+            user_id = tags.get("end_user_id")
+            email = tags.get("end_user_email")
+
+            if user_id:
+                conn = get_db_connection()
+                cur = conn.cursor()
+                cur.execute("""
+                    INSERT INTO users_connections (user_id, email, google_connection_id)
+                    VALUES (%s, %s, %s)
+                    ON CONFLICT (user_id) DO UPDATE 
+                    SET google_connection_id = EXCLUDED.google_connection_id,
+                        email = COALESCE(EXCLUDED.email, users_connections.email)
+                """, (user_id, email, connection_id))
+                conn.commit()
+                cur.close()
+                conn.close()
+                logger.info(f"Google OAuth guardado para usuario: {user_id}")
+
+        return {"status": "ok"}
+    except Exception as e:
+        logger.error(f"Error en webhook de Nango: {e}")
+        return {"status": "error", "message": str(e)}
 
 # ======================
-# 1. CREAR SESIÓN DE VAULT
+# 2. CRM APIDECK (HUBSPOT)
 # ======================
 @app.post("/apideck/session")
-async def create_vault_session(body: CreateSessionRequest):
-    """
-    Crea una sesión de Apideck Vault para que el cliente conecte HubSpot.
-    """
-    logger.info(f"Solicitud de sesión recibida | consumer_id={body.consumer_id}")
-
-    if not APIDECK_API_KEY or not APIDECK_APP_ID:
-        logger.error("Apideck no está configurado (faltan API_KEY o APP_ID)")
-        raise HTTPException(status_code=500, detail="Apideck no configurado en el servidor")
-
-    redirect_uri = body.redirect_uri or "https://retell-bot.onrender.com"
-
+async def create_vault_session(body: ApideckSessionRequest):
+    """Crea sesión de Apideck Vault para conectar HubSpot."""
+    redirect_uri = "https://retell-bot.onrender.com"
     payload = {
         "redirect_uri": redirect_uri,
         "consumer_metadata": {
@@ -92,184 +194,114 @@ async def create_vault_session(body: CreateSessionRequest):
     }
 
     try:
-        logger.info(f"Creando sesión Vault para consumer_id={body.consumer_id} ...")
         response = requests.post(
             f"{APIDECK_BASE}/vault/sessions",
             headers=apideck_headers(body.consumer_id),
             json=payload,
             timeout=15,
         )
-
         if response.status_code >= 400:
-            logger.error(f"Error de Apideck: {response.text}")
-            raise HTTPException(
-                status_code=response.status_code,
-                detail=f"Error de Apideck: {response.text}"
-            )
+            raise HTTPException(status_code=response.status_code, detail=response.text)
 
         data = response.json().get("data", {})
-        session_uri = data.get("session_uri")
-        session_token = data.get("session_token")
-
-        if not session_uri:
-            logger.error("Apideck no devolvió session_uri")
-            raise HTTPException(status_code=500, detail="No se recibió session_uri de Apideck")
-
-        logger.info(f"Sesión Vault creada correctamente | consumer_id={body.consumer_id}")
-
         return {
             "success": True,
-            "consumer_id": body.consumer_id,
-            "session_uri": session_uri,
-            "session_token": session_token,
+            "session_uri": data.get("session_uri"),
+            "session_token": data.get("session_token"),
         }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
-    except requests.exceptions.RequestException as e:
-        logger.error(f"Error de red al crear sesión: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Error de conexión con Apideck: {str(e)}")
-
-
-# ======================
-# 2. COMPROBAR ESTADO DE CONEXIÓN
-# ======================
 @app.get("/apideck/connection-status/{consumer_id}")
 async def check_hubspot_connection(consumer_id: str):
-    """
-    Comprueba si HubSpot está conectado y en estado 'callable'.
-    """
-    logger.info(f"Comprobando conexión HubSpot | consumer_id={consumer_id}")
-
+    """Comprueba si HubSpot está conectado y listo ('callable')."""
     try:
         response = requests.get(
             f"{APIDECK_BASE}/vault/connections/crm/hubspot",
             headers=apideck_headers(consumer_id),
             timeout=10,
         )
-
         if response.status_code == 404:
-            logger.info(f"[{consumer_id}] HubSpot NO está conectado (404)")
-            return {
-                "connected": False,
-                "state": None,
-                "message": "HubSpot no conectado"
-            }
-
-        if response.status_code >= 400:
-            logger.error(f"[{consumer_id}] Error al comprobar conexión: {response.text}")
-            raise HTTPException(status_code=response.status_code, detail=response.text)
+            return {"connected": False}
 
         data = response.json().get("data", {})
         state = data.get("state")
         enabled = data.get("enabled", False)
-        is_connected = state == "callable" and enabled
-
-        return {
-            "connected": is_connected,
-            "state": state,
-            "enabled": enabled,
-            "service_id": data.get("service_id"),
-            "name": data.get("name"),
-        }
-
-    except requests.exceptions.RequestException as e:
-        logger.error(f"Error de red al comprobar conexión: {str(e)}")
+        return {"connected": (state == "callable" and enabled), "state": state}
+    except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-
 # ======================
-# 3. ENDPOINT CLAVE: OBTENER ESTRUCTURA DE LA API Y VOLCAR A LOGS
+# 3. SINCRONIZACIÓN Y LOGS CSV UNIFICADOS
 # ======================
 @app.get("/apideck/sync-schema/{consumer_id}")
 async def sync_crm_schema_to_logs(consumer_id: str):
     """
-    Se ejecuta tras volver de dar permisos en la web. Valida la conexión
-    con HubSpot y extrae la estructura completa/metadatos de la API del CRM
-    imprimiéndolo de forma detallada en los logs de Render.
+    Valida conexión, extrae la estructura del CRM y genera un único log 
+    con la información del usuario y el esquema en formato CSV estructurado.
     """
-    logger.info(f"=== INICIANDO SINCRONIZACIÓN DE SCHEMA PARA CONSUMER: {consumer_id} ===")
+    logger.info(f"=== INICIANDO PROCESO UNIFICADO PARA CONSUMER: {consumer_id} ===")
 
-    # Verificar estado de conexión
-    status = await check_hubspot_connection(consumer_id)
-    if not status.get("connected"):
-        logger.warning(f"[{consumer_id}] Intento de sincronización sin conexión 'callable' a HubSpot.")
-        raise HTTPException(status_code=400, detail="HubSpot no está conectado o listo todavía.")
+    # 1. Obtener datos del usuario desde la Base de Datos
+    user_email = "Desconocido"
+    google_conn = "No vinculada"
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute("SELECT email, google_connection_id FROM users_connections WHERE user_id = %s", (consumer_id,))
+        row = cur.fetchone()
+        if row:
+            user_email = row[0] or "Sin email"
+            google_conn = row[1] or "Sin ID"
+        cur.close()
+        conn.close()
+    except Exception as db_err:
+        logger.error(f"Error consultando BD para {consumer_id}: {db_err}")
 
-    headers_hubspot = {
-        **apideck_headers(consumer_id),
-        "x-apideck-service-id": "hubspot"
-    }
-
-    schema_results = {}
-
-    # Recursos principales de CRM a consultar para extraer la estructura/datos
+    # 2. Extraer esquemas de CRM (HubSpot vía Apideck)
+    headers_hubspot = {**apideck_headers(consumer_id), "x-apideck-service-id": "hubspot"}
     resources = ["contacts", "companies", "opportunities", "leads"]
+    schema_summary = {}
 
     for resource in resources:
         try:
-            logger.info(f"[{consumer_id}] Solicitando estructura del recurso CRM: '{resource}' ...")
-            res = requests.get(
-                f"{APIDECK_BASE}/crm/{resource}",
-                headers=headers_hubspot,
-                params={"limit": 1},
-                timeout=10
-            )
-            
+            res = requests.get(f"{APIDECK_BASE}/crm/{resource}", headers=headers_hubspot, params={"limit": 1}, timeout=10)
             if res.status_code < 400:
-                schema_results[resource] = res.json()
-                logger.info(f"\n--- [HUBSPOT SCHEMA] RECURSO: {resource.upper()} ---")
-                logger.info(res.text)
-                logger.info(f"--------------------------------------------------\n")
+                schema_summary[resource] = "Disponible / Estructurado OK"
             else:
-                logger.warning(f"[{consumer_id}] No se pudo obtener '{resource}': Status {res.status_code} - {res.text}")
-        except Exception as err:
-            logger.error(f"[{consumer_id}] Error consultando recurso {resource}: {str(err)}")
+                schema_summary[resource] = f"No disponible (Status {res.status_code})"
+        except Exception:
+            schema_summary[resource] = "Error de conexión"
 
-    logger.info(f"=== FIN DE SINCRONIZACIÓN DE SCHEMA PARA [{consumer_id}] ===")
+    # 3. Generar salida estructurada en formato CSV único en los logs
+    csv_buffer = io.StringIO()
+    csv_writer = csv.writer(csv_buffer, delimiter=';')
     
+    # Cabeceras del CSV
+    csv_writer.writerow(["user_id", "email", "google_connection_id", "crm_provider", "recurso", "estado_esquema"])
+    
+    # Filas de datos
+    for resource, status_text in schema_summary.items():
+        csv_writer.writerow([consumer_id, user_email, google_conn, "hubspot", resource, status_text])
+
+    csv_output = csv_buffer.getvalue().strip()
+
+    # LOG EXCLUSIVO UNIFICADO EN UN SOLO BLOQUE
+    logger.info(
+        f"\n==================================================\n"
+        f"✅ ÉXITO: REGISTRO Y ESQUEMA CRM OBTENIDOS CORRECTAMENTE\n"
+        f"--------------------------------------------------\n"
+        f"{csv_output}\n"
+        f"=================================================="
+    )
+
     return {
         "success": True,
-        "message": "Estructura de la API del CRM solicitada y volcada con éxito en los logs de Render.",
-        "consumer_id": consumer_id,
-        "resources_fetched": list(schema_results.keys())
+        "message": "Información unificada impresa en los logs de Render en formato CSV.",
+        "user_id": consumer_id,
+        "email": user_email
     }
 
-
-# ======================
-# 4. WEBHOOK DE APIDECK
-# ======================
-@app.api_route("/apideck/webhook", methods=["GET", "POST"])
-async def apideck_webhook(request: Request):
-    if request.method == "GET":
-        challenge = request.query_params.get("challenge", "ok")
-        return {"challenge": challenge}
-
-    try:
-        body = await request.json()
-        if "challenge" in body:
-            return {"challenge": body["challenge"]}
-
-        event_type = body.get("event")
-        consumer_id = body.get("consumer_id")
-        
-        logger.info(f"Webhook recibido: evento={event_type} | consumer_id={consumer_id}")
-
-        if event_type in ["vault.connection.added", "vault.connection.callable"] and consumer_id:
-            # Opcional: si prefieres automatizarlo por webhook también
-            logger.info(f"Conexión establecida por webhook para {consumer_id}")
-
-        return {"status": "received"}
-    except Exception as e:
-        logger.error(f"Error en webhook: {str(e)}")
-        return {"status": "error", "message": str(e)}
-
-
-# ======================
-# HEALTH CHECK
-# ======================
 @app.get("/")
 async def root():
-    return {
-        "status": "ok",
-        "service": "retell-bot-apideck",
-        "apideck_configured": bool(APIDECK_API_KEY and APIDECK_APP_ID)
-    }
+    return {"status": "ok", "service": "dansu-saas-unified"}

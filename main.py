@@ -14,6 +14,7 @@ import requests
 # Google OAuth
 from google.auth.transport import requests as google_requests
 from google.oauth2 import id_token
+from fastapi.responses import HTMLResponse
 
 # ============================================================
 # LOGGING REFORZADO (para ver todo claramente en Render)
@@ -386,13 +387,16 @@ async def apideck_webhook(request: Request):
 # ============================================================
 # 6. HEALTH CHECK
 # ============================================================
-@app.get("/")
+@app.get("/", response_class=HTMLResponse)
 async def root():
-    return {
-        "status": "ok",
-        "service": "retell-bot-google-apideck",
-        "google_configured": bool(GOOGLE_CLIENT_ID),
-        "apideck_configured": bool(APIDECK_API_KEY and APIDECK_APP_ID)
+    # Sirve el frontend completo
+    # (pega aquí todo el HTML que te he mandado en las 3 partes)
+    html_content = """
+    <!DOCTYPE html>
+    ... aquí va TODO el HTML completo ...
+    </html>
+    """
+    return HTMLResponse(content=html_content)
     }
 # ============================================================
 # 7. ELIMINAR CONEXIÓN CRM (para poder empezar de cero)

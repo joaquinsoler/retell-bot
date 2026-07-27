@@ -9,7 +9,7 @@ app = FastAPI()
 # Habilitar CORS para permitir peticiones desde tu web dansu.info
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["https://dansu.info"],
+    allow_origins=["*"],  # temporalmente permite todo
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

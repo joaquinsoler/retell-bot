@@ -261,15 +261,13 @@ async def check_hubspot_connection(consumer_id: str):
 @app.get("/apideck/sync-schema/{consumer_id}")
 async def sync_crm_schema_to_logs(consumer_id: str):
     """
-    1. Recoge schema nativo de HubSpot
-    2. Lo divide en partes
-    3. Las va resumiendo con Grok (sin memoria → cada prompt es autónomo)
-    4. Imprime el resumen final + su tamaño
+    Recoge schema nativo de HubSpot → lo resume por partes con Grok → 
+    hace una consolidación final limpia y profesional.
     """
     import json
     import time
 
-    logger.info(f"=== INICIO RESUMEN INTELIGENTE CON GROK | consumer: {consumer_id} ===")
+    logger.info(f"=== INICIO RESUMEN PROFESIONAL CON GROK | consumer: {consumer_id} ===")
 
     GROK_API_KEY = os.getenv("GROK_API_KEY")
     if not GROK_API_KEY:
@@ -350,72 +348,87 @@ async def sync_crm_schema_to_logs(consumer_id: str):
         full_schema["resources"][unified_name] = resource_info
 
     # -------------------------------------------------
-    # 3. Convertir a texto y medir
+    # 3. Preparar texto y dividir
     # -------------------------------------------------
     schema_text = json.dumps(full_schema, ensure_ascii=False, default=str)
     total_chars = len(schema_text)
-    estimated_tokens = total_chars / 4
+    logger.info(f"Schema original: {total_chars:,} caracteres")
 
-    logger.info(f"Schema original: {total_chars:,} caracteres ≈ {estimated_tokens:,.0f} tokens")
-
-    # -------------------------------------------------
-    # 4. Dividir en chunks manejables (~10-12k tokens)
-    # -------------------------------------------------
-    CHUNK_SIZE = 45000          # ~11k tokens (seguro)
-    chunks = []
-    for i in range(0, len(schema_text), CHUNK_SIZE):
-        chunks.append(schema_text[i:i + CHUNK_SIZE])
-
+    CHUNK_SIZE = 42000
+    chunks = [schema_text[i:i + CHUNK_SIZE] for i in range(0, len(schema_text), CHUNK_SIZE)]
     total_chunks = len(chunks)
     logger.info(f"Dividido en {total_chunks} partes")
 
     # -------------------------------------------------
-    # 5. Resumir cada parte con Grok (sin memoria)
+    # Prompt profesional para cada parte
+    # -------------------------------------------------
+    def build_chunk_prompt(chunk: str, previous_summary: str = "") -> str:
+        base_instructions = """
+Eres un experto senior en diseño de agentes de voz para CRMs (especialista en HubSpot).
+
+Tu tarea es crear un resumen EXTREMADAMENTE LIMPIO y ÚTIL de la información de un CRM HubSpot.
+
+OBJETIVO FINAL:
+Que un asistente telefónico pueda realizar con seguridad las funciones básicas y más importantes de un CRM.
+
+=====================
+DEBES MANTENER SÍ O SÍ:
+=====================
+- firstname, lastname, email, phone, mobilephone
+- company / company name
+- jobtitle
+- lifecyclestage + sus opciones
+- hs_lead_status + sus opciones
+- address, city, state, zip, country
+- hubspot_owner_id
+- Todos los CUSTOM FIELDS del cliente (aunque parezcan raros)
+- dealname, dealstage, pipeline, amount, closedate
+- dealtype, closed_won_reason, closed_lost_reason
+- associatedcompanyid
+- name, domain, website, numberofemployees, annualrevenue de companies
+- Cualquier campo que claramente se use para contacto, cualificación o venta
+
+=====================
+DEBES ELIMINAR:
+=====================
+- La gran mayoría de campos que empiezan por hs_ (excepto hs_lead_status)
+- Listas enormes de opciones (idiomas, timezones, países completos, industrias largas...)
+- Campos hidden: true
+- Campos calculados internos
+- Metadatos técnicos (displayOrder, createdAt de la propiedad, modificationMetadata completa, etc.)
+- Campos de analytics profundos, scores internos, tracking, etc.
+- Cualquier cosa que un agente telefónico NO necesite para buscar, crear o actualizar registros básicos
+
+FORMATO DE SALIDA:
+Devuelve ÚNICAMENTE un JSON limpio y compacto.
+No escribas explicaciones ni texto fuera del JSON.
+"""
+
+        if previous_summary:
+            return f"""{base_instructions}
+
+RESUMEN ACUMULADO HASTA AHORA (continúa y fusiona sin repetir):
+{previous_summary}
+
+NUEVA INFORMACIÓN A INTEGRAR:
+{chunk}
+"""
+        else:
+            return f"""{base_instructions}
+
+INFORMACIÓN A RESUMIR:
+{chunk}
+"""
+
+    # -------------------------------------------------
+    # 4. Resumir por partes
     # -------------------------------------------------
     accumulated_summary = ""
 
     for idx, chunk in enumerate(chunks, 1):
-        logger.info(f"Resumiendo parte {idx}/{total_chunks} con Grok...")
+        logger.info(f"Resumiendo parte {idx}/{total_chunks}...")
 
-        prompt = f"""
-Eres un experto en CRMs y en diseño de agentes de voz.
-
-Tu ÚNICA tarea es limpiar y resumir la siguiente información de un CRM HubSpot.
-
-OBJETIVO:
-Quedarte SOLO con lo necesario para que un asistente telefónico pueda realizar las funciones básicas y principales de un CRM:
-- Buscar, crear y actualizar contactos
-- Buscar y crear empresas
-- Crear y mover oportunidades/deals
-- Trabajar con leads
-- Usar los campos personalizados más relevantes
-- Entender las etapas principales de los procesos
-
-ELIMINA COMPLETAMENTE:
-- Campos internos de HubSpot (la mayoría de hs_*)
-- Listas enormes de opciones (idiomas, timezones, países, industrias completas...)
-- Campos hidden o de solo lectura muy técnicos
-- Metadatos innecesarios (displayOrder, createdAt de propiedades, etc.)
-- Cualquier cosa que un agente telefónico no necesite
-
-CONSERVA:
-- Nombre técnico + label legible de los campos útiles
-- Tipo de dato
-- Si es de solo lectura
-- Custom fields del cliente
-- Estructura general de cada objeto
-- Ejemplos de valores reales cuando aporten
-
-FORMATO DE SALIDA:
-Devuelve SOLO el resumen limpio en texto estructurado o JSON compacto.
-No añadas explicaciones ni comentarios.
-
-{"RESUMEN ACUMULADO HASTA AHORA (continúa a partir de aquí):" if accumulated_summary else ""}
-{accumulated_summary if accumulated_summary else ""}
-
-NUEVA INFORMACIÓN A RESUMIR Y FUSIONAR:
-{chunk}
-"""
+        prompt = build_chunk_prompt(chunk, accumulated_summary)
 
         try:
             response = requests.post(
@@ -425,51 +438,100 @@ NUEVA INFORMACIÓN A RESUMIR Y FUSIONAR:
                     "Content-Type": "application/json"
                 },
                 json={
-                    "model": "grok-3",          # Puedes cambiar a grok-4 si lo tienes disponible
-                    "messages": [
-                        {"role": "user", "content": prompt}
-                    ],
-                    "temperature": 0.2,
-                    "max_tokens": 4000
+                    "model": "grok-3",
+                    "messages": [{"role": "user", "content": prompt}],
+                    "temperature": 0.15,
+                    "max_tokens": 3500
                 },
-                timeout=90
+                timeout=100
             )
 
             if response.status_code >= 400:
                 logger.error(f"Error Grok parte {idx}: {response.status_code} - {response.text[:300]}")
                 continue
 
-            data = response.json()
-            part_summary = data["choices"][0]["message"]["content"]
-            accumulated_summary += "\n\n" + part_summary
-            logger.info(f"  ✓ Parte {idx}/{total_chunks} resumida")
-
-            # Pequeña pausa para no saturar
-            time.sleep(1.2)
+            part_summary = response.json()["choices"][0]["message"]["content"]
+            accumulated_summary = part_summary          # Sobrescribimos para ir consolidando
+            logger.info(f"  ✓ Parte {idx}/{total_chunks} completada")
+            time.sleep(1.1)
 
         except Exception as e:
-            logger.error(f"Exception en parte {idx}: {str(e)}")
+            logger.error(f"Exception parte {idx}: {e}")
 
     # -------------------------------------------------
-    # 6. Imprimir resultado final + tamaño
+    # 5. ÚLTIMA CONSOLIDACIÓN FINAL (muy importante)
     # -------------------------------------------------
-    final_summary = accumulated_summary.strip()
+    logger.info("Realizando consolidación final del resumen...")
+
+    final_prompt = f"""
+Eres un experto en diseño de agentes de voz para CRMs.
+
+A continuación te paso un resumen parcial (puede contener repeticiones y estructura imperfecta) de un CRM HubSpot.
+
+Tu tarea es generar el RESUMEN FINAL DEFINITIVO, limpio, cohesionado y profesional.
+
+REGLAS ESTRICTAS:
+1. Elimina TODAS las repeticiones.
+2. Unifica la información de contacts, companies, deals y leads en una estructura clara.
+3. Mantén ÚNICAMENTE los campos necesarios para que un asistente telefónico controle las funciones básicas del CRM.
+4. Conserva siempre los custom fields del cliente.
+5. Devuelve SOLO un JSON limpio y bien estructurado. Sin explicaciones.
+
+CAMPOS QUE DEBES PRIORIZAR Y MANTENER:
+- Contactos: firstname, lastname, email, phone, mobilephone, company, jobtitle, lifecyclestage, hs_lead_status, address fields, owner, custom fields
+- Empresas: name, domain, website, phone, address, numberofemployees, annualrevenue, type, owner
+- Deals: dealname, dealstage, pipeline, amount, closedate, dealtype, closed_won_reason, closed_lost_reason, associatedcompanyid, owner
+- Leads: los campos básicos de identificación y contacto
+
+RESUMEN PARCIAL A CONSOLIDAR:
+{accumulated_summary}
+"""
+
+    try:
+        response = requests.post(
+            "https://api.x.ai/v1/chat/completions",
+            headers={
+                "Authorization": f"Bearer {GROK_API_KEY}",
+                "Content-Type": "application/json"
+            },
+            json={
+                "model": "grok-3",
+                "messages": [{"role": "user", "content": final_prompt}],
+                "temperature": 0.1,
+                "max_tokens": 4000
+            },
+            timeout=120
+        )
+
+        if response.status_code < 400:
+            final_summary = response.json()["choices"][0]["message"]["content"]
+        else:
+            logger.error(f"Error en consolidación final: {response.text[:300]}")
+            final_summary = accumulated_summary
+
+    except Exception as e:
+        logger.error(f"Exception en consolidación final: {e}")
+        final_summary = accumulated_summary
+
+    # -------------------------------------------------
+    # 6. Resultado final
+    # -------------------------------------------------
     final_chars = len(final_summary)
     final_tokens = final_chars / 4
 
-    logger.info("\n" + "="*80)
-    logger.info("📄 RESUMEN FINAL COMPLETO GENERADO POR GROK")
-    logger.info("="*80)
+    logger.info("\n" + "="*90)
+    logger.info("📄 RESUMEN FINAL CONSOLIDADO Y LIMPIO")
+    logger.info("="*90)
     logger.info(final_summary)
-    logger.info("="*80)
-    logger.info(f"Tamaño del resumen final: {final_chars:,} caracteres ≈ {final_tokens:,.0f} tokens")
-    logger.info(f"Reducción: de {total_chars:,} → {final_chars:,} caracteres")
-    logger.info("="*80)
-    logger.info(f"=== FIN DEL PROCESO DE RESUMEN | consumer: {consumer_id} ===\n")
+    logger.info("="*90)
+    logger.info(f"Tamaño final: {final_chars:,} caracteres ≈ {final_tokens:,.0f} tokens")
+    logger.info(f"Reducción total: de {total_chars:,} → {final_chars:,} caracteres")
+    logger.info("="*90)
+    logger.info(f"=== PROCESO COMPLETADO | consumer: {consumer_id} ===\n")
 
     return {
         "success": True,
-        "message": "Schema resumido por Grok. Mira los logs para ver el resultado completo.",
+        "message": "Resumen profesional consolidado generado. Revisa los logs.",
         "original_characters": total_chars,
         "final_characters": final_chars,
         "final_tokens_estimated": int(final_tokens),

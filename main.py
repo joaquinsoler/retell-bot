@@ -256,66 +256,137 @@ async def check_hubspot_connection(consumer_id: str):
 # ============================================================
 
 # ======================
-# 3. SINCRONIZAR SCHEMA DEL CRM → LOGS DE RENDER
+# 3. SINCRONIZAR SCHEMA COMPLETO DEL CRM → LOGS DE RENDER
 # ======================
 @app.get("/apideck/sync-schema/{consumer_id}")
 async def sync_crm_schema_to_logs(consumer_id: str):
     """
-    Se ejecuta tras volver de dar permisos.
-    Valida la conexión y extrae la estructura completa del CRM
-    imprimiéndola de forma detallada en los logs de Render.
+    Recoge información completa y valiosa del CRM para poder
+    generar un agente de Retell con Grok:
+    - Sample real de cada recurso (estructura de datos)
+    - Custom fields
+    - Operaciones soportadas
     """
-    logger.info(f"=== INICIANDO SINCRONIZACIÓN DE SCHEMA PARA CONSUMER: {consumer_id} ===")
+    logger.info(f"=== INICIANDO SINCRONIZACIÓN COMPLETA DE SCHEMA | consumer: {consumer_id} ===")
 
-    # Verificar estado de conexión
+    # 1. Verificar que el CRM está conectado
     status = await check_hubspot_connection(consumer_id)
     if not status.get("connected"):
-        logger.warning(f"[{consumer_id}] Intento de sincronización sin conexión 'callable'.")
+        logger.warning(f"[{consumer_id}] Intento de sync sin conexión callable")
         raise HTTPException(status_code=400, detail="El CRM no está conectado o listo todavía.")
 
-    headers_crm = {
-        **apideck_headers(consumer_id),
-        "x-apideck-service-id": "hubspot"
+    crm_name = status.get("name", "HubSpot")
+    service_id = status.get("service_id", "hubspot")
+
+    headers_base = apideck_headers(consumer_id)
+    headers_with_service = {
+        **headers_base,
+        "x-apideck-service-id": service_id
     }
 
-    schema_results = {}
-
-    # Recursos principales de CRM
     resources = ["contacts", "companies", "opportunities", "leads"]
+    full_schema = {
+        "crm": crm_name,
+        "service_id": service_id,
+        "consumer_id": consumer_id,
+        "resources": {}
+    }
 
     for resource in resources:
+        logger.info(f"[{consumer_id}] Recogiendo información completa de '{resource}'...")
+
+        resource_info = {
+            "sample": None,
+            "custom_fields": None,
+            "supported_operations": None,
+            "supported_fields": None,
+            "error": None
+        }
+
+        # -------------------------------------------------
+        # A) Sample real de datos (limit=1) → estructura
+        # -------------------------------------------------
         try:
-            logger.info(f"[{consumer_id}] Solicitando estructura del recurso CRM: '{resource}' ...")
             res = requests.get(
                 f"{APIDECK_BASE}/crm/{resource}",
-                headers=headers_crm,
+                headers=headers_with_service,
                 params={"limit": 1},
+                timeout=12
+            )
+            if res.status_code < 400:
+                data = res.json()
+                # Guardamos solo el primer registro limpio
+                items = data.get("data", [])
+                resource_info["sample"] = items[0] if items else None
+                logger.info(f"  ✓ Sample de '{resource}' obtenido")
+            else:
+                logger.warning(f"  ✗ Sample '{resource}' → {res.status_code}: {res.text[:200]}")
+        except Exception as e:
+            logger.error(f"  ✗ Error sample '{resource}': {str(e)}")
+            resource_info["error"] = str(e)
+
+        # -------------------------------------------------
+        # B) Custom fields del recurso
+        # -------------------------------------------------
+        try:
+            res = requests.get(
+                f"{APIDECK_BASE}/vault/connections/crm/{service_id}/{resource}/custom-fields",
+                headers=headers_base,
                 timeout=10
             )
-
             if res.status_code < 400:
-                schema_results[resource] = res.json()
-                logger.info(f"\n--- [CRM SCHEMA] RECURSO: {resource.upper()} ---")
-                logger.info(res.text)
-                logger.info(f"--------------------------------------------------\n")
+                resource_info["custom_fields"] = res.json().get("data", [])
+                logger.info(f"  ✓ Custom fields de '{resource}' obtenidos ({len(resource_info['custom_fields'])} campos)")
             else:
-                logger.warning(
-                    f"[{consumer_id}] No se pudo obtener '{resource}': "
-                    f"Status {res.status_code} - {res.text}"
-                )
-        except Exception as err:
-            logger.error(f"[{consumer_id}] Error consultando recurso {resource}: {str(err)}")
+                logger.info(f"  - Custom fields '{resource}' no disponibles ({res.status_code})")
+        except Exception as e:
+            logger.warning(f"  - Error custom-fields '{resource}': {str(e)}")
 
-    logger.info(f"=== FIN DE SINCRONIZACIÓN DE SCHEMA PARA [{consumer_id}] ===")
+        # -------------------------------------------------
+        # C) Operaciones y campos soportados (Connector API)
+        # -------------------------------------------------
+        try:
+            # Este endpoint es más global, pero funciona bien
+            res = requests.get(
+                f"{APIDECK_BASE}/connector/apis/crm/resources/{resource}",
+                headers={
+                    "Authorization": f"Bearer {APIDECK_API_KEY}",
+                    "x-apideck-app-id": APIDECK_APP_ID,
+                    "Content-Type": "application/json",
+                },
+                timeout=10
+            )
+            if res.status_code < 400:
+                conn_data = res.json().get("data", {})
+                resource_info["supported_operations"] = conn_data.get("supported_operations")
+                resource_info["supported_fields"] = conn_data.get("supported_fields")
+                logger.info(f"  ✓ Operaciones de '{resource}': {resource_info['supported_operations']}")
+            else:
+                logger.info(f"  - Connector info '{resource}' no disponible ({res.status_code})")
+        except Exception as e:
+            logger.warning(f"  - Error connector '{resource}': {str(e)}")
+
+        full_schema["resources"][resource] = resource_info
+
+    # -------------------------------------------------
+    # IMPRIMIR TODO EL SCHEMA COMPLETO EN LOS LOGS
+    # -------------------------------------------------
+    import json
+    logger.info("\n" + "="*80)
+    logger.info("📦 SCHEMA COMPLETO DEL CRM (listo para enviar a Grok)")
+    logger.info("="*80)
+    logger.info(json.dumps(full_schema, indent=2, ensure_ascii=False, default=str))
+    logger.info("="*80)
+    logger.info(f"=== FIN DE SINCRONIZACIÓN COMPLETA | consumer: {consumer_id} ===\n")
 
     return {
         "success": True,
-        "message": "Estructura de la API del CRM solicitada y volcada con éxito en los logs de Render.",
+        "message": "Schema completo del CRM recogido e impreso en los logs de Render",
         "consumer_id": consumer_id,
-        "crm_name": status.get("name", "HubSpot"),
-        "resources_fetched": list(schema_results.keys())
+        "crm_name": crm_name,
+        "resources": list(full_schema["resources"].keys()),
+        "schema": full_schema          # también lo devolvemos por si lo quieres usar después
     }
-
 
 # ======================
 # 4. WEBHOOK DE APIDECK

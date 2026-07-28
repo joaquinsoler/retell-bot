@@ -256,136 +256,138 @@ async def check_hubspot_connection(consumer_id: str):
 # ============================================================
 
 # ======================
-# 3. SINCRONIZAR SCHEMA COMPLETO DEL CRM → LOGS DE RENDER
+# 3. SINCRONIZAR SCHEMA COMPLETO (Nativo HubSpot vía Proxy)
 # ======================
 @app.get("/apideck/sync-schema/{consumer_id}")
 async def sync_crm_schema_to_logs(consumer_id: str):
     """
-    Recoge información completa y valiosa del CRM para poder
-    generar un agente de Retell con Grok:
-    - Sample real de cada recurso (estructura de datos)
-    - Custom fields
-    - Operaciones soportadas
+    Versión potente para HubSpot:
+    - Usa el Proxy de Apideck para obtener el schema NATIVO completo
+    - Propiedades reales de HubSpot (tipos, opciones, labels, custom fields...)
+    - También incluye un sample unificado para ver la forma de los datos
     """
-    logger.info(f"=== INICIANDO SINCRONIZACIÓN COMPLETA DE SCHEMA | consumer: {consumer_id} ===")
+    logger.info(f"=== INICIANDO SINCRONIZACIÓN NATIVA HUBSPOT | consumer: {consumer_id} ===")
 
-    # 1. Verificar que el CRM está conectado
+    # 1. Verificar conexión
     status = await check_hubspot_connection(consumer_id)
     if not status.get("connected"):
-        logger.warning(f"[{consumer_id}] Intento de sync sin conexión callable")
+        logger.warning(f"[{consumer_id}] CRM no conectado")
         raise HTTPException(status_code=400, detail="El CRM no está conectado o listo todavía.")
 
-    crm_name = status.get("name", "HubSpot")
     service_id = status.get("service_id", "hubspot")
+    crm_name = status.get("name", "HubSpot")
 
-    headers_base = apideck_headers(consumer_id)
-    headers_with_service = {
-        **headers_base,
-        "x-apideck-service-id": service_id
+    if service_id != "hubspot":
+        raise HTTPException(
+            status_code=400,
+            detail=f"Esta versión del sync solo soporta HubSpot nativo. CRM detectado: {service_id}"
+        )
+
+    headers_proxy = {
+        "Authorization": f"Bearer {APIDECK_API_KEY}",
+        "x-apideck-app-id": APIDECK_APP_ID,
+        "x-apideck-consumer-id": consumer_id,
+        "x-apideck-service-id": "hubspot",
+        "Content-Type": "application/json",
     }
 
-    resources = ["contacts", "companies", "opportunities", "leads"]
+    # Objetos principales de HubSpot
+    # (deals = opportunities en Apideck)
+    hubspot_objects = {
+        "contacts": "contacts",
+        "companies": "companies",
+        "opportunities": "deals",      # En HubSpot se llaman deals
+        "leads": "leads"
+    }
+
     full_schema = {
         "crm": crm_name,
         "service_id": service_id,
         "consumer_id": consumer_id,
+        "mode": "native_hubspot_proxy",
         "resources": {}
     }
 
-    for resource in resources:
-        logger.info(f"[{consumer_id}] Recogiendo información completa de '{resource}'...")
+    for unified_name, hubspot_object in hubspot_objects.items():
+        logger.info(f"[{consumer_id}] Obteniendo schema nativo de '{hubspot_object}'...")
 
         resource_info = {
-            "sample": None,
-            "custom_fields": None,
-            "supported_operations": None,
-            "supported_fields": None,
+            "hubspot_object": hubspot_object,
+            "native_properties": None,
+            "sample_unified": None,
             "error": None
         }
 
         # -------------------------------------------------
-        # A) Sample real de datos (limit=1) → estructura
+        # A) Schema NATIVO completo (propiedades de HubSpot)
         # -------------------------------------------------
         try:
+            downstream_url = f"https://api.hubapi.com/crm/v3/properties/{hubspot_object}"
+
             res = requests.get(
-                f"{APIDECK_BASE}/crm/{resource}",
-                headers=headers_with_service,
+                f"{APIDECK_BASE}/proxy",
+                headers={
+                    **headers_proxy,
+                    "x-apideck-downstream-url": downstream_url
+                },
+                timeout=15
+            )
+
+            if res.status_code < 400:
+                data = res.json()
+                # HubSpot devuelve {"results": [ ... propiedades ... ]}
+                properties = data.get("results", data)
+                resource_info["native_properties"] = properties
+                logger.info(f"  ✓ {len(properties) if isinstance(properties, list) else 'datos'} propiedades nativas de '{hubspot_object}'")
+            else:
+                logger.warning(f"  ✗ Native properties '{hubspot_object}' → {res.status_code}: {res.text[:250]}")
+                resource_info["error"] = f"Status {res.status_code}"
+        except Exception as e:
+            logger.error(f"  ✗ Error native '{hubspot_object}': {str(e)}")
+            resource_info["error"] = str(e)
+
+        # -------------------------------------------------
+        # B) Sample unificado (para ver la forma real de los datos)
+        # -------------------------------------------------
+        try:
+            headers_unified = {
+                **apideck_headers(consumer_id),
+                "x-apideck-service-id": "hubspot"
+            }
+            res = requests.get(
+                f"{APIDECK_BASE}/crm/{unified_name}",
+                headers=headers_unified,
                 params={"limit": 1},
                 timeout=12
             )
             if res.status_code < 400:
-                data = res.json()
-                # Guardamos solo el primer registro limpio
-                items = data.get("data", [])
-                resource_info["sample"] = items[0] if items else None
-                logger.info(f"  ✓ Sample de '{resource}' obtenido")
-            else:
-                logger.warning(f"  ✗ Sample '{resource}' → {res.status_code}: {res.text[:200]}")
+                items = res.json().get("data", [])
+                resource_info["sample_unified"] = items[0] if items else None
+                logger.info(f"  ✓ Sample unificado de '{unified_name}' obtenido")
         except Exception as e:
-            logger.error(f"  ✗ Error sample '{resource}': {str(e)}")
-            resource_info["error"] = str(e)
+            logger.warning(f"  - No se pudo obtener sample unificado de '{unified_name}': {str(e)}")
 
-        # -------------------------------------------------
-        # B) Custom fields del recurso
-        # -------------------------------------------------
-        try:
-            res = requests.get(
-                f"{APIDECK_BASE}/vault/connections/crm/{service_id}/{resource}/custom-fields",
-                headers=headers_base,
-                timeout=10
-            )
-            if res.status_code < 400:
-                resource_info["custom_fields"] = res.json().get("data", [])
-                logger.info(f"  ✓ Custom fields de '{resource}' obtenidos ({len(resource_info['custom_fields'])} campos)")
-            else:
-                logger.info(f"  - Custom fields '{resource}' no disponibles ({res.status_code})")
-        except Exception as e:
-            logger.warning(f"  - Error custom-fields '{resource}': {str(e)}")
-
-        # -------------------------------------------------
-        # C) Operaciones y campos soportados (Connector API)
-        # -------------------------------------------------
-        try:
-            # Este endpoint es más global, pero funciona bien
-            res = requests.get(
-                f"{APIDECK_BASE}/connector/apis/crm/resources/{resource}",
-                headers={
-                    "Authorization": f"Bearer {APIDECK_API_KEY}",
-                    "x-apideck-app-id": APIDECK_APP_ID,
-                    "Content-Type": "application/json",
-                },
-                timeout=10
-            )
-            if res.status_code < 400:
-                conn_data = res.json().get("data", {})
-                resource_info["supported_operations"] = conn_data.get("supported_operations")
-                resource_info["supported_fields"] = conn_data.get("supported_fields")
-                logger.info(f"  ✓ Operaciones de '{resource}': {resource_info['supported_operations']}")
-            else:
-                logger.info(f"  - Connector info '{resource}' no disponible ({res.status_code})")
-        except Exception as e:
-            logger.warning(f"  - Error connector '{resource}': {str(e)}")
-
-        full_schema["resources"][resource] = resource_info
+        full_schema["resources"][unified_name] = resource_info
 
     # -------------------------------------------------
-    # IMPRIMIR TODO EL SCHEMA COMPLETO EN LOS LOGS
+    # Imprimir el schema completo en los logs
     # -------------------------------------------------
     import json
-    logger.info("\n" + "="*80)
-    logger.info("📦 SCHEMA COMPLETO DEL CRM (listo para enviar a Grok)")
-    logger.info("="*80)
+    logger.info("\n" + "="*90)
+    logger.info("📦 SCHEMA NATIVO COMPLETO DE HUBSPOT (listo para Grok + Retell)")
+    logger.info("="*90)
     logger.info(json.dumps(full_schema, indent=2, ensure_ascii=False, default=str))
-    logger.info("="*80)
-    logger.info(f"=== FIN DE SINCRONIZACIÓN COMPLETA | consumer: {consumer_id} ===\n")
+    logger.info("="*90)
+    logger.info(f"=== FIN DE SINCRONIZACIÓN NATIVA | consumer: {consumer_id} ===\n")
 
     return {
         "success": True,
-        "message": "Schema completo del CRM recogido e impreso en los logs de Render",
+        "message": "Schema nativo completo de HubSpot recogido e impreso en los logs",
         "consumer_id": consumer_id,
         "crm_name": crm_name,
+        "mode": "native_hubspot_proxy",
         "resources": list(full_schema["resources"].keys()),
-        "schema": full_schema          # también lo devolvemos por si lo quieres usar después
+        "schema": full_schema
     }
 
 # ======================

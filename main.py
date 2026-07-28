@@ -261,20 +261,30 @@ async def check_hubspot_connection(consumer_id: str):
 @app.get("/apideck/sync-schema/{consumer_id}")
 async def sync_crm_schema_to_logs(consumer_id: str):
     """
-    Versión de medición: recoge el schema nativo completo de HubSpot
-    pero SOLO imprime el tamaño total para estimar cuántas peticiones
-    harían falta para resumirlo con un LLM.
+    1. Recoge schema nativo de HubSpot
+    2. Lo divide en partes
+    3. Las va resumiendo con Grok (sin memoria → cada prompt es autónomo)
+    4. Imprime el resumen final + su tamaño
     """
-    logger.info(f"=== MEDICIÓN DE TAMAÑO DE SCHEMA | consumer: {consumer_id} ===")
+    import json
+    import time
 
+    logger.info(f"=== INICIO RESUMEN INTELIGENTE CON GROK | consumer: {consumer_id} ===")
+
+    GROK_API_KEY = os.getenv("GROK_API_KEY")
+    if not GROK_API_KEY:
+        raise HTTPException(status_code=500, detail="Falta la variable de entorno GROK_API_KEY")
+
+    # -------------------------------------------------
     # 1. Verificar conexión
+    # -------------------------------------------------
     status = await check_hubspot_connection(consumer_id)
     if not status.get("connected"):
         raise HTTPException(status_code=400, detail="El CRM no está conectado o listo todavía.")
 
     service_id = status.get("service_id", "hubspot")
     if service_id != "hubspot":
-        raise HTTPException(status_code=400, detail="Esta medición solo está preparada para HubSpot")
+        raise HTTPException(status_code=400, detail="Esta versión solo soporta HubSpot nativo")
 
     headers_proxy = {
         "Authorization": f"Bearer {APIDECK_API_KEY}",
@@ -295,12 +305,14 @@ async def sync_crm_schema_to_logs(consumer_id: str):
         "crm": "HubSpot",
         "service_id": service_id,
         "consumer_id": consumer_id,
-        "mode": "native_hubspot_proxy",
         "resources": {}
     }
 
+    # -------------------------------------------------
+    # 2. Recoger schema nativo
+    # -------------------------------------------------
     for unified_name, hubspot_object in hubspot_objects.items():
-        logger.info(f"Obteniendo datos de '{hubspot_object}'...")
+        logger.info(f"Obteniendo '{hubspot_object}'...")
 
         resource_info = {
             "hubspot_object": hubspot_object,
@@ -308,111 +320,161 @@ async def sync_crm_schema_to_logs(consumer_id: str):
             "sample_unified": None
         }
 
-        # A) Propiedades nativas
         try:
             downstream_url = f"https://api.hubapi.com/crm/v3/properties/{hubspot_object}"
             res = requests.get(
                 f"{APIDECK_BASE}/proxy",
                 headers={**headers_proxy, "x-apideck-downstream-url": downstream_url},
-                timeout=15
+                timeout=20
             )
             if res.status_code < 400:
                 data = res.json()
                 resource_info["native_properties"] = data.get("results", data)
-                logger.info(f"  ✓ Propiedades nativas de '{hubspot_object}' obtenidas")
-            else:
-                logger.warning(f"  ✗ Error propiedades '{hubspot_object}': {res.status_code}")
+                logger.info(f"  ✓ Propiedades nativas de '{hubspot_object}'")
         except Exception as e:
-            logger.error(f"  ✗ Exception propiedades '{hubspot_object}': {str(e)}")
+            logger.error(f"  ✗ Error propiedades '{hubspot_object}': {e}")
 
-        # B) Sample unificado
         try:
             headers_unified = {**apideck_headers(consumer_id), "x-apideck-service-id": "hubspot"}
             res = requests.get(
                 f"{APIDECK_BASE}/crm/{unified_name}",
                 headers=headers_unified,
-                params={"limit": 5},
+                params={"limit": 3},
                 timeout=12
             )
             if res.status_code < 400:
                 resource_info["sample_unified"] = res.json().get("data", [])
-                logger.info(f"  ✓ Sample unificado de '{unified_name}' obtenido")
         except Exception as e:
-            logger.warning(f"  - Error sample '{unified_name}': {str(e)}")
+            logger.warning(f"  - Error sample '{unified_name}': {e}")
 
         full_schema["resources"][unified_name] = resource_info
 
-    # ============================================================
-    # CÁLCULO DE TAMAÑO (sin imprimir el contenido)
-    # ============================================================
-    import json
-    import sys
+    # -------------------------------------------------
+    # 3. Convertir a texto y medir
+    # -------------------------------------------------
+    schema_text = json.dumps(full_schema, ensure_ascii=False, default=str)
+    total_chars = len(schema_text)
+    estimated_tokens = total_chars / 4
 
-    schema_json = json.dumps(full_schema, ensure_ascii=False, default=str)
-    size_chars = len(schema_json)
-    size_kb = size_chars / 1024
-    size_mb = size_kb / 1024
+    logger.info(f"Schema original: {total_chars:,} caracteres ≈ {estimated_tokens:,.0f} tokens")
 
-    # Estimación muy aproximada de tokens (1 token ≈ 4 caracteres en inglés/JSON)
-    estimated_tokens = size_chars / 4
+    # -------------------------------------------------
+    # 4. Dividir en chunks manejables (~10-12k tokens)
+    # -------------------------------------------------
+    CHUNK_SIZE = 45000          # ~11k tokens (seguro)
+    chunks = []
+    for i in range(0, len(schema_text), CHUNK_SIZE):
+        chunks.append(schema_text[i:i + CHUNK_SIZE])
 
-    logger.info("\n" + "="*70)
-    logger.info("📊 MEDICIÓN DE TAMAÑO DEL SCHEMA COMPLETO")
-    logger.info("="*70)
-    logger.info(f"Caracteres totales:     {size_chars:,}")
-    logger.info(f"Tamaño aproximado:      {size_kb:.1f} KB  ({size_mb:.2f} MB)")
-    logger.info(f"Tokens estimados:       {estimated_tokens:,.0f} tokens")
-    logger.info("-"*70)
-    logger.info("Estimación de peticiones a Grok (resumen por partes):")
-    logger.info(f"  - Si usamos ~8.000 tokens por petición → {max(1, int(estimated_tokens / 8000))} peticiones")
-    logger.info(f"  - Si usamos ~12.000 tokens por petición → {max(1, int(estimated_tokens / 12000))} peticiones")
-    logger.info(f"  - Si usamos ~20.000 tokens por petición → {max(1, int(estimated_tokens / 20000))} peticiones")
-    logger.info("="*70)
-    logger.info(f"=== FIN DE MEDICIÓN | consumer: {consumer_id} ===\n")
+    total_chunks = len(chunks)
+    logger.info(f"Dividido en {total_chunks} partes")
+
+    # -------------------------------------------------
+    # 5. Resumir cada parte con Grok (sin memoria)
+    # -------------------------------------------------
+    accumulated_summary = ""
+
+    for idx, chunk in enumerate(chunks, 1):
+        logger.info(f"Resumiendo parte {idx}/{total_chunks} con Grok...")
+
+        prompt = f"""
+Eres un experto en CRMs y en diseño de agentes de voz.
+
+Tu ÚNICA tarea es limpiar y resumir la siguiente información de un CRM HubSpot.
+
+OBJETIVO:
+Quedarte SOLO con lo necesario para que un asistente telefónico pueda realizar las funciones básicas y principales de un CRM:
+- Buscar, crear y actualizar contactos
+- Buscar y crear empresas
+- Crear y mover oportunidades/deals
+- Trabajar con leads
+- Usar los campos personalizados más relevantes
+- Entender las etapas principales de los procesos
+
+ELIMINA COMPLETAMENTE:
+- Campos internos de HubSpot (la mayoría de hs_*)
+- Listas enormes de opciones (idiomas, timezones, países, industrias completas...)
+- Campos hidden o de solo lectura muy técnicos
+- Metadatos innecesarios (displayOrder, createdAt de propiedades, etc.)
+- Cualquier cosa que un agente telefónico no necesite
+
+CONSERVA:
+- Nombre técnico + label legible de los campos útiles
+- Tipo de dato
+- Si es de solo lectura
+- Custom fields del cliente
+- Estructura general de cada objeto
+- Ejemplos de valores reales cuando aporten
+
+FORMATO DE SALIDA:
+Devuelve SOLO el resumen limpio en texto estructurado o JSON compacto.
+No añadas explicaciones ni comentarios.
+
+{"RESUMEN ACUMULADO HASTA AHORA (continúa a partir de aquí):" if accumulated_summary else ""}
+{accumulated_summary if accumulated_summary else ""}
+
+NUEVA INFORMACIÓN A RESUMIR Y FUSIONAR:
+{chunk}
+"""
+
+        try:
+            response = requests.post(
+                "https://api.x.ai/v1/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {GROK_API_KEY}",
+                    "Content-Type": "application/json"
+                },
+                json={
+                    "model": "grok-3",          # Puedes cambiar a grok-4 si lo tienes disponible
+                    "messages": [
+                        {"role": "user", "content": prompt}
+                    ],
+                    "temperature": 0.2,
+                    "max_tokens": 4000
+                },
+                timeout=90
+            )
+
+            if response.status_code >= 400:
+                logger.error(f"Error Grok parte {idx}: {response.status_code} - {response.text[:300]}")
+                continue
+
+            data = response.json()
+            part_summary = data["choices"][0]["message"]["content"]
+            accumulated_summary += "\n\n" + part_summary
+            logger.info(f"  ✓ Parte {idx}/{total_chunks} resumida")
+
+            # Pequeña pausa para no saturar
+            time.sleep(1.2)
+
+        except Exception as e:
+            logger.error(f"Exception en parte {idx}: {str(e)}")
+
+    # -------------------------------------------------
+    # 6. Imprimir resultado final + tamaño
+    # -------------------------------------------------
+    final_summary = accumulated_summary.strip()
+    final_chars = len(final_summary)
+    final_tokens = final_chars / 4
+
+    logger.info("\n" + "="*80)
+    logger.info("📄 RESUMEN FINAL COMPLETO GENERADO POR GROK")
+    logger.info("="*80)
+    logger.info(final_summary)
+    logger.info("="*80)
+    logger.info(f"Tamaño del resumen final: {final_chars:,} caracteres ≈ {final_tokens:,.0f} tokens")
+    logger.info(f"Reducción: de {total_chars:,} → {final_chars:,} caracteres")
+    logger.info("="*80)
+    logger.info(f"=== FIN DEL PROCESO DE RESUMEN | consumer: {consumer_id} ===\n")
 
     return {
         "success": True,
-        "message": "Medición de tamaño completada (mira los logs)",
-        "consumer_id": consumer_id,
-        "size_characters": size_chars,
-        "size_kb": round(size_kb, 1),
-        "estimated_tokens": int(estimated_tokens),
-        "estimated_requests_8k": max(1, int(estimated_tokens / 8000)),
-        "estimated_requests_12k": max(1, int(estimated_tokens / 12000)),
-        "estimated_requests_20k": max(1, int(estimated_tokens / 20000))
+        "message": "Schema resumido por Grok. Mira los logs para ver el resultado completo.",
+        "original_characters": total_chars,
+        "final_characters": final_chars,
+        "final_tokens_estimated": int(final_tokens),
+        "chunks_processed": total_chunks
     }
-
-# ======================
-# 4. WEBHOOK DE APIDECK
-# ======================
-@app.api_route("/apideck/webhook", methods=["GET", "POST"])
-async def apideck_webhook(request: Request):
-    if request.method == "GET":
-        challenge = request.query_params.get("challenge", "ok")
-        return {"challenge": challenge}
-
-    try:
-        body = await request.json()
-        if "challenge" in body:
-            return {"challenge": body["challenge"]}
-
-        event_type = body.get("event")
-        consumer_id = body.get("consumer_id")
-
-        logger.info(f"Webhook recibido: evento={event_type} | consumer_id={consumer_id}")
-
-        if event_type in ["vault.connection.added", "vault.connection.callable"] and consumer_id:
-            logger.info(f"Conexión establecida por webhook para {consumer_id}")
-
-        return {"status": "received"}
-    except Exception as e:
-        logger.error(f"Error en webhook: {str(e)}")
-        return {"status": "error", "message": str(e)}
-
-
-# ======================
-# HEALTH CHECK
-# ======================
 @app.get("/")
 async def root():
     return {

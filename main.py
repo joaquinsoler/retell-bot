@@ -206,66 +206,15 @@ async def create_vault_session(body: CreateSessionRequest):
 # ======================
 # 2. COMPROBAR ESTADO DE CONEXIÓN
 # ======================
-@app.get("/apideck/connection-status/{consumer_id}")
-async def check_hubspot_connection(consumer_id: str):
-    """
-    Comprueba si el CRM (HubSpot) está conectado y en estado 'callable'.
-    """
-    logger.info(f"Comprobando conexión CRM | consumer_id={consumer_id}")
-
-    try:
-        response = requests.get(
-            f"{APIDECK_BASE}/vault/connections/crm/hubspot",
-            headers=apideck_headers(consumer_id),
-            timeout=10,
-        )
-
-        if response.status_code == 404:
-            logger.info(f"[{consumer_id}] CRM NO está conectado (404)")
-            return {
-                "connected": False,
-                "state": None,
-                "name": None,
-                "message": "CRM no conectado"
-            }
-
-        if response.status_code >= 400:
-            logger.error(f"[{consumer_id}] Error al comprobar conexión: {response.text}")
-            raise HTTPException(status_code=response.status_code, detail=response.text)
-
-        data = response.json().get("data", {})
-        state = data.get("state")
-        enabled = data.get("enabled", False)
-        is_connected = state == "callable" and enabled
-        crm_name = data.get("name") or "HubSpot"
-
-        return {
-            "connected": is_connected,
-            "state": state,
-            "enabled": enabled,
-            "service_id": data.get("service_id"),
-            "name": crm_name,
-        }
-
-    except requests.exceptions.RequestException as e:
-        logger.error(f"Error de red al comprobar conexión: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
-# ============================================================
-# PARTE 3/3 - Sync schema (imprime estructura del CRM en logs),
-#            webhook y health check
-# ============================================================
-
-# ======================
-# 3. SINCRONIZAR SCHEMA COMPLETO (Nativo HubSpot vía Proxy)
-# ======================
 @app.get("/apideck/sync-schema/{consumer_id}")
 async def sync_crm_schema_to_logs(consumer_id: str):
     """
-    Recoge schema nativo de HubSpot → lo resume por partes con Grok → 
-    hace una consolidación final limpia y profesional.
+    Recoge schema nativo de HubSpot → resume por partes con Grok → 
+    mini-consolidaciones + consolidación final limpia y robusta.
     """
     import json
     import time
+    import re
 
     logger.info(f"=== INICIO RESUMEN PROFESIONAL CON GROK | consumer: {consumer_id} ===")
 
@@ -360,105 +309,99 @@ async def sync_crm_schema_to_logs(consumer_id: str):
     logger.info(f"Dividido en {total_chunks} partes")
 
     # -------------------------------------------------
-    # Prompt profesional para cada parte
+    # Helpers de prompts
     # -------------------------------------------------
-    def build_chunk_prompt(chunk: str, previous_summary: str = "") -> str:
-        base_instructions = """
-Eres un experto en compactación de schemas de CRM para agentes de voz (Retell AI).
+    def build_chunk_prompt(chunk: str) -> str:
+        return f"""
+Eres un experto en compactación de schemas de propiedades de HubSpot para agentes de voz (Retell AI).
 
-Tu única misión es producir la versión MÍNIMA pero COMPLETA del schema de propiedades de HubSpot que permita a un asistente telefónico controlar las funciones principales del CRM.
+Tu misión es extraer SOLO la información mínima pero completa que un asistente telefónico necesita para buscar, crear y actualizar registros.
 
-### Objetivo del asistente telefónico
-Debe poder:
-- Buscar e identificar contactos, leads y empresas
-- Crear y actualizar contactos, empresas y oportunidades (deals)
-- Usar correctamente los campos obligatorios, tipos de datos y enums
-- Utilizar los campos personalizados (custom fields) del cliente
-- Gestionar estados de lifecycle y de deals
-
-### Reglas absolutas (nunca las rompas)
-
+### Reglas absolutas
 1. NUNCA elimines:
-   - Nombre técnico exacto del campo (`name`)
-   - Label legible
-   - Tipo de dato (`type` / `fieldType`)
-   - Si es de solo lectura (cuando se conozca)
-   - Valores posibles de los enums importantes (lifecyclestage, hs_lead_status, dealstage, pipeline, dealtype, etc.)
+   - name (nombre técnico exacto)
+   - label
+   - type / fieldType
+   - options de los enums importantes (lifecyclestage, hs_lead_status, dealstage, pipeline, dealtype, hs_priority…)
    - Todos los CUSTOM FIELDS del cliente
-   - Campos de relación importantes (associatedcompanyid, hubspot_owner_id)
+   - Campos de identificación (id, hs_object_id)
+   - Campos de relación (associatedcompanyid, hubspot_owner_id, etc.)
+   - Indicador de si es required o readOnly (cuando esté disponible)
 
-2. SÍ puedes eliminar o condensar fuertemente:
+2. SÍ elimina o condensa:
    - Descripciones largas
-   - Listas enormes de opciones (idiomas, timezones, países, industrias completas…)
-   - Campos hs_* internos (excepto hs_lead_status)
+   - Listas enormes de opciones (países, idiomas, timezones, industrias completas…)
    - Campos hidden, calculados o puramente analíticos
    - Metadatos técnicos (displayOrder, createdAt de la propiedad, etc.)
-   - Campos deprecados o de sistema que no afecten a la lógica de negocio
 
-3. Prioridad de entidades (mantén todo lo relevante de):
-   Contacts, Companies, Deals (Opportunities), Leads
+3. Formato de salida OBLIGATORIO (solo JSON válido):
 
-4. Formato de salida obligatorio:
-Devuelve ÚNICAMENTE un JSON limpio con esta estructura:
-
-{
-  "contacts": {
+{{
+  "contacts": {{
     "fields": [
-      {
+      {{
         "name": "email",
         "label": "Email",
         "type": "string",
-        "readOnly": false
-      },
-      {
-        "name": "lifecyclestage",
-        "label": "Lifecycle Stage",
-        "type": "enumeration",
-        "options": ["subscriber", "lead", "marketingqualifiedlead", "salesqualifiedlead", "opportunity", "customer"],
-        "readOnly": false
-      }
+        "required": false,
+        "readOnly": false,
+        "options": null
+      }}
     ]
-  },
-  "companies": { ... },
-  "deals": { ... },
-  "leads": { ... }
-}
+  }},
+  "companies": {{ "fields": [...] }},
+  "deals": {{ "fields": [...] }},
+  "leads": {{ "fields": [...] }}
+}}
 
-5. Criterio de decisión cuando dudes:
-“Si el asistente de voz necesita este campo para buscar, crear o actualizar un registro de forma correcta → CONSERVAR. Si solo sirve para documentación, analytics internos o la interfaz de HubSpot → ELIMINAR.”
+4. Criterio de decisión:
+Si el asistente necesita este campo para buscar, crear o actualizar un registro → CONSERVAR.
+Si solo sirve para analytics, UI o documentación → ELIMINAR.
 
-### Schema / fragmento a resumir:
+### Fragmento a procesar:
 ---
-{contenido}
+{chunk}
 ---
 """
 
-        if previous_summary:
-            return f"""{base_instructions}
-
-RESUMEN ACUMULADO HASTA AHORA (continúa y fusiona sin repetir):
-{previous_summary}
-
-NUEVA INFORMACIÓN A INTEGRAR:
-{chunk}
-"""
-        else:
-            return f"""{base_instructions}
-
-INFORMACIÓN A RESUMIR:
-{chunk}
+    def build_consolidation_prompt(content: str, is_final: bool = False) -> str:
+        final_extra = ""
+        if is_final:
+            final_extra = """
+6. Si el objeto "leads" llega vacío o muy incompleto, reconstruye los campos básicos de contacto 
+   (firstname, lastname, email, phone, mobilephone, company, lifecyclestage, hs_lead_status, hubspot_owner_id)
+   y añade: "note": "Leads gestionados principalmente vía contacts + lifecyclestage en HubSpot".
+7. Incluye una sección "associations" en cada objeto cuando sea posible, ejemplo:
+   "associations": ["companies", "deals"]
 """
 
-    # -------------------------------------------------
-    # 4. Resumir por partes
-    # -------------------------------------------------
-    accumulated_summary = ""
+        return f"""
+Eres un experto en diseño de conocimiento para agentes de voz que controlan HubSpot.
 
-    for idx, chunk in enumerate(chunks, 1):
-        logger.info(f"Resumiendo parte {idx}/{total_chunks}...")
+A continuación te paso un resumen parcial (puede tener repeticiones y estructura imperfecta).
 
-        prompt = build_chunk_prompt(chunk, accumulated_summary)
+Tu tarea es generar un RESUMEN {"FINAL DEFINITIVO" if is_final else "INTERMEDIO"} limpio y profesional.
 
+### REGLAS ESTRICTAS
+1. Elimina TODAS las repeticiones.
+2. Unifica contacts, companies, deals y leads en una sola estructura limpia.
+3. **Obligatorio**: cada objeto debe tener al menos el campo de identificación (`id` o `hs_object_id`).
+4. **Obligatorio**: todos los campos deben llevar `"required": true/false` y `"readOnly": true/false` (si no se sabe, pon false).
+5. Conserva SIEMPRE todos los custom fields del cliente.
+{final_extra}
+8. Devuelve ÚNICAMENTE el JSON final. Sin markdown, sin explicaciones, sin ```json.
+
+### Campos prioritarios que deben estar presentes:
+- Contacts: id/hs_object_id, firstname, lastname, email, phone, mobilephone, company, jobtitle, lifecyclestage, hs_lead_status, hubspot_owner_id + custom fields
+- Companies: id, name, domain, phone, website, address fields, numberofemployees, annualrevenue, type, hubspot_owner_id
+- Deals: id, dealname, dealstage, pipeline, amount, closedate, dealtype, hubspot_owner_id, hs_priority
+- Leads: al menos los campos de identificación y contacto
+
+RESUMEN A CONSOLIDAR:
+{content}
+"""
+
+    def call_grok(prompt: str, max_tokens: int = 3500) -> str:
         try:
             response = requests.post(
                 "https://api.x.ai/v1/chat/completions",
@@ -469,78 +412,101 @@ INFORMACIÓN A RESUMIR:
                 json={
                     "model": "grok-3",
                     "messages": [{"role": "user", "content": prompt}],
-                    "temperature": 0.15,
-                    "max_tokens": 3500
+                    "temperature": 0.1,
+                    "max_tokens": max_tokens
                 },
-                timeout=100
+                timeout=120
             )
 
             if response.status_code >= 400:
-                logger.error(f"Error Grok parte {idx}: {response.status_code} - {response.text[:300]}")
-                continue
+                logger.error(f"Error Grok: {response.status_code} - {response.text[:300]}")
+                return ""
 
-            part_summary = response.json()["choices"][0]["message"]["content"]
-            accumulated_summary = part_summary          # Sobrescribimos para ir consolidando
-            logger.info(f"  ✓ Parte {idx}/{total_chunks} completada")
-            time.sleep(1.1)
-
+            return response.json()["choices"][0]["message"]["content"]
         except Exception as e:
-            logger.error(f"Exception parte {idx}: {e}")
+            logger.error(f"Exception llamando a Grok: {e}")
+            return ""
+
+    def clean_and_validate_json(text: str) -> str:
+        """Limpia markdown y valida que sea JSON usable."""
+        if not text:
+            return ""
+
+        text = text.strip()
+
+        # Quitar bloques de código markdown
+        if "```" in text:
+            # Extraer el contenido dentro del primer bloque de código
+            match = re.search(r"```(?:json)?\s*([\s\S]*?)```", text)
+            if match:
+                text = match.group(1).strip()
+            else:
+                text = text.replace("```json", "").replace("```", "").strip()
+
+        # Intentar parsear
+        try:
+            parsed = json.loads(text)
+
+            # Validaciones mínimas de calidad
+            required_objects = ["contacts", "companies", "deals", "leads"]
+            for obj in required_objects:
+                if obj not in parsed:
+                    logger.warning(f"Falta el objeto '{obj}' en el resumen")
+                elif not parsed[obj].get("fields"):
+                    logger.warning(f"El objeto '{obj}' tiene fields vacío")
+
+            return json.dumps(parsed, ensure_ascii=False, indent=2)
+        except Exception as e:
+            logger.error(f"El resumen no es un JSON válido: {e}")
+            return text  # Devolvemos el texto crudo para no perderlo
 
     # -------------------------------------------------
-    # 5. ÚLTIMA CONSOLIDACIÓN FINAL (muy importante)
+    # 4. Resumir por partes + mini-consolidaciones
+    # -------------------------------------------------
+    accumulated_summary = ""
+
+    for idx, chunk in enumerate(chunks, 1):
+        logger.info(f"Resumiendo parte {idx}/{total_chunks}...")
+
+        prompt = build_chunk_prompt(chunk)
+        part_summary = call_grok(prompt, max_tokens=3500)
+
+        if not part_summary:
+            logger.warning(f"  ⚠ Parte {idx} falló, se continúa")
+            continue
+
+        if not accumulated_summary:
+            accumulated_summary = part_summary
+        else:
+            accumulated_summary += "\n\n--- NUEVA PARTE ---\n\n" + part_summary
+
+        logger.info(f"  ✓ Parte {idx}/{total_chunks} completada")
+
+        # Mini-consolidación cada 5 partes (evita que el resumen crezca demasiado)
+        if idx % 5 == 0 and idx < total_chunks:
+            logger.info(f"  → Mini-consolidación intermedia en parte {idx}...")
+            mini_prompt = build_consolidation_prompt(accumulated_summary, is_final=False)
+            mini_result = call_grok(mini_prompt, max_tokens=4000)
+            if mini_result:
+                accumulated_summary = mini_result
+                logger.info(f"  ✓ Mini-consolidación {idx} completada")
+
+        time.sleep(1.1)
+
+    # -------------------------------------------------
+    # 5. CONSOLIDACIÓN FINAL
     # -------------------------------------------------
     logger.info("Realizando consolidación final del resumen...")
 
-    final_prompt = f"""
-Eres un experto en diseño de agentes de voz para CRMs.
+    final_prompt = build_consolidation_prompt(accumulated_summary, is_final=True)
+    final_summary_raw = call_grok(final_prompt, max_tokens=4000)
 
-A continuación te paso un resumen parcial (puede contener repeticiones y estructura imperfecta) de un CRM HubSpot.
+    if not final_summary_raw:
+        logger.error("Falló la consolidación final, se usa el resumen acumulado")
+        final_summary_raw = accumulated_summary
 
-Tu tarea es generar el RESUMEN FINAL DEFINITIVO, limpio, cohesionado y profesional.
-
-REGLAS ESTRICTAS:
-1. Elimina TODAS las repeticiones.
-2. Unifica la información de contacts, companies, deals y leads en una estructura clara.
-3. Mantén ÚNICAMENTE los campos necesarios para que un asistente telefónico controle las funciones básicas del CRM.
-4. Conserva siempre los custom fields del cliente.
-5. Devuelve SOLO un JSON limpio y bien estructurado. Sin explicaciones.
-
-CAMPOS QUE DEBES PRIORIZAR Y MANTENER:
-- Contactos: firstname, lastname, email, phone, mobilephone, company, jobtitle, lifecyclestage, hs_lead_status, address fields, owner, custom fields
-- Empresas: name, domain, website, phone, address, numberofemployees, annualrevenue, type, owner
-- Deals: dealname, dealstage, pipeline, amount, closedate, dealtype, closed_won_reason, closed_lost_reason, associatedcompanyid, owner
-- Leads: los campos básicos de identificación y contacto
-
-RESUMEN PARCIAL A CONSOLIDAR:
-{accumulated_summary}
-"""
-
-    try:
-        response = requests.post(
-            "https://api.x.ai/v1/chat/completions",
-            headers={
-                "Authorization": f"Bearer {GROK_API_KEY}",
-                "Content-Type": "application/json"
-            },
-            json={
-                "model": "grok-3",
-                "messages": [{"role": "user", "content": final_prompt}],
-                "temperature": 0.1,
-                "max_tokens": 4000
-            },
-            timeout=120
-        )
-
-        if response.status_code < 400:
-            final_summary = response.json()["choices"][0]["message"]["content"]
-        else:
-            logger.error(f"Error en consolidación final: {response.text[:300]}")
-            final_summary = accumulated_summary
-
-    except Exception as e:
-        logger.error(f"Exception en consolidación final: {e}")
-        final_summary = accumulated_summary
+    # Limpieza + validación
+    final_summary = clean_and_validate_json(final_summary_raw)
 
     # -------------------------------------------------
     # 6. Resultado final
@@ -548,14 +514,14 @@ RESUMEN PARCIAL A CONSOLIDAR:
     final_chars = len(final_summary)
     final_tokens = final_chars / 4
 
-    logger.info("\n" + "="*90)
+    logger.info("\n" + "=" * 90)
     logger.info("📄 RESUMEN FINAL CONSOLIDADO Y LIMPIO")
-    logger.info("="*90)
+    logger.info("=" * 90)
     logger.info(final_summary)
-    logger.info("="*90)
+    logger.info("=" * 90)
     logger.info(f"Tamaño final: {final_chars:,} caracteres ≈ {final_tokens:,.0f} tokens")
     logger.info(f"Reducción total: de {total_chars:,} → {final_chars:,} caracteres")
-    logger.info("="*90)
+    logger.info("=" * 90)
     logger.info(f"=== PROCESO COMPLETADO | consumer: {consumer_id} ===\n")
 
     return {
@@ -564,7 +530,8 @@ RESUMEN PARCIAL A CONSOLIDAR:
         "original_characters": total_chars,
         "final_characters": final_chars,
         "final_tokens_estimated": int(final_tokens),
-        "chunks_processed": total_chunks
+        "chunks_processed": total_chunks,
+        "summary": final_summary          # ← Ahora también se devuelve en la respuesta
     }
 @app.get("/")
 async def root():

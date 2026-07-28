@@ -182,7 +182,7 @@ async def create_vault_session(body: CreateSessionRequest):
         "settings": {
             "unified_apis": ["crm"],
             "auto_redirect": True,
-            "isolation_mode": True,
+            "isolation_mode": False,
             "hide_guides": True,
         },
     }

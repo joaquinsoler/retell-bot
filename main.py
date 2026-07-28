@@ -171,7 +171,7 @@ async def create_vault_session(body: CreateSessionRequest):
         logger.error("❌ Apideck no está configurado (faltan API_KEY o APP_ID)")
         raise HTTPException(status_code=500, detail="Apideck no configurado en el servidor")
 
-    redirect_uri = body.redirect_uri or "https://retell-bot.onrender.com"
+    redirect_uri = "https://dansu.info"
 
     payload = {
         "redirect_uri": redirect_uri,

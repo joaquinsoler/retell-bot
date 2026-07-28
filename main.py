@@ -364,44 +364,73 @@ async def sync_crm_schema_to_logs(consumer_id: str):
     # -------------------------------------------------
     def build_chunk_prompt(chunk: str, previous_summary: str = "") -> str:
         base_instructions = """
-Eres un experto senior en diseño de agentes de voz para CRMs (especialista en HubSpot).
+Eres un experto en compactación de schemas de CRM para agentes de voz (Retell AI).
 
-Tu tarea es crear un resumen EXTREMADAMENTE LIMPIO y ÚTIL de la información de un CRM HubSpot.
+Tu única misión es producir la versión MÍNIMA pero COMPLETA del schema de propiedades de HubSpot que permita a un asistente telefónico controlar las funciones principales del CRM.
 
-OBJETIVO FINAL:
-Que un asistente telefónico pueda realizar con seguridad las funciones básicas y más importantes de un CRM.
+### Objetivo del asistente telefónico
+Debe poder:
+- Buscar e identificar contactos, leads y empresas
+- Crear y actualizar contactos, empresas y oportunidades (deals)
+- Usar correctamente los campos obligatorios, tipos de datos y enums
+- Utilizar los campos personalizados (custom fields) del cliente
+- Gestionar estados de lifecycle y de deals
 
-=====================
-DEBES MANTENER SÍ O SÍ:
-=====================
-- firstname, lastname, email, phone, mobilephone
-- company / company name
-- jobtitle
-- lifecyclestage + sus opciones
-- hs_lead_status + sus opciones
-- address, city, state, zip, country
-- hubspot_owner_id
-- Todos los CUSTOM FIELDS del cliente (aunque parezcan raros)
-- dealname, dealstage, pipeline, amount, closedate
-- dealtype, closed_won_reason, closed_lost_reason
-- associatedcompanyid
-- name, domain, website, numberofemployees, annualrevenue de companies
-- Cualquier campo que claramente se use para contacto, cualificación o venta
+### Reglas absolutas (nunca las rompas)
 
-=====================
-DEBES ELIMINAR:
-=====================
-- La gran mayoría de campos que empiezan por hs_ (excepto hs_lead_status)
-- Listas enormes de opciones (idiomas, timezones, países completos, industrias largas...)
-- Campos hidden: true
-- Campos calculados internos
-- Metadatos técnicos (displayOrder, createdAt de la propiedad, modificationMetadata completa, etc.)
-- Campos de analytics profundos, scores internos, tracking, etc.
-- Cualquier cosa que un agente telefónico NO necesite para buscar, crear o actualizar registros básicos
+1. NUNCA elimines:
+   - Nombre técnico exacto del campo (`name`)
+   - Label legible
+   - Tipo de dato (`type` / `fieldType`)
+   - Si es de solo lectura (cuando se conozca)
+   - Valores posibles de los enums importantes (lifecyclestage, hs_lead_status, dealstage, pipeline, dealtype, etc.)
+   - Todos los CUSTOM FIELDS del cliente
+   - Campos de relación importantes (associatedcompanyid, hubspot_owner_id)
 
-FORMATO DE SALIDA:
-Devuelve ÚNICAMENTE un JSON limpio y compacto.
-No escribas explicaciones ni texto fuera del JSON.
+2. SÍ puedes eliminar o condensar fuertemente:
+   - Descripciones largas
+   - Listas enormes de opciones (idiomas, timezones, países, industrias completas…)
+   - Campos hs_* internos (excepto hs_lead_status)
+   - Campos hidden, calculados o puramente analíticos
+   - Metadatos técnicos (displayOrder, createdAt de la propiedad, etc.)
+   - Campos deprecados o de sistema que no afecten a la lógica de negocio
+
+3. Prioridad de entidades (mantén todo lo relevante de):
+   Contacts, Companies, Deals (Opportunities), Leads
+
+4. Formato de salida obligatorio:
+Devuelve ÚNICAMENTE un JSON limpio con esta estructura:
+
+{
+  "contacts": {
+    "fields": [
+      {
+        "name": "email",
+        "label": "Email",
+        "type": "string",
+        "readOnly": false
+      },
+      {
+        "name": "lifecyclestage",
+        "label": "Lifecycle Stage",
+        "type": "enumeration",
+        "options": ["subscriber", "lead", "marketingqualifiedlead", "salesqualifiedlead", "opportunity", "customer"],
+        "readOnly": false
+      }
+    ]
+  },
+  "companies": { ... },
+  "deals": { ... },
+  "leads": { ... }
+}
+
+5. Criterio de decisión cuando dudes:
+“Si el asistente de voz necesita este campo para buscar, crear o actualizar un registro de forma correcta → CONSERVAR. Si solo sirve para documentación, analytics internos o la interfaz de HubSpot → ELIMINAR.”
+
+### Schema / fragmento a resumir:
+---
+{contenido}
+---
 """
 
         if previous_summary:

@@ -261,27 +261,20 @@ async def check_hubspot_connection(consumer_id: str):
 @app.get("/apideck/sync-schema/{consumer_id}")
 async def sync_crm_schema_to_logs(consumer_id: str):
     """
-    Versión potente para HubSpot:
-    - Usa el Proxy de Apideck para obtener el schema NATIVO completo
-    - Propiedades reales de HubSpot (tipos, opciones, labels, custom fields...)
-    - También incluye un sample unificado para ver la forma de los datos
+    Versión de medición: recoge el schema nativo completo de HubSpot
+    pero SOLO imprime el tamaño total para estimar cuántas peticiones
+    harían falta para resumirlo con un LLM.
     """
-    logger.info(f"=== INICIANDO SINCRONIZACIÓN NATIVA HUBSPOT | consumer: {consumer_id} ===")
+    logger.info(f"=== MEDICIÓN DE TAMAÑO DE SCHEMA | consumer: {consumer_id} ===")
 
     # 1. Verificar conexión
     status = await check_hubspot_connection(consumer_id)
     if not status.get("connected"):
-        logger.warning(f"[{consumer_id}] CRM no conectado")
         raise HTTPException(status_code=400, detail="El CRM no está conectado o listo todavía.")
 
     service_id = status.get("service_id", "hubspot")
-    crm_name = status.get("name", "HubSpot")
-
     if service_id != "hubspot":
-        raise HTTPException(
-            status_code=400,
-            detail=f"Esta versión del sync solo soporta HubSpot nativo. CRM detectado: {service_id}"
-        )
+        raise HTTPException(status_code=400, detail="Esta medición solo está preparada para HubSpot")
 
     headers_proxy = {
         "Authorization": f"Bearer {APIDECK_API_KEY}",
@@ -291,17 +284,15 @@ async def sync_crm_schema_to_logs(consumer_id: str):
         "Content-Type": "application/json",
     }
 
-    # Objetos principales de HubSpot
-    # (deals = opportunities en Apideck)
     hubspot_objects = {
         "contacts": "contacts",
         "companies": "companies",
-        "opportunities": "deals",      # En HubSpot se llaman deals
+        "opportunities": "deals",
         "leads": "leads"
     }
 
     full_schema = {
-        "crm": crm_name,
+        "crm": "HubSpot",
         "service_id": service_id,
         "consumer_id": consumer_id,
         "mode": "native_hubspot_proxy",
@@ -309,85 +300,86 @@ async def sync_crm_schema_to_logs(consumer_id: str):
     }
 
     for unified_name, hubspot_object in hubspot_objects.items():
-        logger.info(f"[{consumer_id}] Obteniendo schema nativo de '{hubspot_object}'...")
+        logger.info(f"Obteniendo datos de '{hubspot_object}'...")
 
         resource_info = {
             "hubspot_object": hubspot_object,
             "native_properties": None,
-            "sample_unified": None,
-            "error": None
+            "sample_unified": None
         }
 
-        # -------------------------------------------------
-        # A) Schema NATIVO completo (propiedades de HubSpot)
-        # -------------------------------------------------
+        # A) Propiedades nativas
         try:
             downstream_url = f"https://api.hubapi.com/crm/v3/properties/{hubspot_object}"
-
             res = requests.get(
                 f"{APIDECK_BASE}/proxy",
-                headers={
-                    **headers_proxy,
-                    "x-apideck-downstream-url": downstream_url
-                },
+                headers={**headers_proxy, "x-apideck-downstream-url": downstream_url},
                 timeout=15
             )
-
             if res.status_code < 400:
                 data = res.json()
-                # HubSpot devuelve {"results": [ ... propiedades ... ]}
-                properties = data.get("results", data)
-                resource_info["native_properties"] = properties
-                logger.info(f"  ✓ {len(properties) if isinstance(properties, list) else 'datos'} propiedades nativas de '{hubspot_object}'")
+                resource_info["native_properties"] = data.get("results", data)
+                logger.info(f"  ✓ Propiedades nativas de '{hubspot_object}' obtenidas")
             else:
-                logger.warning(f"  ✗ Native properties '{hubspot_object}' → {res.status_code}: {res.text[:250]}")
-                resource_info["error"] = f"Status {res.status_code}"
+                logger.warning(f"  ✗ Error propiedades '{hubspot_object}': {res.status_code}")
         except Exception as e:
-            logger.error(f"  ✗ Error native '{hubspot_object}': {str(e)}")
-            resource_info["error"] = str(e)
+            logger.error(f"  ✗ Exception propiedades '{hubspot_object}': {str(e)}")
 
-        # -------------------------------------------------
-        # B) Sample unificado (para ver la forma real de los datos)
-        # -------------------------------------------------
+        # B) Sample unificado
         try:
-            headers_unified = {
-                **apideck_headers(consumer_id),
-                "x-apideck-service-id": "hubspot"
-            }
+            headers_unified = {**apideck_headers(consumer_id), "x-apideck-service-id": "hubspot"}
             res = requests.get(
                 f"{APIDECK_BASE}/crm/{unified_name}",
                 headers=headers_unified,
-                params={"limit": 1},
+                params={"limit": 5},
                 timeout=12
             )
             if res.status_code < 400:
-                items = res.json().get("data", [])
-                resource_info["sample_unified"] = items[0] if items else None
+                resource_info["sample_unified"] = res.json().get("data", [])
                 logger.info(f"  ✓ Sample unificado de '{unified_name}' obtenido")
         except Exception as e:
-            logger.warning(f"  - No se pudo obtener sample unificado de '{unified_name}': {str(e)}")
+            logger.warning(f"  - Error sample '{unified_name}': {str(e)}")
 
         full_schema["resources"][unified_name] = resource_info
 
-    # -------------------------------------------------
-    # Imprimir el schema completo en los logs
-    # -------------------------------------------------
+    # ============================================================
+    # CÁLCULO DE TAMAÑO (sin imprimir el contenido)
+    # ============================================================
     import json
-    logger.info("\n" + "="*90)
-    logger.info("📦 SCHEMA NATIVO COMPLETO DE HUBSPOT (listo para Grok + Retell)")
-    logger.info("="*90)
-    logger.info(json.dumps(full_schema, indent=2, ensure_ascii=False, default=str))
-    logger.info("="*90)
-    logger.info(f"=== FIN DE SINCRONIZACIÓN NATIVA | consumer: {consumer_id} ===\n")
+    import sys
+
+    schema_json = json.dumps(full_schema, ensure_ascii=False, default=str)
+    size_chars = len(schema_json)
+    size_kb = size_chars / 1024
+    size_mb = size_kb / 1024
+
+    # Estimación muy aproximada de tokens (1 token ≈ 4 caracteres en inglés/JSON)
+    estimated_tokens = size_chars / 4
+
+    logger.info("\n" + "="*70)
+    logger.info("📊 MEDICIÓN DE TAMAÑO DEL SCHEMA COMPLETO")
+    logger.info("="*70)
+    logger.info(f"Caracteres totales:     {size_chars:,}")
+    logger.info(f"Tamaño aproximado:      {size_kb:.1f} KB  ({size_mb:.2f} MB)")
+    logger.info(f"Tokens estimados:       {estimated_tokens:,.0f} tokens")
+    logger.info("-"*70)
+    logger.info("Estimación de peticiones a Grok (resumen por partes):")
+    logger.info(f"  - Si usamos ~8.000 tokens por petición → {max(1, int(estimated_tokens / 8000))} peticiones")
+    logger.info(f"  - Si usamos ~12.000 tokens por petición → {max(1, int(estimated_tokens / 12000))} peticiones")
+    logger.info(f"  - Si usamos ~20.000 tokens por petición → {max(1, int(estimated_tokens / 20000))} peticiones")
+    logger.info("="*70)
+    logger.info(f"=== FIN DE MEDICIÓN | consumer: {consumer_id} ===\n")
 
     return {
         "success": True,
-        "message": "Schema nativo completo de HubSpot recogido e impreso en los logs",
+        "message": "Medición de tamaño completada (mira los logs)",
         "consumer_id": consumer_id,
-        "crm_name": crm_name,
-        "mode": "native_hubspot_proxy",
-        "resources": list(full_schema["resources"].keys()),
-        "schema": full_schema
+        "size_characters": size_chars,
+        "size_kb": round(size_kb, 1),
+        "estimated_tokens": int(estimated_tokens),
+        "estimated_requests_8k": max(1, int(estimated_tokens / 8000)),
+        "estimated_requests_12k": max(1, int(estimated_tokens / 12000)),
+        "estimated_requests_20k": max(1, int(estimated_tokens / 20000))
     }
 
 # ======================

@@ -391,7 +391,6 @@ async def sync_crm_schema_to_logs(consumer_id: str):
         if not text:
             return ""
         text = text.strip()
-        # Quitar posibles bloques ```json
         match = re.search(r"```(?:json)?\s*([\s\S]*?)```", text)
         if match:
             text = match.group(1).strip()
@@ -437,20 +436,36 @@ Tu misión es extraer la información mínima pero completa que un asistente tel
         if is_final:
             extra = """
 6. Si "leads" está vacío o muy incompleto, reconstruye los campos básicos de contacto 
-   (id, firstname, lastname, email, phone, company, lifecyclestage, hs_lead_status, hubspot_owner_id).
-7. Incluye "associations" básicas cuando sea posible.
-8. Asegúrate de que todos los objetos tengan al menos el campo id/hs_object_id.
+   (hs_object_id, firstname, lastname, email, phone, mobilephone, company, lifecyclestage, hs_lead_status, hubspot_owner_id).
+
+7. Incluye SIEMPRE esta sección de asociaciones:
+"associations": {
+  "contacts": ["companies", "deals"],
+  "companies": ["contacts", "deals"],
+  "deals": ["contacts", "companies"],
+  "leads": ["contacts", "companies"]
+}
+
+8. ELIMINA estos tipos de campos (bajo valor para un agente de voz):
+   - Todos los campos hs_num_* calculados
+   - Campos de email opt-out específicos (hs_email_optout_*)
+   - Campos de analytics y engagement internos
+   - fax, hs_reason_to_reach_out, y campos similares de poco uso telefónico
+
+9. NO mezcles campos entre objetos:
+   - annualrevenue, industry, numberofemployees → solo en companies
+   - amount, dealstage, closedate, closed_won_reason → solo en deals
 """
 
         return f"""
 Eres un experto en diseño de conocimiento para agentes de voz de HubSpot.
 
-Genera un resumen {"FINAL DEFINITIVO" if is_final else "intermedio"} limpio.
+Genera un resumen {"FINAL DEFINITIVO" if is_final else "intermedio"} limpio y profesional.
 
 ### REGLAS
 1. Elimina TODAS las repeticiones.
 2. Unifica contacts, companies, deals y leads.
-3. Cada objeto debe tener al menos id o hs_object_id.
+3. Cada objeto debe tener al menos hs_object_id.
 4. Todos los campos deben tener "required" y "readOnly" (false si no se sabe).
 5. Conserva SIEMPRE los custom fields.
 {extra}
@@ -492,18 +507,18 @@ RESUMEN A CONSOLIDAR:
         time.sleep(1.1)
 
     # -------------------------------------------------
-    # 5. Consolidación final
+    # 5. Consolidación final (más tokens)
     # -------------------------------------------------
     logger.info("Realizando consolidación final...")
 
-    final_raw = call_grok(build_consolidation_prompt(accumulated_summary, is_final=True), max_tokens=4000)
+    final_raw = call_grok(build_consolidation_prompt(accumulated_summary, is_final=True), max_tokens=7000)
     if not final_raw:
         final_raw = accumulated_summary
 
     final_summary = clean_json_output(final_raw)
 
     # -------------------------------------------------
-    # 6. Resultado
+    # 6. Resultado (LOGS DIVIDIDOS PARA QUE NO SE CORTEN)
     # -------------------------------------------------
     final_chars = len(final_summary)
     final_tokens = final_chars / 4
@@ -511,7 +526,14 @@ RESUMEN A CONSOLIDAR:
     logger.info("\n" + "="*90)
     logger.info("📄 RESUMEN FINAL CONSOLIDADO Y LIMPIO")
     logger.info("="*90)
-    logger.info(final_summary)
+
+    # Dividir en trozos de 3000 caracteres para evitar el corte de Render
+    chunk_size = 3000
+    for i in range(0, len(final_summary), chunk_size):
+        part_num = i // chunk_size + 1
+        logger.info(f"--- PARTE {part_num} DEL RESUMEN ---")
+        logger.info(final_summary[i:i + chunk_size])
+
     logger.info("="*90)
     logger.info(f"Tamaño final: {final_chars:,} caracteres ≈ {final_tokens:,.0f} tokens")
     logger.info(f"Reducción total: de {total_chars:,} → {final_chars:,} caracteres")

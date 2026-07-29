@@ -206,63 +206,11 @@ async def create_vault_session(body: CreateSessionRequest):
 # ======================
 # 2. COMPROBAR ESTADO DE CONEXIÓN
 # ======================
-@app.get("/apideck/connection-status/{consumer_id}")
-async def check_hubspot_connection(consumer_id: str):
-    """
-    Comprueba si el CRM (HubSpot) está conectado y en estado 'callable'.
-    """
-    logger.info(f"Comprobando conexión CRM | consumer_id={consumer_id}")
-
-    try:
-        response = requests.get(
-            f"{APIDECK_BASE}/vault/connections/crm/hubspot",
-            headers=apideck_headers(consumer_id),
-            timeout=10,
-        )
-
-        if response.status_code == 404:
-            logger.info(f"[{consumer_id}] CRM NO está conectado (404)")
-            return {
-                "connected": False,
-                "state": None,
-                "name": None,
-                "message": "CRM no conectado"
-            }
-
-        if response.status_code >= 400:
-            logger.error(f"[{consumer_id}] Error al comprobar conexión: {response.text}")
-            raise HTTPException(status_code=response.status_code, detail=response.text)
-
-        data = response.json().get("data", {})
-        state = data.get("state")
-        enabled = data.get("enabled", False)
-        is_connected = state == "callable" and enabled
-        crm_name = data.get("name") or "HubSpot"
-
-        return {
-            "connected": is_connected,
-            "state": state,
-            "enabled": enabled,
-            "service_id": data.get("service_id"),
-            "name": crm_name,
-        }
-
-    except requests.exceptions.RequestException as e:
-        logger.error(f"Error de red al comprobar conexión: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
-# ============================================================
-# PARTE 3/3 - Sync schema (imprime estructura del CRM en logs),
-#            webhook y health check
-# ============================================================
-
-# ======================
-# 3. SINCRONIZAR SCHEMA COMPLETO (Nativo HubSpot vía Proxy)
-# ======================
 @app.get("/apideck/sync-schema/{consumer_id}")
 async def sync_crm_schema_to_logs(consumer_id: str):
     """
     Recoge schema nativo de HubSpot → resume por partes con Grok → 
-    mini-consolidaciones + consolidación final limpia.
+    mini-consolidaciones + consolidación final limpia y robusta.
     """
     import json
     import time
@@ -374,7 +322,7 @@ async def sync_crm_schema_to_logs(consumer_id: str):
                 json={
                     "model": "grok-3",
                     "messages": [{"role": "user", "content": prompt}],
-                    "temperature": 0.12,
+                    "temperature": 0.1,
                     "max_tokens": max_tokens
                 },
                 timeout=120
@@ -387,29 +335,45 @@ async def sync_crm_schema_to_logs(consumer_id: str):
             logger.error(f"Exception Grok: {e}")
             return ""
 
-    def clean_json_output(text: str) -> str:
+    def clean_and_validate_json(text: str) -> str:
+        """Limpieza robusta + validación real de JSON."""
         if not text:
             return ""
+
         text = text.strip()
+
+        # Quitar bloques ```json
         match = re.search(r"```(?:json)?\s*([\s\S]*?)```", text)
         if match:
             text = match.group(1).strip()
-        return text
+
+        # Extraer desde el primer { hasta el último }
+        start = text.find("{")
+        end = text.rfind("}")
+        if start != -1 and end != -1 and end > start:
+            text = text[start:end + 1]
+
+        try:
+            parsed = json.loads(text)
+            return json.dumps(parsed, ensure_ascii=False, indent=2)
+        except Exception as e:
+            logger.error(f"JSON final inválido: {e}")
+            return text  # Devolvemos crudo para no perderlo
 
     def build_chunk_prompt(chunk: str) -> str:
         return f"""
 Eres un experto en compactación de schemas de propiedades de HubSpot para agentes de voz (Retell AI).
 
-Tu misión es extraer la información mínima pero completa que un asistente telefónico necesita.
+Extrae SOLO la información mínima pero completa que un asistente telefónico necesita para buscar, crear y actualizar registros.
 
 ### Reglas absolutas
 1. NUNCA elimines:
    - name, label, type
    - options de enums importantes (lifecyclestage, hs_lead_status, dealstage, pipeline, dealtype...)
-   - Todos los CUSTOM FIELDS
-   - Campos de identificación (id, hs_object_id)
+   - Todos los CUSTOM FIELDS del cliente
+   - Campos de identificación (hs_object_id)
    - Campos de relación (associatedcompanyid, hubspot_owner_id)
-   - required y readOnly cuando estén disponibles
+   - required y readOnly (usa false si no se sabe)
 
 2. SÍ elimina:
    - Descripciones largas
@@ -419,7 +383,7 @@ Tu misión es extraer la información mínima pero completa que un asistente tel
 
 3. Formato de salida (solo JSON):
 {{
-  "contacts": {{ "fields": [ {{ "name": "...", "label": "...", "type": "...", "required": false, "readOnly": false }} ] }},
+  "contacts": {{ "fields": [{{ "name": "...", "label": "...", "type": "...", "required": false, "readOnly": false }}] }},
   "companies": {{ "fields": [...] }},
   "deals": {{ "fields": [...] }},
   "leads": {{ "fields": [...] }}
@@ -435,10 +399,12 @@ Tu misión es extraer la información mínima pero completa que un asistente tel
         extra = ""
         if is_final:
             extra = """
-6. Si "leads" está vacío o muy incompleto, reconstruye los campos básicos de contacto 
-   (hs_object_id, firstname, lastname, email, phone, mobilephone, company, lifecyclestage, hs_lead_status, hubspot_owner_id).
+### REGLAS EXTRA OBLIGATORIAS PARA EL RESUMEN FINAL
 
-7. Incluye SIEMPRE esta sección de asociaciones:
+6. Si "leads" está vacío o incompleto → reconstruye obligatoriamente:
+   hs_object_id, firstname, lastname, email, phone, mobilephone, company, lifecyclestage, hs_lead_status, hubspot_owner_id
+
+7. Incluye SIEMPRE esta sección exacta:
 "associations": {
   "contacts": ["companies", "deals"],
   "companies": ["contacts", "deals"],
@@ -446,30 +412,41 @@ Tu misión es extraer la información mínima pero completa que un asistente tel
   "leads": ["contacts", "companies"]
 }
 
-8. ELIMINA estos tipos de campos (bajo valor para un agente de voz):
-   - Todos los campos hs_num_* calculados
-   - Campos de email opt-out específicos (hs_email_optout_*)
-   - Campos de analytics y engagement internos
-   - fax, hs_reason_to_reach_out, y campos similares de poco uso telefónico
+8. ELIMINA SIN PIEDAD:
+   - Todos los hs_num_*
+   - hs_email_optout_* y campos de opt-out
+   - date_of_birth, degree, field_of_study, gender, graduation_date, company_size
+   - fax, hs_reason_to_reach_out, hs_csm_sentiment, hs_domain_status, hs_quick_context
+   - Campos de analytics e engagement internos
 
 9. NO mezcles campos entre objetos:
-   - annualrevenue, industry, numberofemployees → solo en companies
-   - amount, dealstage, closedate, closed_won_reason → solo en deals
+   - annualrevenue, industry, numberofemployees, founded_year → SOLO companies
+   - amount, dealstage, closedate, closed_won_reason, closed_lost_reason, dealtype, dealname → SOLO deals
+
+10. CAMPOS OBLIGATORIOS que DEBEN aparecer:
+   - contacts: hs_object_id, firstname, lastname, email, phone, mobilephone, company, jobtitle, lifecyclestage, hs_lead_status, hubspot_owner_id + custom fields
+   - companies: hs_object_id, name, domain, phone, website, address, city, state, zip, country, annualrevenue, numberofemployees, type, hubspot_owner_id
+   - deals: hs_object_id, dealname, amount, dealstage, pipeline, closedate, dealtype, closed_won_reason, closed_lost_reason, hubspot_owner_id, associatedcompanyid, hs_priority
+   - leads: hs_object_id, firstname, lastname, email, phone, company, lifecyclestage, hs_lead_status, hubspot_owner_id
+
+11. Conserva SIEMPRE los custom fields del cliente con sus options.
 """
 
         return f"""
-Eres un experto en diseño de conocimiento para agentes de voz de HubSpot.
+Eres un experto senior en diseño de schemas limpios para agentes de voz (Retell AI) que controlan HubSpot.
 
-Genera un resumen {"FINAL DEFINITIVO" if is_final else "intermedio"} limpio y profesional.
+Genera el resumen {"FINAL DEFINITIVO" if is_final else "intermedio"} más limpio, preciso y útil posible.
 
-### REGLAS
+### REGLAS ESTRICTAS
 1. Elimina TODAS las repeticiones.
 2. Unifica contacts, companies, deals y leads.
-3. Cada objeto debe tener al menos hs_object_id.
+3. Cada objeto DEBE tener al menos "hs_object_id".
 4. Todos los campos deben tener "required" y "readOnly" (false si no se sabe).
-5. Conserva SIEMPRE los custom fields.
+5. Conserva SIEMPRE los custom fields del cliente.
 {extra}
-Devuelve ÚNICAMENTE el JSON final, sin markdown ni explicaciones.
+
+Devuelve ÚNICAMENTE el JSON final válido.
+Sin markdown, sin explicaciones, sin ```json.
 
 RESUMEN A CONSOLIDAR:
 {content}
@@ -502,42 +479,47 @@ RESUMEN A CONSOLIDAR:
             mini = call_grok(build_consolidation_prompt(accumulated_summary, is_final=False), max_tokens=4000)
             if mini:
                 accumulated_summary = mini
-                logger.info(f"  ✓ Mini-consolidación completada")
+                logger.info("  ✓ Mini-consolidación completada")
 
         time.sleep(1.1)
 
     # -------------------------------------------------
-    # 5. Consolidación final (más tokens)
+    # 5. Consolidación final + reintento
     # -------------------------------------------------
     logger.info("Realizando consolidación final...")
 
-    final_raw = call_grok(build_consolidation_prompt(accumulated_summary, is_final=True), max_tokens=7000)
+    final_raw = call_grok(build_consolidation_prompt(accumulated_summary, is_final=True), max_tokens=8000)
+
+    if not final_raw or len(final_raw) < 800:
+        logger.warning("Consolidación final débil o vacía → reintentando una vez...")
+        time.sleep(2)
+        final_raw = call_grok(build_consolidation_prompt(accumulated_summary, is_final=True), max_tokens=8000)
+
     if not final_raw:
         final_raw = accumulated_summary
 
-    final_summary = clean_json_output(final_raw)
+    final_summary = clean_and_validate_json(final_raw)
 
     # -------------------------------------------------
-    # 6. Resultado (LOGS DIVIDIDOS PARA QUE NO SE CORTEN)
+    # 6. Resultado (logs divididos)
     # -------------------------------------------------
     final_chars = len(final_summary)
     final_tokens = final_chars / 4
 
-    logger.info("\n" + "="*90)
+    logger.info("\n" + "=" * 90)
     logger.info("📄 RESUMEN FINAL CONSOLIDADO Y LIMPIO")
-    logger.info("="*90)
+    logger.info("=" * 90)
 
-    # Dividir en trozos de 3000 caracteres para evitar el corte de Render
     chunk_size = 3000
     for i in range(0, len(final_summary), chunk_size):
         part_num = i // chunk_size + 1
         logger.info(f"--- PARTE {part_num} DEL RESUMEN ---")
         logger.info(final_summary[i:i + chunk_size])
 
-    logger.info("="*90)
+    logger.info("=" * 90)
     logger.info(f"Tamaño final: {final_chars:,} caracteres ≈ {final_tokens:,.0f} tokens")
     logger.info(f"Reducción total: de {total_chars:,} → {final_chars:,} caracteres")
-    logger.info("="*90)
+    logger.info("=" * 90)
     logger.info(f"=== PROCESO COMPLETADO | consumer: {consumer_id} ===\n")
 
     return {

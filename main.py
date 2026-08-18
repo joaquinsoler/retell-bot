@@ -1,559 +1,72 @@
-# ============================================================
-# PARTE 1/3 - Imports, configuración, CORS y autenticación Google
-# ============================================================
-
-import os
-import logging
-from typing import Optional
-
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, File, UploadFile, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
-import requests
+import io
+from pypdf import PdfReader   # o PyPDF2 si prefieres
+import logging
 
-from google.auth.transport import requests as google_requests
-from google.oauth2 import id_token
+# Configurar logging para que se vea claramente en Render
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-# ======================
-# LOGGING
-# ======================
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s | %(levelname)s | %(message)s"
-)
-logger = logging.getLogger("dansu")
+app = FastAPI()
 
-app = FastAPI(title="Dansu - Asistentes Telefónicos + CRM")
-
-# ======================
-# CORS (permite dansu.info y desarrollo)
-# ======================
+# CORS (importante porque el frontend está en Wix)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "https://dansu.info",
-        "https://www.dansu.info",
-        "http://localhost:3000",
-        "http://127.0.0.1:3000",
-        "*"  # temporal mientras terminamos de probar
-    ],
+    allow_origins=["*"],          # Luego puedes restringirlo
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# ======================
-# GOOGLE OAUTH
-# ======================
-GOOGLE_CLIENT_ID = "667952866685-37b9ksse2l8krjo4t7t6tdhdqbk11e34.apps.googleusercontent.com"
-
-class TokenRequest(BaseModel):
-    token: str
-
-@app.post("/api/auth/google")
-def google_auth(body: TokenRequest):
-    token = body.token
-
-    if not token:
-        logger.error("❌ Error: No se ha proporcionado ningún token.")
-        raise HTTPException(status_code=400, detail="No token provided")
+@app.post("/api/upload")
+async def upload_pdf(file: UploadFile = File(...)):
+    # 1. Validar que sea un PDF
+    if file.content_type != "application/pdf":
+        raise HTTPException(status_code=400, detail="Solo se permiten archivos PDF")
 
     try:
-        # Verificar el token con los servidores oficiales de Google
-        idinfo = id_token.verify_oauth2_token(
-            token,
-            google_requests.Request(),
-            GOOGLE_CLIENT_ID
-        )
+        # 2. Leer el contenido del archivo
+        contents = await file.read()
+        
+        # 3. Extraer texto del PDF
+        pdf_file = io.BytesIO(contents)
+        reader = PdfReader(pdf_file)
+        
+        # Extraer texto de la primera página
+        first_page_text = ""
+        if len(reader.pages) > 0:
+            first_page_text = reader.pages[0].extract_text() or ""
+        
+        # 4. Obtener el primer párrafo
+        # (separamos por doble salto de línea o por punto + mayúscula)
+        paragraphs = [p.strip() for p in first_page_text.split("\n\n") if p.strip()]
+        
+        if not paragraphs:
+            # Si no hay dobles saltos, cogemos las primeras líneas
+            lines = [line.strip() for line in first_page_text.split("\n") if line.strip()]
+            first_paragraph = " ".join(lines[:4]) if lines else "No se pudo extraer texto"
+        else:
+            first_paragraph = paragraphs[0]
 
-        # Extraer los datos del usuario
-        google_id = idinfo["sub"]
-        email = idinfo["email"]
-        name = idinfo.get("name", "Sin nombre")
-        picture = idinfo.get("picture", "")
-
-        # Imprimir en los logs de Render (exactamente como pediste)
-        print("--------------------------------------------------")
-        print("🎉 ¡AUTENTICACIÓN CON GOOGLE EXITOSA! 🎉")
-        print(f"• Nombre: {name}")
-        print(f"• Correo electrónico: {email}")
-        print(f"• Google ID: {google_id}")
-        print(f"• Foto de perfil: {picture}")
-        print("--------------------------------------------------")
+        # 5. Mensajes en los logs de Render
+        logger.info("=" * 60)
+        logger.info("✅ PDF RECIBIDO CON ÉXITO")
+        logger.info(f"Nombre del archivo: {file.filename}")
+        logger.info(f"Tamaño: {len(contents)} bytes")
+        logger.info(f"Número de páginas: {len(reader.pages)}")
+        logger.info("-" * 60)
+        logger.info("📄 PRIMER PÁRRAFO DEL PDF:")
+        logger.info(first_paragraph)
+        logger.info("=" * 60)
 
         return {
             "status": "success",
-            "message": "Autenticación recibida e impresa en logs correctamente",
-            "google_id": google_id,
-            "email": email,
-            "name": name,
-            "picture": picture
+            "filename": file.filename,
+            "pages": len(reader.pages),
+            "first_paragraph": first_paragraph
         }
 
-    except ValueError as e:
-        logger.error(f"❌ Error de seguridad: Token de Google inválido -> {str(e)}")
-        raise HTTPException(status_code=401, detail=f"Token de Google inválido: {str(e)}")
-# ============================================================
-# PARTE 2/3 - Variables de Apideck, modelos, helpers y endpoints
-#            de sesión + estado de conexión
-# ============================================================
-
-# ======================
-# VARIABLES DE ENTORNO APIDECK
-# ======================
-APIDECK_API_KEY = os.getenv("APIDECK_API_KEY")
-APIDECK_APP_ID = os.getenv("APIDECK_APP_ID")
-APIDECK_BASE = "https://unify.apideck.com"
-
-if not APIDECK_API_KEY or not APIDECK_APP_ID:
-    logger.error("FALTAN variables de entorno APIDECK_API_KEY o APIDECK_APP_ID")
-else:
-    logger.info("Variables de entorno Apideck cargadas correctamente")
-
-
-# ======================
-# MODELOS
-# ======================
-class CreateSessionRequest(BaseModel):
-    consumer_id: str
-    redirect_uri: Optional[str] = None
-    user_name: Optional[str] = None
-    account_name: Optional[str] = None
-
-
-# ======================
-# HELPERS
-# ======================
-def apideck_headers(consumer_id: str) -> dict:
-    return {
-        "Authorization": f"Bearer {APIDECK_API_KEY}",
-        "x-apideck-app-id": APIDECK_APP_ID,
-        "x-apideck-consumer-id": consumer_id,
-        "Content-Type": "application/json",
-    }
-
-
-# ======================
-# 1. CREAR SESIÓN DE VAULT
-# ======================
-@app.post("/apideck/session")
-async def create_vault_session(body: CreateSessionRequest):
-    """
-    Crea una sesión de Apideck Vault para que el cliente conecte su CRM.
-    La redirect_uri por defecto es https://dansu.info
-    """
-    logger.info(f"Solicitud de sesión recibida | consumer_id={body.consumer_id}")
-
-    if not APIDECK_API_KEY or not APIDECK_APP_ID:
-        logger.error("Apideck no está configurado (faltan API_KEY o APP_ID)")
-        raise HTTPException(status_code=500, detail="Apideck no configurado en el servidor")
-
-    # Importante: por defecto volvemos a la página de Wix
-    redirect_uri = body.redirect_uri or "https://dansu.info"
-
-    payload = {
-        "redirect_uri": redirect_uri,
-        "consumer_metadata": {
-            "account_name": body.account_name or "Cliente Dansu",
-            "user_name": body.user_name or body.consumer_id,
-        },
-        "settings": {
-            "unified_apis": ["crm"],
-            "auto_redirect": True,
-            "isolation_mode": True,
-            "hide_guides": True,
-        },
-    }
-
-    try:
-        logger.info(f"Creando sesión Vault para consumer_id={body.consumer_id} ...")
-        response = requests.post(
-            f"{APIDECK_BASE}/vault/sessions",
-            headers=apideck_headers(body.consumer_id),
-            json=payload,
-            timeout=15,
-        )
-
-        if response.status_code >= 400:
-            logger.error(f"Error de Apideck: {response.text}")
-            raise HTTPException(
-                status_code=response.status_code,
-                detail=f"Error de Apideck: {response.text}"
-            )
-
-        data = response.json().get("data", {})
-        session_uri = data.get("session_uri")
-        session_token = data.get("session_token")
-
-        if not session_uri:
-            logger.error("Apideck no devolvió session_uri")
-            raise HTTPException(status_code=500, detail="No se recibió session_uri de Apideck")
-
-        logger.info(f"Sesión Vault creada correctamente | consumer_id={body.consumer_id}")
-
-        return {
-            "success": True,
-            "consumer_id": body.consumer_id,
-            "session_uri": session_uri,
-            "session_token": session_token,
-        }
-
-    except requests.exceptions.RequestException as e:
-        logger.error(f"Error de red al crear sesión: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Error de conexión con Apideck: {str(e)}")
-
-
-# ======================
-# 2. COMPROBAR ESTADO DE CONEXIÓN
-# ======================
-@app.get("/apideck/connection-status/{consumer_id}")
-async def check_hubspot_connection(consumer_id: str):
-    """
-    Comprueba si el CRM (HubSpot) está conectado y en estado 'callable'.
-    """
-    logger.info(f"Comprobando conexión CRM | consumer_id={consumer_id}")
-
-    try:
-        response = requests.get(
-            f"{APIDECK_BASE}/vault/connections/crm/hubspot",
-            headers=apideck_headers(consumer_id),
-            timeout=10,
-        )
-
-        if response.status_code == 404:
-            logger.info(f"[{consumer_id}] CRM NO está conectado (404)")
-            return {
-                "connected": False,
-                "state": None,
-                "name": None,
-                "message": "CRM no conectado"
-            }
-
-        if response.status_code >= 400:
-            logger.error(f"[{consumer_id}] Error al comprobar conexión: {response.text}")
-            raise HTTPException(status_code=response.status_code, detail=response.text)
-
-        data = response.json().get("data", {})
-        state = data.get("state")
-        enabled = data.get("enabled", False)
-        is_connected = state == "callable" and enabled
-        crm_name = data.get("name") or "HubSpot"
-
-        return {
-            "connected": is_connected,
-            "state": state,
-            "enabled": enabled,
-            "service_id": data.get("service_id"),
-            "name": crm_name,
-        }
-
-    except requests.exceptions.RequestException as e:
-        logger.error(f"Error de red al comprobar conexión: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
-# ============================================================
-# PARTE 3/3 - Sync schema (imprime estructura del CRM en logs),
-#            webhook y health check
-# ============================================================
-
-# ======================
-# 3. SINCRONIZAR SCHEMA COMPLETO (Nativo HubSpot vía Proxy)
-# ======================
-@app.get("/apideck/sync-schema/{consumer_id}")
-async def sync_crm_schema_to_logs(consumer_id: str):
-    """
-    Recoge schema nativo de HubSpot → resume por partes con Grok → 
-    mini-consolidaciones + consolidación final limpia.
-    """
-    import json
-    import time
-    import re
-
-    logger.info(f"=== INICIO RESUMEN PROFESIONAL CON GROK | consumer: {consumer_id} ===")
-
-    GROK_API_KEY = os.getenv("GROK_API_KEY")
-    if not GROK_API_KEY:
-        raise HTTPException(status_code=500, detail="Falta la variable de entorno GROK_API_KEY")
-
-    # -------------------------------------------------
-    # 1. Verificar conexión
-    # -------------------------------------------------
-    status = await check_hubspot_connection(consumer_id)
-    if not status.get("connected"):
-        raise HTTPException(status_code=400, detail="El CRM no está conectado o listo todavía.")
-
-    service_id = status.get("service_id", "hubspot")
-    if service_id != "hubspot":
-        raise HTTPException(status_code=400, detail="Esta versión solo soporta HubSpot nativo")
-
-    headers_proxy = {
-        "Authorization": f"Bearer {APIDECK_API_KEY}",
-        "x-apideck-app-id": APIDECK_APP_ID,
-        "x-apideck-consumer-id": consumer_id,
-        "x-apideck-service-id": "hubspot",
-        "Content-Type": "application/json",
-    }
-
-    hubspot_objects = {
-        "contacts": "contacts",
-        "companies": "companies",
-        "opportunities": "deals",
-        "leads": "leads"
-    }
-
-    full_schema = {
-        "crm": "HubSpot",
-        "service_id": service_id,
-        "consumer_id": consumer_id,
-        "resources": {}
-    }
-
-    # -------------------------------------------------
-    # 2. Recoger schema nativo
-    # -------------------------------------------------
-    for unified_name, hubspot_object in hubspot_objects.items():
-        logger.info(f"Obteniendo '{hubspot_object}'...")
-
-        resource_info = {
-            "hubspot_object": hubspot_object,
-            "native_properties": None,
-            "sample_unified": None
-        }
-
-        try:
-            downstream_url = f"https://api.hubapi.com/crm/v3/properties/{hubspot_object}"
-            res = requests.get(
-                f"{APIDECK_BASE}/proxy",
-                headers={**headers_proxy, "x-apideck-downstream-url": downstream_url},
-                timeout=20
-            )
-            if res.status_code < 400:
-                data = res.json()
-                resource_info["native_properties"] = data.get("results", data)
-                logger.info(f"  ✓ Propiedades nativas de '{hubspot_object}'")
-        except Exception as e:
-            logger.error(f"  ✗ Error propiedades '{hubspot_object}': {e}")
-
-        try:
-            headers_unified = {**apideck_headers(consumer_id), "x-apideck-service-id": "hubspot"}
-            res = requests.get(
-                f"{APIDECK_BASE}/crm/{unified_name}",
-                headers=headers_unified,
-                params={"limit": 3},
-                timeout=12
-            )
-            if res.status_code < 400:
-                resource_info["sample_unified"] = res.json().get("data", [])
-        except Exception as e:
-            logger.warning(f"  - Error sample '{unified_name}': {e}")
-
-        full_schema["resources"][unified_name] = resource_info
-
-    # -------------------------------------------------
-    # 3. Preparar texto y dividir
-    # -------------------------------------------------
-    schema_text = json.dumps(full_schema, ensure_ascii=False, default=str)
-    total_chars = len(schema_text)
-    logger.info(f"Schema original: {total_chars:,} caracteres")
-
-    CHUNK_SIZE = 42000
-    chunks = [schema_text[i:i + CHUNK_SIZE] for i in range(0, len(schema_text), CHUNK_SIZE)]
-    total_chunks = len(chunks)
-    logger.info(f"Dividido en {total_chunks} partes")
-
-    # -------------------------------------------------
-    # Helpers
-    # -------------------------------------------------
-    def call_grok(prompt: str, max_tokens: int = 3500) -> str:
-        try:
-            response = requests.post(
-                "https://api.x.ai/v1/chat/completions",
-                headers={
-                    "Authorization": f"Bearer {GROK_API_KEY}",
-                    "Content-Type": "application/json"
-                },
-                json={
-                    "model": "grok-3",
-                    "messages": [{"role": "user", "content": prompt}],
-                    "temperature": 0.12,
-                    "max_tokens": max_tokens
-                },
-                timeout=120
-            )
-            if response.status_code >= 400:
-                logger.error(f"Error Grok: {response.status_code} - {response.text[:300]}")
-                return ""
-            return response.json()["choices"][0]["message"]["content"]
-        except Exception as e:
-            logger.error(f"Exception Grok: {e}")
-            return ""
-
-    def clean_json_output(text: str) -> str:
-        if not text:
-            return ""
-        text = text.strip()
-        match = re.search(r"```(?:json)?\s*([\s\S]*?)```", text)
-        if match:
-            text = match.group(1).strip()
-        return text
-
-    def build_chunk_prompt(chunk: str) -> str:
-        return f"""
-Eres un experto en compactación de schemas de propiedades de HubSpot para agentes de voz (Retell AI).
-
-Tu misión es extraer la información mínima pero completa que un asistente telefónico necesita.
-
-### Reglas absolutas
-1. NUNCA elimines:
-   - name, label, type
-   - options de enums importantes (lifecyclestage, hs_lead_status, dealstage, pipeline, dealtype...)
-   - Todos los CUSTOM FIELDS
-   - Campos de identificación (id, hs_object_id)
-   - Campos de relación (associatedcompanyid, hubspot_owner_id)
-   - required y readOnly cuando estén disponibles
-
-2. SÍ elimina:
-   - Descripciones largas
-   - Listas enormes de opciones (idiomas, timezones, países...)
-   - Campos hs_* internos (excepto hs_lead_status y hs_object_id)
-   - Campos hidden o puramente analíticos
-
-3. Formato de salida (solo JSON):
-{{
-  "contacts": {{ "fields": [ {{ "name": "...", "label": "...", "type": "...", "required": false, "readOnly": false }} ] }},
-  "companies": {{ "fields": [...] }},
-  "deals": {{ "fields": [...] }},
-  "leads": {{ "fields": [...] }}
-}}
-
-### Fragmento:
----
-{chunk}
----
-"""
-
-    def build_consolidation_prompt(content: str, is_final: bool = False) -> str:
-        extra = ""
-        if is_final:
-            extra = """
-6. Si "leads" está vacío o muy incompleto, reconstruye los campos básicos de contacto 
-   (hs_object_id, firstname, lastname, email, phone, mobilephone, company, lifecyclestage, hs_lead_status, hubspot_owner_id).
-
-7. Incluye SIEMPRE esta sección de asociaciones:
-"associations": {
-  "contacts": ["companies", "deals"],
-  "companies": ["contacts", "deals"],
-  "deals": ["contacts", "companies"],
-  "leads": ["contacts", "companies"]
-}
-
-8. ELIMINA estos tipos de campos (bajo valor para un agente de voz):
-   - Todos los campos hs_num_* calculados
-   - Campos de email opt-out específicos (hs_email_optout_*)
-   - Campos de analytics y engagement internos
-   - fax, hs_reason_to_reach_out, y campos similares de poco uso telefónico
-
-9. NO mezcles campos entre objetos:
-   - annualrevenue, industry, numberofemployees → solo en companies
-   - amount, dealstage, closedate, closed_won_reason → solo en deals
-"""
-
-        return f"""
-Eres un experto en diseño de conocimiento para agentes de voz de HubSpot.
-
-Genera un resumen {"FINAL DEFINITIVO" if is_final else "intermedio"} limpio y profesional.
-
-### REGLAS
-1. Elimina TODAS las repeticiones.
-2. Unifica contacts, companies, deals y leads.
-3. Cada objeto debe tener al menos hs_object_id.
-4. Todos los campos deben tener "required" y "readOnly" (false si no se sabe).
-5. Conserva SIEMPRE los custom fields.
-{extra}
-Devuelve ÚNICAMENTE el JSON final, sin markdown ni explicaciones.
-
-RESUMEN A CONSOLIDAR:
-{content}
-"""
-
-    # -------------------------------------------------
-    # 4. Resumir por partes + mini-consolidaciones
-    # -------------------------------------------------
-    accumulated_summary = ""
-
-    for idx, chunk in enumerate(chunks, 1):
-        logger.info(f"Resumiendo parte {idx}/{total_chunks}...")
-
-        part_summary = call_grok(build_chunk_prompt(chunk))
-
-        if not part_summary:
-            logger.warning(f"  ⚠ Parte {idx} falló")
-            continue
-
-        if not accumulated_summary:
-            accumulated_summary = part_summary
-        else:
-            accumulated_summary += "\n\n--- NUEVA PARTE ---\n\n" + part_summary
-
-        logger.info(f"  ✓ Parte {idx}/{total_chunks} completada")
-
-        # Mini-consolidación cada 5 partes
-        if idx % 5 == 0 and idx < total_chunks:
-            logger.info(f"  → Mini-consolidación en parte {idx}...")
-            mini = call_grok(build_consolidation_prompt(accumulated_summary, is_final=False), max_tokens=4000)
-            if mini:
-                accumulated_summary = mini
-                logger.info(f"  ✓ Mini-consolidación completada")
-
-        time.sleep(1.1)
-
-    # -------------------------------------------------
-    # 5. Consolidación final (más tokens)
-    # -------------------------------------------------
-    logger.info("Realizando consolidación final...")
-
-    final_raw = call_grok(build_consolidation_prompt(accumulated_summary, is_final=True), max_tokens=7000)
-    if not final_raw:
-        final_raw = accumulated_summary
-
-    final_summary = clean_json_output(final_raw)
-
-    # -------------------------------------------------
-    # 6. Resultado (LOGS DIVIDIDOS PARA QUE NO SE CORTEN)
-    # -------------------------------------------------
-    final_chars = len(final_summary)
-    final_tokens = final_chars / 4
-
-    logger.info("\n" + "="*90)
-    logger.info("📄 RESUMEN FINAL CONSOLIDADO Y LIMPIO")
-    logger.info("="*90)
-
-    # Dividir en trozos de 3000 caracteres para evitar el corte de Render
-    chunk_size = 3000
-    for i in range(0, len(final_summary), chunk_size):
-        part_num = i // chunk_size + 1
-        logger.info(f"--- PARTE {part_num} DEL RESUMEN ---")
-        logger.info(final_summary[i:i + chunk_size])
-
-    logger.info("="*90)
-    logger.info(f"Tamaño final: {final_chars:,} caracteres ≈ {final_tokens:,.0f} tokens")
-    logger.info(f"Reducción total: de {total_chars:,} → {final_chars:,} caracteres")
-    logger.info("="*90)
-    logger.info(f"=== PROCESO COMPLETADO | consumer: {consumer_id} ===\n")
-
-    return {
-        "success": True,
-        "message": "Resumen profesional consolidado generado. Revisa los logs.",
-        "original_characters": total_chars,
-        "final_characters": final_chars,
-        "final_tokens_estimated": int(final_tokens),
-        "chunks_processed": total_chunks,
-        "summary": final_summary
-    }
-@app.get("/")
-async def root():
-    return {
-        "status": "ok",
-        "service": "dansu-retell-bot",
-        "google_configured": bool(GOOGLE_CLIENT_ID),
-        "apideck_configured": bool(APIDECK_API_KEY and APIDECK_APP_ID)
-    }
+    except Exception as e:
+        logger.error(f"❌ Error procesando el PDF: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error procesando el PDF: {str(e)}")

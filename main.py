@@ -1,13 +1,16 @@
 import os
 import io
 import logging
+import tempfile
 from datetime import datetime
 
 from fastapi import FastAPI, File, UploadFile, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from pypdf import PdfReader
 import psycopg2
 from psycopg2.extras import RealDictCursor
+import edge_tts
 
 # ====================== LOGGING ======================
 logging.basicConfig(
@@ -37,7 +40,6 @@ def get_connection():
 
 
 def init_db():
-    """Crea o actualiza la tabla"""
     conn = get_connection()
     cur = conn.cursor()
 
@@ -53,7 +55,7 @@ def init_db():
         );
     """)
 
-    # Añadir columna full_text si no existe (por si la tabla ya estaba creada)
+    # Asegurar columna full_text
     cur.execute("""
         DO $$ 
         BEGIN 
@@ -80,7 +82,7 @@ def startup():
         logger.error(f"❌ Error al inicializar DB: {e}")
 
 
-# ====================== ENDPOINTS ======================
+# ====================== ENDPOINTS DE DOCUMENTOS ======================
 
 @app.post("/api/upload")
 async def upload_pdf(
@@ -106,7 +108,7 @@ async def upload_pdf(
         size_bytes = len(contents)
         logger.info(f"📦 Tamaño: {size_bytes} bytes")
 
-        # ===== Extraer TODO el texto del PDF =====
+        # Extraer todo el texto
         pdf_file = io.BytesIO(contents)
         reader = PdfReader(pdf_file)
         num_pages = len(reader.pages)
@@ -115,14 +117,11 @@ async def upload_pdf(
         for i, page in enumerate(reader.pages):
             page_text = page.extract_text() or ""
             full_text_parts.append(page_text)
-            logger.info(f"   → Página {i+1}/{num_pages} extraída")
 
         full_text = "\n\n".join(full_text_parts).strip()
-        logger.info(f"📄 Texto completo extraído ({len(full_text)} caracteres)")
+        logger.info(f"📄 Texto completo extraído ({len(full_text)} caracteres) - {num_pages} páginas")
 
-        # ===== Guardar en base de datos =====
-        logger.info("💾 Guardando en la base de datos...")
-
+        # Guardar en base de datos
         conn = get_connection()
         cur = conn.cursor()
 
@@ -138,17 +137,6 @@ async def upload_pdf(
         logger.info("✅ Documento guardado correctamente")
         logger.info(f"   → ID: {saved['id']}")
         logger.info(f"   → Nombre: {saved['filename']}")
-        logger.info(f"   → Páginas: {saved['pages']}")
-        logger.info(f"   → Tamaño: {saved['size_bytes']} bytes")
-
-        # Verificación
-        cur.execute("SELECT id, filename FROM documents WHERE id = %s", (saved['id'],))
-        verified = cur.fetchone()
-
-        if verified and verified['filename'] == final_name:
-            logger.info("✅ Verificación exitosa")
-        else:
-            raise Exception("Falló la verificación")
 
         cur.close()
         conn.close()
@@ -159,11 +147,11 @@ async def upload_pdf(
         return {
             "status": "success",
             "document": {
-                "id": saved['id'],
-                "filename": saved['filename'],
-                "size_bytes": saved['size_bytes'],
-                "pages": saved['pages'],
-                "uploaded_at": str(saved['uploaded_at'])
+                "id": saved["id"],
+                "filename": saved["filename"],
+                "size_bytes": saved["size_bytes"],
+                "pages": saved["pages"],
+                "uploaded_at": str(saved["uploaded_at"])
             }
         }
 
@@ -171,13 +159,11 @@ async def upload_pdf(
         raise e
     except Exception as e:
         logger.error(f"❌ ERROR: {str(e)}")
-        logger.info("=" * 70)
         raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.get("/api/documents")
 async def list_documents():
-    """Devuelve todos los documentos ordenados de más nuevo a más antiguo"""
     try:
         conn = get_connection()
         cur = conn.cursor()
@@ -202,7 +188,6 @@ async def list_documents():
                 "size_bytes": row["size_bytes"]
             })
 
-        logger.info(f"📚 Listados {len(documents)} documentos")
         return {"documents": documents}
 
     except Exception as e:
@@ -212,7 +197,6 @@ async def list_documents():
 
 @app.get("/api/documents/{doc_id}")
 async def get_document(doc_id: int):
-    """Devuelve un documento concreto con su texto completo"""
     try:
         conn = get_connection()
         cur = conn.cursor()
@@ -230,8 +214,6 @@ async def get_document(doc_id: int):
         if not row:
             raise HTTPException(status_code=404, detail="Documento no encontrado")
 
-        logger.info(f"📖 Documento {doc_id} solicitado: {row['filename']}")
-
         return {
             "id": row["id"],
             "title": row["filename"],
@@ -244,13 +226,12 @@ async def get_document(doc_id: int):
     except HTTPException as e:
         raise e
     except Exception as e:
-        logger.error(f"Error obteniendo documento {doc_id}: {e}")
+        logger.error(f"Error obteniendo documento: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.delete("/api/documents/{doc_id}")
 async def delete_document(doc_id: int):
-    """Elimina un documento"""
     try:
         conn = get_connection()
         cur = conn.cursor()
@@ -272,3 +253,48 @@ async def delete_document(doc_id: int):
     except Exception as e:
         logger.error(f"Error eliminando documento: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# ====================== NUEVO ENDPOINT: TEXT-TO-SPEECH ======================
+
+@app.post("/api/tts")
+async def text_to_speech(
+    text: str = Form(...),
+    voice: str = Form("es-ES-AlvaroNeural")
+):
+    """
+    Recibe texto y devuelve el audio en MP3 usando Microsoft Edge TTS.
+    """
+    logger.info("🔊 Petición TTS recibida")
+    logger.info(f"   → Voz: {voice}")
+    logger.info(f"   → Texto ({len(text)} caracteres): {text[:80]}...")
+
+    if not text.strip():
+        raise HTTPException(status_code=400, detail="El texto no puede estar vacío")
+
+    try:
+        # Generar audio con edge-tts
+        communicate = edge_tts.Communicate(text=text.strip(), voice=voice)
+        
+        # Guardar temporalmente en memoria
+        audio_buffer = io.BytesIO()
+        
+        async for chunk in communicate.stream():
+            if chunk["type"] == "audio":
+                audio_buffer.write(chunk["data"])
+
+        audio_buffer.seek(0)
+        
+        logger.info("✅ Audio generado correctamente")
+
+        return StreamingResponse(
+            audio_buffer,
+            media_type="audio/mpeg",
+            headers={
+                "Content-Disposition": "inline; filename=speech.mp3"
+            }
+        )
+
+    except Exception as e:
+        logger.error(f"❌ Error generando TTS: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error generando audio: {str(e)}")

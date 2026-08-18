@@ -37,7 +37,6 @@ def get_connection():
 
 
 def init_db():
-    """Crea o actualiza la tabla"""
     conn = get_connection()
     cur = conn.cursor()
 
@@ -53,7 +52,7 @@ def init_db():
         );
     """)
 
-    # Añadir columna full_text si no existe (por si la tabla ya estaba creada)
+    # Asegurar que existe la columna full_text
     cur.execute("""
         DO $$ 
         BEGIN 
@@ -83,7 +82,7 @@ def startup():
 # ====================== ENDPOINTS ======================
 
 @app.post("/api/upload")
-async def upload_pdf(
+async def upload_file(
     file: UploadFile = File(...),
     name: str = Form(...)
 ):
@@ -91,9 +90,17 @@ async def upload_pdf(
     logger.info("🚀 INICIO DE SUBIDA DE DOCUMENTO")
 
     try:
-        if file.content_type != "application/pdf":
-            logger.error("❌ El archivo no es un PDF")
-            raise HTTPException(status_code=400, detail="Solo se permiten archivos PDF")
+        # Validar tipo de archivo
+        allowed_types = ["application/pdf", "text/plain"]
+        is_pdf = file.content_type == "application/pdf"
+        is_txt = file.content_type == "text/plain" or (file.filename and file.filename.lower().endswith(".txt"))
+
+        if not (is_pdf or is_txt):
+            logger.error(f"❌ Tipo de archivo no permitido: {file.content_type}")
+            raise HTTPException(
+                status_code=400, 
+                detail="Solo se permiten archivos PDF o TXT"
+            )
 
         final_name = name.strip()
         if not final_name:
@@ -101,24 +108,43 @@ async def upload_pdf(
 
         logger.info(f"📥 Archivo recibido: {file.filename}")
         logger.info(f"📝 Nombre asignado: {final_name}")
+        logger.info(f"📄 Tipo: {'PDF' if is_pdf else 'TXT'}")
 
         contents = await file.read()
         size_bytes = len(contents)
         logger.info(f"📦 Tamaño: {size_bytes} bytes")
 
-        # ===== Extraer TODO el texto del PDF =====
-        pdf_file = io.BytesIO(contents)
-        reader = PdfReader(pdf_file)
-        num_pages = len(reader.pages)
+        full_text = ""
+        num_pages = 1
 
-        full_text_parts = []
-        for i, page in enumerate(reader.pages):
-            page_text = page.extract_text() or ""
-            full_text_parts.append(page_text)
-            logger.info(f"   → Página {i+1}/{num_pages} extraída")
+        if is_pdf:
+            # ===== Procesar PDF =====
+            pdf_file = io.BytesIO(contents)
+            reader = PdfReader(pdf_file)
+            num_pages = len(reader.pages)
 
-        full_text = "\n\n".join(full_text_parts).strip()
+            full_text_parts = []
+            for i, page in enumerate(reader.pages):
+                page_text = page.extract_text() or ""
+                full_text_parts.append(page_text)
+                logger.info(f"   → Página {i+1}/{num_pages} extraída")
+
+            full_text = "\n\n".join(full_text_parts).strip()
+
+        else:
+            # ===== Procesar TXT =====
+            try:
+                full_text = contents.decode("utf-8")
+            except UnicodeDecodeError:
+                # Intentar con latin-1 si utf-8 falla
+                full_text = contents.decode("latin-1")
+            
+            # Estimar páginas (aprox. 3000 caracteres por página)
+            num_pages = max(1, len(full_text) // 3000)
+            logger.info("   → Texto TXT extraído correctamente")
+
         logger.info(f"📄 Texto completo extraído ({len(full_text)} caracteres)")
+        logger.info(f"📄 Páginas estimadas: {num_pages}")
 
         # ===== Guardar en base de datos =====
         logger.info("💾 Guardando en la base de datos...")
@@ -177,7 +203,6 @@ async def upload_pdf(
 
 @app.get("/api/documents")
 async def list_documents():
-    """Devuelve todos los documentos ordenados de más nuevo a más antiguo"""
     try:
         conn = get_connection()
         cur = conn.cursor()
@@ -212,7 +237,6 @@ async def list_documents():
 
 @app.get("/api/documents/{doc_id}")
 async def get_document(doc_id: int):
-    """Devuelve un documento concreto con su texto completo"""
     try:
         conn = get_connection()
         cur = conn.cursor()
@@ -250,7 +274,6 @@ async def get_document(doc_id: int):
 
 @app.delete("/api/documents/{doc_id}")
 async def delete_document(doc_id: int):
-    """Elimina un documento"""
     try:
         conn = get_connection()
         cur = conn.cursor()

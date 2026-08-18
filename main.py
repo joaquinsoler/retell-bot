@@ -1,16 +1,19 @@
 import os
 import io
+import json
 import logging
-import tempfile
 from datetime import datetime
 
-from fastapi import FastAPI, File, UploadFile, Form, HTTPException
+from fastapi import FastAPI, File, UploadFile, Form, HTTPException, Body
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
+from pydantic import BaseModel
+from typing import List, Optional
 from pypdf import PdfReader
 import psycopg2
 from psycopg2.extras import RealDictCursor
 import edge_tts
+import httpx
 
 # ====================== LOGGING ======================
 logging.basicConfig(
@@ -30,9 +33,13 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ====================== BASE DE DATOS ======================
+# ====================== CONFIG ======================
 DATABASE_URL = os.getenv("DATABASE_URL")
+GROK_API_KEY = os.getenv("GROK_API_KEY")
+GROK_API_URL = "https://api.x.ai/v1/chat/completions"
+GROK_MODEL = "grok-4.6"
 
+# ====================== BASE DE DATOS ======================
 def get_connection():
     if not DATABASE_URL:
         raise Exception("No se encontró la variable de entorno DATABASE_URL")
@@ -55,7 +62,6 @@ def init_db():
         );
     """)
 
-    # Asegurar columna full_text
     cur.execute("""
         DO $$ 
         BEGIN 
@@ -82,46 +88,45 @@ def startup():
         logger.error(f"❌ Error al inicializar DB: {e}")
 
 
-# ====================== ENDPOINTS DE DOCUMENTOS ======================
+# ====================== MODELOS ======================
+class ChatMessage(BaseModel):
+    role: str          # "user" o "assistant"
+    content: str
+
+class ChatRequest(BaseModel):
+    question: str
+    full_text: str
+    history: Optional[List[ChatMessage]] = []
+
+
+# ====================== ENDPOINTS DOCUMENTOS ======================
 
 @app.post("/api/upload")
-async def upload_pdf(
-    file: UploadFile = File(...),
-    name: str = Form(...)
-):
+async def upload_pdf(file: UploadFile = File(...), name: str = Form(...)):
     logger.info("=" * 70)
     logger.info("🚀 INICIO DE SUBIDA DE DOCUMENTO")
 
     try:
         if file.content_type != "application/pdf":
-            logger.error("❌ El archivo no es un PDF")
             raise HTTPException(status_code=400, detail="Solo se permiten archivos PDF")
 
         final_name = name.strip()
         if not final_name:
             raise HTTPException(status_code=400, detail="El nombre no puede estar vacío")
 
-        logger.info(f"📥 Archivo recibido: {file.filename}")
-        logger.info(f"📝 Nombre asignado: {final_name}")
-
         contents = await file.read()
         size_bytes = len(contents)
-        logger.info(f"📦 Tamaño: {size_bytes} bytes")
 
-        # Extraer todo el texto
         pdf_file = io.BytesIO(contents)
         reader = PdfReader(pdf_file)
         num_pages = len(reader.pages)
 
         full_text_parts = []
-        for i, page in enumerate(reader.pages):
-            page_text = page.extract_text() or ""
-            full_text_parts.append(page_text)
+        for page in reader.pages:
+            full_text_parts.append(page.extract_text() or "")
 
         full_text = "\n\n".join(full_text_parts).strip()
-        logger.info(f"📄 Texto completo extraído ({len(full_text)} caracteres) - {num_pages} páginas")
 
-        # Guardar en base de datos
         conn = get_connection()
         cur = conn.cursor()
 
@@ -133,15 +138,10 @@ async def upload_pdf(
 
         saved = cur.fetchone()
         conn.commit()
-
-        logger.info("✅ Documento guardado correctamente")
-        logger.info(f"   → ID: {saved['id']}")
-        logger.info(f"   → Nombre: {saved['filename']}")
-
         cur.close()
         conn.close()
 
-        logger.info("🎉 PROCESO COMPLETADO CON ÉXITO")
+        logger.info(f"✅ Documento guardado: {saved['filename']} (ID {saved['id']})")
         logger.info("=" * 70)
 
         return {
@@ -167,31 +167,25 @@ async def list_documents():
     try:
         conn = get_connection()
         cur = conn.cursor()
-
         cur.execute("""
             SELECT id, filename, size_bytes, pages, uploaded_at
             FROM documents
             ORDER BY uploaded_at DESC;
         """)
-
         rows = cur.fetchall()
         cur.close()
         conn.close()
 
-        documents = []
-        for row in rows:
-            documents.append({
-                "id": row["id"],
-                "title": row["filename"],
-                "date": row["uploaded_at"].strftime("%d %b %Y") if row["uploaded_at"] else "",
-                "pages": row["pages"],
-                "size_bytes": row["size_bytes"]
-            })
+        documents = [{
+            "id": row["id"],
+            "title": row["filename"],
+            "date": row["uploaded_at"].strftime("%d %b %Y") if row["uploaded_at"] else "",
+            "pages": row["pages"],
+            "size_bytes": row["size_bytes"]
+        } for row in rows]
 
         return {"documents": documents}
-
     except Exception as e:
-        logger.error(f"Error listando documentos: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -200,13 +194,10 @@ async def get_document(doc_id: int):
     try:
         conn = get_connection()
         cur = conn.cursor()
-
         cur.execute("""
             SELECT id, filename, full_text, size_bytes, pages, uploaded_at
-            FROM documents
-            WHERE id = %s;
+            FROM documents WHERE id = %s;
         """, (doc_id,))
-
         row = cur.fetchone()
         cur.close()
         conn.close()
@@ -222,11 +213,9 @@ async def get_document(doc_id: int):
             "size_bytes": row["size_bytes"],
             "uploaded_at": str(row["uploaded_at"])
         }
-
     except HTTPException as e:
         raise e
     except Exception as e:
-        logger.error(f"Error obteniendo documento: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -235,7 +224,6 @@ async def delete_document(doc_id: int):
     try:
         conn = get_connection()
         cur = conn.cursor()
-
         cur.execute("DELETE FROM documents WHERE id = %s RETURNING id, filename;", (doc_id,))
         deleted = cur.fetchone()
         conn.commit()
@@ -245,56 +233,117 @@ async def delete_document(doc_id: int):
         if not deleted:
             raise HTTPException(status_code=404, detail="Documento no encontrado")
 
-        logger.info(f"🗑️ Documento eliminado: {deleted['filename']} (ID {doc_id})")
         return {"status": "success", "message": "Documento eliminado"}
-
     except HTTPException as e:
         raise e
     except Exception as e:
-        logger.error(f"Error eliminando documento: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
-# ====================== NUEVO ENDPOINT: TEXT-TO-SPEECH ======================
+# ====================== TEXT-TO-SPEECH ======================
 
 @app.post("/api/tts")
 async def text_to_speech(
     text: str = Form(...),
     voice: str = Form("es-ES-AlvaroNeural")
 ):
-    """
-    Recibe texto y devuelve el audio en MP3 usando Microsoft Edge TTS.
-    """
-    logger.info("🔊 Petición TTS recibida")
-    logger.info(f"   → Voz: {voice}")
-    logger.info(f"   → Texto ({len(text)} caracteres): {text[:80]}...")
+    logger.info(f"🔊 TTS: {text[:60]}...")
 
     if not text.strip():
         raise HTTPException(status_code=400, detail="El texto no puede estar vacío")
 
     try:
-        # Generar audio con edge-tts
         communicate = edge_tts.Communicate(text=text.strip(), voice=voice)
-        
-        # Guardar temporalmente en memoria
         audio_buffer = io.BytesIO()
-        
+
         async for chunk in communicate.stream():
             if chunk["type"] == "audio":
                 audio_buffer.write(chunk["data"])
 
         audio_buffer.seek(0)
-        
-        logger.info("✅ Audio generado correctamente")
 
         return StreamingResponse(
             audio_buffer,
             media_type="audio/mpeg",
-            headers={
-                "Content-Disposition": "inline; filename=speech.mp3"
-            }
+            headers={"Content-Disposition": "inline; filename=speech.mp3"}
         )
-
     except Exception as e:
-        logger.error(f"❌ Error generando TTS: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Error generando audio: {str(e)}")
+        logger.error(f"❌ Error TTS: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ====================== CHAT CON GROK ======================
+
+@app.post("/api/chat")
+async def chat_with_grok(request: ChatRequest):
+    """
+    Envía la pregunta + texto completo del documento + historial completo a Grok.
+    """
+    if not GROK_API_KEY:
+        raise HTTPException(status_code=500, detail="GROK_API_KEY no configurada")
+
+    logger.info("🤖 Nueva consulta a Grok")
+    logger.info(f"   Pregunta: {request.question[:80]}...")
+
+    try:
+        # Construir los mensajes
+        messages = [
+            {
+                "role": "system",
+                "content": (
+                    "Eres un profesor experto, claro y paciente. "
+                    "El estudiante está leyendo el siguiente documento y tiene dudas. "
+                    "Responde de forma clara, concisa y didáctica, basándote siempre en el contenido del documento.\n\n"
+                    "=== DOCUMENTO COMPLETO ===\n"
+                    f"{request.full_text}\n"
+                    "=== FIN DEL DOCUMENTO ==="
+                )
+            }
+        ]
+
+        # Añadir todo el historial de la conversación
+        for msg in request.history:
+            messages.append({
+                "role": msg.role,
+                "content": msg.content
+            })
+
+        # Añadir la nueva pregunta
+        messages.append({
+            "role": "user",
+            "content": request.question
+        })
+
+        # Llamada a la API de Grok
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            response = await client.post(
+                GROK_API_URL,
+                headers={
+                    "Authorization": f"Bearer {GROK_API_KEY}",
+                    "Content-Type": "application/json"
+                },
+                json={
+                    "model": GROK_MODEL,
+                    "messages": messages,
+                    "temperature": 0.5
+                }
+            )
+
+        if response.status_code != 200:
+            logger.error(f"Error Grok API: {response.status_code} - {response.text}")
+            raise HTTPException(status_code=500, detail="Error al contactar con Grok")
+
+        data = response.json()
+        answer = data["choices"][0]["message"]["content"]
+
+        logger.info("✅ Respuesta de Grok recibida")
+
+        return {
+            "answer": answer
+        }
+
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        logger.error(f"❌ Error en chat: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))

@@ -16,7 +16,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-app = FastAPI()
+app = FastAPI(title="lucsi API")
 
 # CORS
 app.add_middleware(
@@ -37,125 +37,118 @@ def get_connection():
 
 
 def init_db():
-    """Crea la tabla si no existe"""
-    try:
-        conn = get_connection()
-        cur = conn.cursor()
-        
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS documents (
-                id SERIAL PRIMARY KEY,
-                filename TEXT NOT NULL,
-                content BYTEA NOT NULL,
-                size_bytes INTEGER,
-                pages INTEGER,
-                first_paragraph TEXT,
-                uploaded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            );
-        """)
-        
-        conn.commit()
-        cur.close()
-        conn.close()
-        logger.info("✅ Tabla 'documents' verificada/creada correctamente")
-    except Exception as e:
-        logger.error(f"❌ Error al inicializar la base de datos: {e}")
+    """Crea o actualiza la tabla"""
+    conn = get_connection()
+    cur = conn.cursor()
+
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS documents (
+            id SERIAL PRIMARY KEY,
+            filename TEXT NOT NULL,
+            content BYTEA NOT NULL,
+            full_text TEXT,
+            size_bytes INTEGER,
+            pages INTEGER,
+            uploaded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+    """)
+
+    # Añadir columna full_text si no existe (por si la tabla ya estaba creada)
+    cur.execute("""
+        DO $$ 
+        BEGIN 
+            IF NOT EXISTS (
+                SELECT 1 FROM information_schema.columns 
+                WHERE table_name='documents' AND column_name='full_text'
+            ) THEN
+                ALTER TABLE documents ADD COLUMN full_text TEXT;
+            END IF;
+        END $$;
+    """)
+
+    conn.commit()
+    cur.close()
+    conn.close()
+    logger.info("✅ Tabla 'documents' lista")
 
 
 @app.on_event("startup")
 def startup():
-    init_db()
+    try:
+        init_db()
+    except Exception as e:
+        logger.error(f"❌ Error al inicializar DB: {e}")
 
 
-# ====================== ENDPOINT DE SUBIDA ======================
+# ====================== ENDPOINTS ======================
 
 @app.post("/api/upload")
 async def upload_pdf(
     file: UploadFile = File(...),
-    name: str = Form(...)          # ← Nombre personalizado que envía el frontend
+    name: str = Form(...)
 ):
     logger.info("=" * 70)
     logger.info("🚀 INICIO DE SUBIDA DE DOCUMENTO")
 
     try:
-        # 1. Validar que sea PDF
         if file.content_type != "application/pdf":
             logger.error("❌ El archivo no es un PDF")
             raise HTTPException(status_code=400, detail="Solo se permiten archivos PDF")
 
-        logger.info(f"📥 Archivo recibido: {file.filename}")
-        logger.info(f"📝 Nombre personalizado asignado: {name}")
+        final_name = name.strip()
+        if not final_name:
+            raise HTTPException(status_code=400, detail="El nombre no puede estar vacío")
 
-        # 2. Leer contenido
+        logger.info(f"📥 Archivo recibido: {file.filename}")
+        logger.info(f"📝 Nombre asignado: {final_name}")
+
         contents = await file.read()
         size_bytes = len(contents)
-        logger.info(f"📦 Tamaño del archivo: {size_bytes} bytes")
+        logger.info(f"📦 Tamaño: {size_bytes} bytes")
 
-        # 3. Extraer información del PDF
+        # ===== Extraer TODO el texto del PDF =====
         pdf_file = io.BytesIO(contents)
         reader = PdfReader(pdf_file)
         num_pages = len(reader.pages)
 
-        first_page_text = ""
-        if num_pages > 0:
-            first_page_text = reader.pages[0].extract_text() or ""
+        full_text_parts = []
+        for i, page in enumerate(reader.pages):
+            page_text = page.extract_text() or ""
+            full_text_parts.append(page_text)
+            logger.info(f"   → Página {i+1}/{num_pages} extraída")
 
-        # Primer párrafo
-        paragraphs = [p.strip() for p in first_page_text.split("\n\n") if p.strip()]
-        if paragraphs:
-            first_paragraph = paragraphs[0]
-        else:
-            lines = [line.strip() for line in first_page_text.split("\n") if line.strip()]
-            first_paragraph = " ".join(lines[:5]) if lines else "No se pudo extraer texto"
+        full_text = "\n\n".join(full_text_parts).strip()
+        logger.info(f"📄 Texto completo extraído ({len(full_text)} caracteres)")
 
-        logger.info(f"📄 Páginas detectadas: {num_pages}")
-        logger.info(f"📝 Primer párrafo extraído correctamente")
-
-        # 4. Guardar en la base de datos con el nombre personalizado
-        logger.info("💾 Guardando documento en la base de datos...")
+        # ===== Guardar en base de datos =====
+        logger.info("💾 Guardando en la base de datos...")
 
         conn = get_connection()
         cur = conn.cursor()
 
         cur.execute("""
-            INSERT INTO documents (filename, content, size_bytes, pages, first_paragraph)
+            INSERT INTO documents (filename, content, full_text, size_bytes, pages)
             VALUES (%s, %s, %s, %s, %s)
             RETURNING id, filename, size_bytes, pages, uploaded_at;
-        """, (
-            name.strip(),          # ← Usamos el nombre que envió el usuario
-            contents,
-            size_bytes,
-            num_pages,
-            first_paragraph
-        ))
+        """, (final_name, contents, full_text, size_bytes, num_pages))
 
-        saved_doc = cur.fetchone()
+        saved = cur.fetchone()
         conn.commit()
 
-        logger.info("✅ Documento guardado correctamente en la base de datos")
-        logger.info(f"   → ID: {saved_doc['id']}")
-        logger.info(f"   → Nombre guardado: {saved_doc['filename']}")
-        logger.info(f"   → Tamaño: {saved_doc['size_bytes']} bytes")
-        logger.info(f"   → Páginas: {saved_doc['pages']}")
-        logger.info(f"   → Fecha: {saved_doc['uploaded_at']}")
+        logger.info("✅ Documento guardado correctamente")
+        logger.info(f"   → ID: {saved['id']}")
+        logger.info(f"   → Nombre: {saved['filename']}")
+        logger.info(f"   → Páginas: {saved['pages']}")
+        logger.info(f"   → Tamaño: {saved['size_bytes']} bytes")
 
-        # 5. Verificación
-        logger.info("🔍 Verificando que se guardó correctamente...")
-
-        cur.execute("""
-            SELECT id, filename, size_bytes, pages, first_paragraph, uploaded_at
-            FROM documents
-            WHERE id = %s;
-        """, (saved_doc['id'],))
-
+        # Verificación
+        cur.execute("SELECT id, filename FROM documents WHERE id = %s", (saved['id'],))
         verified = cur.fetchone()
 
-        if verified and verified['filename'] == name.strip():
-            logger.info("✅ VERIFICACIÓN EXITOSA")
-            logger.info(f"   → El documento se recuperó con el nombre correcto: {verified['filename']}")
+        if verified and verified['filename'] == final_name:
+            logger.info("✅ Verificación exitosa")
         else:
-            logger.error("❌ Error en la verificación del nombre")
-            raise Exception("El nombre no se guardó correctamente")
+            raise Exception("Falló la verificación")
 
         cur.close()
         conn.close()
@@ -165,20 +158,117 @@ async def upload_pdf(
 
         return {
             "status": "success",
-            "message": "Documento guardado correctamente",
             "document": {
-                "id": verified['id'],
-                "filename": verified['filename'],
-                "size_bytes": verified['size_bytes'],
-                "pages": verified['pages'],
-                "first_paragraph": verified['first_paragraph'],
-                "uploaded_at": str(verified['uploaded_at'])
+                "id": saved['id'],
+                "filename": saved['filename'],
+                "size_bytes": saved['size_bytes'],
+                "pages": saved['pages'],
+                "uploaded_at": str(saved['uploaded_at'])
             }
         }
 
-    except HTTPException as http_exc:
-        raise http_exc
+    except HTTPException as e:
+        raise e
     except Exception as e:
-        logger.error(f"❌ ERROR GENERAL: {str(e)}")
+        logger.error(f"❌ ERROR: {str(e)}")
         logger.info("=" * 70)
-        raise HTTPException(status_code=500, detail=f"Error procesando el documento: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/documents")
+async def list_documents():
+    """Devuelve todos los documentos ordenados de más nuevo a más antiguo"""
+    try:
+        conn = get_connection()
+        cur = conn.cursor()
+
+        cur.execute("""
+            SELECT id, filename, size_bytes, pages, uploaded_at
+            FROM documents
+            ORDER BY uploaded_at DESC;
+        """)
+
+        rows = cur.fetchall()
+        cur.close()
+        conn.close()
+
+        documents = []
+        for row in rows:
+            documents.append({
+                "id": row["id"],
+                "title": row["filename"],
+                "date": row["uploaded_at"].strftime("%d %b %Y") if row["uploaded_at"] else "",
+                "pages": row["pages"],
+                "size_bytes": row["size_bytes"]
+            })
+
+        logger.info(f"📚 Listados {len(documents)} documentos")
+        return {"documents": documents}
+
+    except Exception as e:
+        logger.error(f"Error listando documentos: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/documents/{doc_id}")
+async def get_document(doc_id: int):
+    """Devuelve un documento concreto con su texto completo"""
+    try:
+        conn = get_connection()
+        cur = conn.cursor()
+
+        cur.execute("""
+            SELECT id, filename, full_text, size_bytes, pages, uploaded_at
+            FROM documents
+            WHERE id = %s;
+        """, (doc_id,))
+
+        row = cur.fetchone()
+        cur.close()
+        conn.close()
+
+        if not row:
+            raise HTTPException(status_code=404, detail="Documento no encontrado")
+
+        logger.info(f"📖 Documento {doc_id} solicitado: {row['filename']}")
+
+        return {
+            "id": row["id"],
+            "title": row["filename"],
+            "full_text": row["full_text"] or "",
+            "pages": row["pages"],
+            "size_bytes": row["size_bytes"],
+            "uploaded_at": str(row["uploaded_at"])
+        }
+
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        logger.error(f"Error obteniendo documento {doc_id}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.delete("/api/documents/{doc_id}")
+async def delete_document(doc_id: int):
+    """Elimina un documento"""
+    try:
+        conn = get_connection()
+        cur = conn.cursor()
+
+        cur.execute("DELETE FROM documents WHERE id = %s RETURNING id, filename;", (doc_id,))
+        deleted = cur.fetchone()
+        conn.commit()
+        cur.close()
+        conn.close()
+
+        if not deleted:
+            raise HTTPException(status_code=404, detail="Documento no encontrado")
+
+        logger.info(f"🗑️ Documento eliminado: {deleted['filename']} (ID {doc_id})")
+        return {"status": "success", "message": "Documento eliminado"}
+
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        logger.error(f"Error eliminando documento: {e}")
+        raise HTTPException(status_code=500, detail=str(e))

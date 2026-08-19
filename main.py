@@ -405,37 +405,36 @@ async def process_exercise_document(document_id: int = Form(...)):
         full_text = doc["full_text"] or ""
 
         system_prompt = """
-Eres un experto en educación. Tu ÚNICA tarea es extraer SOLO ejercicios reales y bien formados.
+Eres un experto en educación. Tu ÚNICA tarea es extraer SOLO enunciados completos y reales de ejercicios.
 
 REGLAS MUY ESTRICTAS:
-1. Solo extrae enunciados que sean claramente ejercicios o problemas para resolver (preguntas, cálculos, demostraciones, etc.).
+1. Un enunciado válido debe ser un problema o pregunta completa que el alumno tenga que resolver (cálculo, demostración, explicación, etc.).
 2. IGNORA completamente:
-   - Títulos de temas
-   - Introducciones
-   - Explicaciones teóricas
+   - Títulos de temas o apartados
+   - Introducciones y explicaciones teóricas
    - Definiciones
-   - Texto de relleno
-   - Instrucciones generales
-3. Si no hay ningún ejercicio claro → responde EXACTAMENTE:
+   - Instrucciones generales (“Resuelve los siguientes ejercicios…”)
+   - Fragmentos que solo parecen ejercicios cuando se leen aislados pero en contexto más amplio no lo son
+3. Analiza siempre el contexto amplio (varias líneas antes y después) para decidir si algo es realmente un enunciado completo.
+4. Si no hay ningún ejercicio claro → responde EXACTAMENTE:
    {"error": "no_exercises_found"}
-4. Si el contenido no es educativo → responde EXACTAMENTE:
+5. Si el contenido no es educativo → responde EXACTAMENTE:
    {"error": "invalid_content"}
-5. Si hay ejercicios válidos, responde SOLO con este JSON:
+6. Si hay ejercicios válidos, responde SOLO con este JSON (sin texto adicional):
 {
   "exercises": [
-    {"number": 1, "statement": "enunciado completo y limpio del ejercicio"},
-    {"number": 2, "statement": "enunciado completo y limpio del ejercicio"}
+    {"number": 1, "statement": "enunciado completo y limpio"},
+    {"number": 2, "statement": "enunciado completo y limpio"}
   ]
 }
-No añadas ninguna explicación fuera del JSON.
 """
 
         messages = [
             {"role": "system", "content": system_prompt},
-            {"role": "user", "content": f"Extrae únicamente los ejercicios reales de este texto:\n\n{full_text}"}
+            {"role": "user", "content": f"Analiza el siguiente texto con contexto amplio y extrae únicamente los enunciados de ejercicios reales y completos:\n\n{full_text}"}
         ]
 
-        response_text = await call_grok(messages, temperature=0.15)
+        response_text = await call_grok(messages, temperature=0.1)
 
         try:
             data = json.loads(response_text.strip())
@@ -462,124 +461,7 @@ No añadas ninguna explicación fuera del JSON.
         conn.close()
 
         logger.info(f"✅ {len(exercises)} ejercicios reales guardados")
-
-        return {
-            "status": "success",
-            "count": len(exercises),
-            "exercises": exercises
-        }
-
-    except HTTPException as e:
-        raise e
-    except Exception as e:
-        logger.error(f"❌ Error: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.post("/api/exercises/generate")
-async def generate_exercises(request: GenerateExercisesRequest):
-    logger.info("🧠 Generando nuevos ejercicios")
-
-    if not request.source_document_id and not request.reference_document_id:
-        raise HTTPException(
-            status_code=400,
-            detail="Debes seleccionar al menos un texto de referencia o un archivo de ejercicios de referencia"
-        )
-
-    try:
-        conn = get_connection()
-        cur = conn.cursor()
-
-        source_text = ""
-        reference_text = ""
-
-        if request.source_document_id:
-            cur.execute("SELECT full_text, doc_type, pages FROM documents WHERE id = %s", (request.source_document_id,))
-            source = cur.fetchone()
-            if not source or source["doc_type"] != "text":
-                raise HTTPException(status_code=400, detail="El documento fuente debe ser de tipo text")
-            source_text = source["full_text"] or ""
-
-        if request.reference_document_id:
-            cur.execute("SELECT full_text, doc_type, pages FROM documents WHERE id = %s", (request.reference_document_id,))
-            ref = cur.fetchone()
-            if not ref or ref["doc_type"] != "exercise":
-                raise HTTPException(status_code=400, detail="El documento de referencia debe ser de tipo exercise")
-            if ref["pages"] and ref["pages"] > MAX_PAGES_EXERCISES:
-                raise HTTPException(status_code=400, detail=f"Máximo {MAX_PAGES_EXERCISES} páginas en la referencia")
-            reference_text = ref["full_text"] or ""
-
-        system_prompt = """
-Eres un profesor experto. Genera ejercicios educativos de calidad.
-
-REGLAS ESTRICTAS:
-1. Solo generas ejercicios reales y bien formulados.
-2. Si el contenido no es adecuado → responde EXACTAMENTE:
-   {"error": "invalid_content"}
-3. Responde SOLO con este JSON:
-{
-  "exercises": [
-    {"number": 1, "statement": "enunciado claro y completo"},
-    {"number": 2, "statement": "enunciado claro y completo"}
-  ]
-}
-Genera entre 4 y 8 ejercicios de dificultad progresiva.
-No añadas ninguna explicación fuera del JSON.
-"""
-
-        user_content = ""
-        if source_text:
-            user_content += f"Texto base:\n\n{source_text}\n\n"
-        if reference_text:
-            user_content += f"Ejercicios de referencia (estilo a seguir):\n\n{reference_text}"
-
-        messages = [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_content}
-        ]
-
-        response_text = await call_grok(messages, temperature=0.4)
-
-        try:
-            data = json.loads(response_text.strip())
-        except:
-            raise HTTPException(status_code=422, detail="invalid_content")
-
-        if "error" in data:
-            raise HTTPException(status_code=422, detail=data["error"])
-
-        exercises = data.get("exercises", [])
-        if not exercises:
-            raise HTTPException(status_code=422, detail="no_exercises_found")
-
-        new_name = f"Ejercicios generados - {datetime.now().strftime('%d/%m/%Y %H:%M')}"
-
-        cur.execute("""
-            INSERT INTO documents (filename, content, full_text, size_bytes, pages, doc_type)
-            VALUES (%s, %s, %s, %s, %s, 'exercise')
-            RETURNING id;
-        """, (new_name, b"", "\n\n".join([e["statement"] for e in exercises]), 0, 1))
-
-        new_doc_id = cur.fetchone()["id"]
-
-        for ex in exercises:
-            cur.execute("""
-                INSERT INTO exercises (document_id, exercise_number, statement)
-                VALUES (%s, %s, %s)
-            """, (new_doc_id, ex["number"], ex["statement"]))
-
-        conn.commit()
-        cur.close()
-        conn.close()
-
-        logger.info(f"✅ {len(exercises)} ejercicios generados → documento {new_doc_id}")
-
-        return {
-            "status": "success",
-            "document_id": new_doc_id,
-            "count": len(exercises),
-            "exercises": exercises
-        }
+        return {"status": "success", "count": len(exercises), "exercises": exercises}
 
     except HTTPException as e:
         raise e
@@ -680,14 +562,17 @@ async def chat_with_grok(request: ChatRequest):
 
         if mode == "step":
             system_content = (
-                "Eres un profesor paciente y claro. Estás resolviendo un ejercicio paso a paso.\n\n"
-                "REGLAS IMPORTANTES:\n"
-                "1. Da SOLO un paso cada vez.\n"
-                "2. Después de cada paso pregunta exactamente: "
-                "\"¿Tienes alguna duda sobre este paso o quieres que pase al siguiente?\"\n"
-                "3. Cuando hayas terminado toda la resolución di claramente: "
-                "\"He terminado la resolución del ejercicio.\"\n"
-                "4. Sé didáctico y claro.\n\n"
+                "Eres un profesor paciente, claro y didáctico. Estás resolviendo un ejercicio paso a paso.\n\n"
+                "REGLAS OBLIGATORIAS:\n"
+                "1. NUNCA empieces con 'Lee el enunciado' ni nada similar. El alumno ya lo tiene delante.\n"
+                "2. Empieza siempre con una explicación intuitiva y sencilla del enfoque, y después ve detallando la técnica.\n"
+                "3. Da SOLO un paso cada vez.\n"
+                "4. Después de cada paso pregunta exactamente:\n"
+                "   \"¿Tienes alguna duda sobre este paso o quieres que continúe la explicación?\"\n"
+                "5. Cuando hayas terminado toda la resolución di claramente:\n"
+                "   \"He terminado la resolución del ejercicio.\"\n"
+                "6. Usa texto limpio. No uses markdown de negrita (**texto**), ni guiones innecesarios, ni caracteres especiales que puedan verse mal.\n"
+                "7. Sé natural y conversacional.\n\n"
                 "=== EJERCICIO ===\n"
                 f"{request.full_text}\n"
                 "=== FIN ==="
@@ -695,8 +580,9 @@ async def chat_with_grok(request: ChatRequest):
         elif mode == "solution":
             system_content = (
                 "Eres un profesor que corrige la solución de un alumno.\n"
-                "Explica los errores y aciertos paso a paso.\n"
-                "Después de cada observación pregunta si quiere continuar.\n\n"
+                "Explica los errores y aciertos de forma clara y didáctica.\n"
+                "Después de cada observación pregunta si quiere continuar.\n"
+                "Usa texto limpio, sin markdown de negrita ni guiones innecesarios.\n\n"
                 "=== EJERCICIO ===\n"
                 f"{request.full_text}\n"
                 "=== FIN ==="
@@ -705,10 +591,10 @@ async def chat_with_grok(request: ChatRequest):
             system_content = (
                 "Eres un profesor experto, claro y paciente.\n"
                 "El alumno tiene una duda relacionada con el ejercicio.\n"
-                "Puedes explicar conceptos, métodos, fórmulas o cualquier duda "
-                "relacionada con el contenido del problema, aunque no esté "
-                "literalmente escrita en el enunciado.\n"
-                "Sé didáctico y no te limites solo a repetir el enunciado.\n\n"
+                "Puedes explicar conceptos, métodos, fórmulas o cualquier duda relacionada "
+                "con el contenido del problema, aunque no esté literalmente en el enunciado.\n"
+                "Empieza con ideas intuitivas y después profundiza si es necesario.\n"
+                "Usa texto limpio, sin markdown de negrita (**texto**) ni guiones innecesarios.\n\n"
                 "=== EJERCICIO ===\n"
                 f"{request.full_text}\n"
                 "=== FIN ==="
@@ -721,7 +607,7 @@ async def chat_with_grok(request: ChatRequest):
 
         messages.append({"role": "user", "content": request.question})
 
-        answer = await call_grok(messages, temperature=0.5)
+        answer = await call_grok(messages, temperature=0.45)
         return {"answer": answer}
 
     except Exception as e:

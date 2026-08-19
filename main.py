@@ -39,6 +39,9 @@ GROK_API_KEY = os.getenv("GROK_API_KEY")
 GROK_API_URL = "https://api.x.ai/v1/chat/completions"
 GROK_MODEL = "grok-4.6"
 
+MAX_PAGES_EXERCISES = 10          # Límite duro modo ejercicios
+MAX_CONTEXT_PAGES_READING = 10    # Página actual + 9 anteriores
+
 # ====================== BASE DE DATOS ======================
 def get_connection():
     if not DATABASE_URL:
@@ -50,7 +53,6 @@ def init_db():
     conn = get_connection()
     cur = conn.cursor()
 
-    # Tabla de documentos (con tipo)
     cur.execute("""
         CREATE TABLE IF NOT EXISTS documents (
             id SERIAL PRIMARY KEY,
@@ -59,25 +61,31 @@ def init_db():
             full_text TEXT,
             size_bytes INTEGER,
             pages INTEGER,
-            doc_type TEXT DEFAULT 'text',          -- 'text' o 'exercise'
+            doc_type TEXT DEFAULT 'text',
+            start_page INTEGER DEFAULT 1,
+            end_page INTEGER,
             uploaded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
     """)
 
-    # Añadir columna doc_type si no existe
-    cur.execute("""
-        DO $$ 
-        BEGIN 
-            IF NOT EXISTS (
-                SELECT 1 FROM information_schema.columns 
-                WHERE table_name='documents' AND column_name='doc_type'
-            ) THEN
-                ALTER TABLE documents ADD COLUMN doc_type TEXT DEFAULT 'text';
-            END IF;
-        END $$;
-    """)
+    # Añadir columnas si no existen
+    for col, definition in [
+        ("doc_type", "TEXT DEFAULT 'text'"),
+        ("start_page", "INTEGER DEFAULT 1"),
+        ("end_page", "INTEGER")
+    ]:
+        cur.execute(f"""
+            DO $$ 
+            BEGIN 
+                IF NOT EXISTS (
+                    SELECT 1 FROM information_schema.columns 
+                    WHERE table_name='documents' AND column_name='{col}'
+                ) THEN
+                    ALTER TABLE documents ADD COLUMN {col} {definition};
+                END IF;
+            END $$;
+        """)
 
-    # Tabla de ejercicios individuales
     cur.execute("""
         CREATE TABLE IF NOT EXISTS exercises (
             id SERIAL PRIMARY KEY,
@@ -91,7 +99,7 @@ def init_db():
     conn.commit()
     cur.close()
     conn.close()
-    logger.info("✅ Tablas listas (documents + exercises)")
+    logger.info("✅ Tablas listas")
 
 
 @app.on_event("startup")
@@ -109,15 +117,16 @@ class ChatMessage(BaseModel):
 
 class ChatRequest(BaseModel):
     question: str
-    full_text: str
+    full_text: str                          # En lectura vendrá ya limitado a 10 páginas
     history: Optional[List[ChatMessage]] = []
+    current_page: Optional[int] = None      # Para modo lectura
 
 class RenameRequest(BaseModel):
     name: str
 
 class GenerateExercisesRequest(BaseModel):
-    source_document_id: int                 # documento de tipo 'text'
-    reference_document_id: Optional[int] = None  # opcional, tipo 'exercise'
+    source_document_id: Optional[int] = None
+    reference_document_id: Optional[int] = None
 
 
 # ====================== UTILIDADES ======================
@@ -147,25 +156,48 @@ async def call_grok(messages: list, temperature: float = 0.3) -> str:
     return data["choices"][0]["message"]["content"]
 
 
-def extract_text_from_pdf(contents: bytes) -> str:
+def extract_text_from_pdf_range(contents: bytes, start_page: int, end_page: int) -> tuple[str, int]:
+    """
+    Extrae texto solo del rango de páginas indicado (1-indexed).
+    Devuelve (texto, número real de páginas extraídas)
+    """
     pdf_file = io.BytesIO(contents)
     reader = PdfReader(pdf_file)
+    total_pages = len(reader.pages)
+
+    # Validar rango
+    start_page = max(1, start_page)
+    end_page = min(total_pages, end_page)
+
+    if start_page > end_page:
+        raise HTTPException(status_code=400, detail="La página de inicio no puede ser mayor que la final")
+
+    pages_to_extract = end_page - start_page + 1
+    if pages_to_extract > MAX_PAGES_EXERCISES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Máximo {MAX_PAGES_EXERCISES} páginas permitidas. Has seleccionado {pages_to_extract}."
+        )
+
     parts = []
-    for page in reader.pages:
-        parts.append(page.extract_text() or "")
-    return "\n\n".join(parts).strip()
+    for i in range(start_page - 1, end_page):
+        parts.append(reader.pages[i].extract_text() or "")
+
+    return "\n\n".join(parts).strip(), pages_to_extract
 
 
-# ====================== ENDPOINTS DOCUMENTOS (comunes) ======================
+# ====================== ENDPOINTS DOCUMENTOS ======================
 
 @app.post("/api/upload")
 async def upload_document(
     file: UploadFile = File(...),
     name: str = Form(...),
-    doc_type: str = Form("text")           # 'text' o 'exercise'
+    doc_type: str = Form("text"),
+    start_page: int = Form(1),
+    end_page: int = Form(None)
 ):
     logger.info("=" * 70)
-    logger.info(f"🚀 SUBIDA DE DOCUMENTO (tipo: {doc_type})")
+    logger.info(f"🚀 SUBIDA → tipo={doc_type} | páginas {start_page}-{end_page}")
 
     if doc_type not in ("text", "exercise"):
         raise HTTPException(status_code=400, detail="doc_type debe ser 'text' o 'exercise'")
@@ -180,24 +212,40 @@ async def upload_document(
 
         contents = await file.read()
         size_bytes = len(contents)
-        full_text = extract_text_from_pdf(contents)
-        num_pages = len(PdfReader(io.BytesIO(contents)).pages)
+
+        # Si no se indica end_page, usamos todas las páginas (pero luego limitamos)
+        pdf_reader = PdfReader(io.BytesIO(contents))
+        total_pages = len(pdf_reader.pages)
+
+        if end_page is None:
+            end_page = total_pages
+
+        # Extraer solo el rango
+        full_text, extracted_pages = extract_text_from_pdf_range(contents, start_page, end_page)
+
+        # En modo ejercicios forzamos el límite de 10
+        if doc_type == "exercise" and extracted_pages > MAX_PAGES_EXERCISES:
+            raise HTTPException(
+                status_code=400,
+                detail=f"En modo ejercicios el máximo es {MAX_PAGES_EXERCISES} páginas"
+            )
 
         conn = get_connection()
         cur = conn.cursor()
 
         cur.execute("""
-            INSERT INTO documents (filename, content, full_text, size_bytes, pages, doc_type)
-            VALUES (%s, %s, %s, %s, %s, %s)
-            RETURNING id, filename, size_bytes, pages, doc_type, uploaded_at;
-        """, (final_name, contents, full_text, size_bytes, num_pages, doc_type))
+            INSERT INTO documents 
+                (filename, content, full_text, size_bytes, pages, doc_type, start_page, end_page)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+            RETURNING id, filename, size_bytes, pages, doc_type, start_page, end_page, uploaded_at;
+        """, (final_name, contents, full_text, size_bytes, extracted_pages, doc_type, start_page, end_page))
 
         saved = cur.fetchone()
         conn.commit()
         cur.close()
         conn.close()
 
-        logger.info(f"✅ Documento guardado: {saved['filename']} (ID {saved['id']}) tipo={doc_type}")
+        logger.info(f"✅ Guardado: {saved['filename']} (ID {saved['id']}) | {extracted_pages} páginas")
 
         return {
             "status": "success",
@@ -207,6 +255,8 @@ async def upload_document(
                 "size_bytes": saved["size_bytes"],
                 "pages": saved["pages"],
                 "doc_type": saved["doc_type"],
+                "start_page": saved["start_page"],
+                "end_page": saved["end_page"],
                 "uploaded_at": str(saved["uploaded_at"])
             }
         }
@@ -226,14 +276,14 @@ async def list_documents(doc_type: Optional[str] = None):
 
         if doc_type:
             cur.execute("""
-                SELECT id, filename, size_bytes, pages, doc_type, uploaded_at
+                SELECT id, filename, size_bytes, pages, doc_type, start_page, end_page, uploaded_at
                 FROM documents
                 WHERE doc_type = %s
                 ORDER BY uploaded_at DESC;
             """, (doc_type,))
         else:
             cur.execute("""
-                SELECT id, filename, size_bytes, pages, doc_type, uploaded_at
+                SELECT id, filename, size_bytes, pages, doc_type, start_page, end_page, uploaded_at
                 FROM documents
                 ORDER BY uploaded_at DESC;
             """)
@@ -248,7 +298,9 @@ async def list_documents(doc_type: Optional[str] = None):
             "date": row["uploaded_at"].strftime("%d %b %Y") if row["uploaded_at"] else "",
             "pages": row["pages"],
             "size_bytes": row["size_bytes"],
-            "doc_type": row["doc_type"]
+            "doc_type": row["doc_type"],
+            "start_page": row["start_page"],
+            "end_page": row["end_page"]
         } for row in rows]
 
         return {"documents": documents}
@@ -262,7 +314,8 @@ async def get_document(doc_id: int):
         conn = get_connection()
         cur = conn.cursor()
         cur.execute("""
-            SELECT id, filename, full_text, size_bytes, pages, doc_type, uploaded_at
+            SELECT id, filename, full_text, size_bytes, pages, doc_type, 
+                   start_page, end_page, uploaded_at
             FROM documents WHERE id = %s;
         """, (doc_id,))
         row = cur.fetchone()
@@ -279,6 +332,8 @@ async def get_document(doc_id: int):
             "pages": row["pages"],
             "size_bytes": row["size_bytes"],
             "doc_type": row["doc_type"],
+            "start_page": row["start_page"],
+            "end_page": row["end_page"],
             "uploaded_at": str(row["uploaded_at"])
         }
     except HTTPException as e:
@@ -301,7 +356,7 @@ async def delete_document(doc_id: int):
         if not deleted:
             raise HTTPException(status_code=404, detail="Documento no encontrado")
 
-        logger.info(f"🗑️ Documento eliminado: {deleted['filename']}")
+        logger.info(f"🗑️ Eliminado: {deleted['filename']}")
         return {"status": "success", "message": "Documento eliminado"}
     except HTTPException as e:
         raise e
@@ -345,41 +400,38 @@ async def rename_document(doc_id: int, request: RenameRequest):
 
 @app.post("/api/exercises/process")
 async def process_exercise_document(document_id: int = Form(...)):
-    """
-    Toma un documento de tipo 'exercise', lo envía a Grok para extraer
-    los ejercicios individuales y los guarda en la tabla exercises.
-    """
-    logger.info(f"📝 Procesando documento de ejercicios ID {document_id}")
+    logger.info(f"📝 Procesando ejercicios del documento {document_id}")
 
     try:
         conn = get_connection()
         cur = conn.cursor()
 
-        cur.execute("SELECT id, full_text, doc_type FROM documents WHERE id = %s", (document_id,))
+        cur.execute("SELECT id, full_text, doc_type, pages FROM documents WHERE id = %s", (document_id,))
         doc = cur.fetchone()
 
         if not doc:
             raise HTTPException(status_code=404, detail="Documento no encontrado")
         if doc["doc_type"] != "exercise":
             raise HTTPException(status_code=400, detail="El documento no es de tipo exercise")
+        if doc["pages"] > MAX_PAGES_EXERCISES:
+            raise HTTPException(status_code=400, detail=f"Máximo {MAX_PAGES_EXERCISES} páginas")
 
         full_text = doc["full_text"] or ""
 
-        # Prompt reforzado + detección de ejercicios válidos
         system_prompt = """
-Eres un experto en educación. Tu ÚNICA tarea es extraer y formatear ejercicios educativos a partir del texto que te den.
+Eres un experto en educación. Tu ÚNICA tarea es extraer y formatear ejercicios educativos.
 
 REGLAS ESTRICTAS:
-1. Solo procesas contenido educativo legítimo (matemáticas, física, química, biología, lengua, historia, etc.).
-2. Si el texto NO contiene ejercicios claros o no es material educativo, responde EXACTAMENTE con:
+1. Solo procesas contenido educativo legítimo.
+2. Si el texto NO contiene ejercicios claros → responde EXACTAMENTE:
    {"error": "no_exercises_found"}
-3. Si el contenido es inapropiado, spam o no relacionado con enseñanza, responde EXACTAMENTE con:
+3. Si el contenido es inapropiado o no relacionado con enseñanza → responde EXACTAMENTE:
    {"error": "invalid_content"}
-4. Si hay ejercicios válidos, responde SOLO con un JSON válido de esta forma:
+4. Si hay ejercicios válidos, responde SOLO con JSON:
 {
   "exercises": [
-    {"number": 1, "statement": "enunciado completo del ejercicio 1"},
-    {"number": 2, "statement": "enunciado completo del ejercicio 2"}
+    {"number": 1, "statement": "enunciado completo"},
+    {"number": 2, "statement": "enunciado completo"}
   ]
 }
 No añadas ninguna explicación fuera del JSON.
@@ -392,28 +444,20 @@ No añadas ninguna explicación fuera del JSON.
 
         response_text = await call_grok(messages, temperature=0.2)
 
-        # Intentar parsear la respuesta
         try:
             data = json.loads(response_text.strip())
         except:
-            # Si Grok no devolvió JSON limpio, forzar error
             raise HTTPException(status_code=422, detail="no_exercises_found")
 
         if "error" in data:
-            error_type = data["error"]
-            if error_type == "no_exercises_found":
-                raise HTTPException(status_code=422, detail="no_exercises_found")
-            else:
-                raise HTTPException(status_code=422, detail="invalid_content")
+            raise HTTPException(status_code=422, detail=data["error"])
 
         exercises = data.get("exercises", [])
         if not exercises:
             raise HTTPException(status_code=422, detail="no_exercises_found")
 
-        # Borrar ejercicios anteriores de este documento (por si se reprocesa)
         cur.execute("DELETE FROM exercises WHERE document_id = %s", (document_id,))
 
-        # Guardar los nuevos
         for ex in exercises:
             cur.execute("""
                 INSERT INTO exercises (document_id, exercise_number, statement)
@@ -424,7 +468,7 @@ No añadas ninguna explicación fuera del JSON.
         cur.close()
         conn.close()
 
-        logger.info(f"✅ {len(exercises)} ejercicios extraídos y guardados")
+        logger.info(f"✅ {len(exercises)} ejercicios guardados")
 
         return {
             "status": "success",
@@ -435,56 +479,69 @@ No añadas ninguna explicación fuera del JSON.
     except HTTPException as e:
         raise e
     except Exception as e:
-        logger.error(f"❌ Error procesando ejercicios: {str(e)}")
+        logger.error(f"❌ Error: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.post("/api/exercises/generate")
 async def generate_exercises(request: GenerateExercisesRequest):
-    """
-    Genera nuevos ejercicios a partir de un documento de tipo 'text'
-    (y opcionalmente un documento de referencia de tipo 'exercise').
-    """
-    logger.info(f"🧠 Generando ejercicios desde documento {request.source_document_id}")
+    logger.info("🧠 Generando nuevos ejercicios")
+
+    # Debe haber al menos uno de los dos
+    if not request.source_document_id and not request.reference_document_id:
+        raise HTTPException(
+            status_code=400,
+            detail="Debes seleccionar al menos un texto de referencia o un archivo de ejercicios de referencia"
+        )
 
     try:
         conn = get_connection()
         cur = conn.cursor()
 
-        # Documento fuente (debe ser 'text')
-        cur.execute("SELECT id, full_text, doc_type FROM documents WHERE id = %s", (request.source_document_id,))
-        source = cur.fetchone()
-        if not source or source["doc_type"] != "text":
-            raise HTTPException(status_code=400, detail="El documento fuente debe ser de tipo text")
-
+        source_text = ""
         reference_text = ""
+
+        if request.source_document_id:
+            cur.execute("SELECT full_text, doc_type, pages FROM documents WHERE id = %s", (request.source_document_id,))
+            source = cur.fetchone()
+            if not source or source["doc_type"] != "text":
+                raise HTTPException(status_code=400, detail="El documento fuente debe ser de tipo text")
+            if source["pages"] > MAX_PAGES_EXERCISES:
+                raise HTTPException(status_code=400, detail=f"Máximo {MAX_PAGES_EXERCISES} páginas en el texto base")
+            source_text = source["full_text"] or ""
+
         if request.reference_document_id:
-            cur.execute("SELECT full_text, doc_type FROM documents WHERE id = %s", (request.reference_document_id,))
+            cur.execute("SELECT full_text, doc_type, pages FROM documents WHERE id = %s", (request.reference_document_id,))
             ref = cur.fetchone()
-            if ref and ref["doc_type"] == "exercise":
-                reference_text = ref["full_text"] or ""
+            if not ref or ref["doc_type"] != "exercise":
+                raise HTTPException(status_code=400, detail="El documento de referencia debe ser de tipo exercise")
+            if ref["pages"] > MAX_PAGES_EXERCISES:
+                raise HTTPException(status_code=400, detail=f"Máximo {MAX_PAGES_EXERCISES} páginas en la referencia")
+            reference_text = ref["full_text"] or ""
 
         system_prompt = """
-Eres un profesor experto. Tu tarea es generar ejercicios educativos de calidad a partir del texto que te proporcionen.
+Eres un profesor experto. Genera ejercicios educativos de calidad.
 
 REGLAS ESTRICTAS:
 1. Solo generas ejercicios educativos legítimos.
-2. Si el texto no es adecuado para generar ejercicios (no es material de estudio, es inapropiado, spam, etc.), responde EXACTAMENTE:
+2. Si el contenido no es adecuado → responde EXACTAMENTE:
    {"error": "invalid_content"}
-3. Si todo es correcto, responde SOLO con un JSON válido:
+3. Responde SOLO con JSON válido:
 {
   "exercises": [
-    {"number": 1, "statement": "enunciado del ejercicio 1"},
-    {"number": 2, "statement": "enunciado del ejercicio 2"}
+    {"number": 1, "statement": "enunciado"},
+    {"number": 2, "statement": "enunciado"}
   ]
 }
-Genera entre 4 y 8 ejercicios de dificultad progresiva.
+Genera entre 4 y 8 ejercicios.
 No añadas ninguna explicación fuera del JSON.
 """
 
-        user_content = f"Texto base para generar ejercicios:\n\n{source['full_text']}"
+        user_content = ""
+        if source_text:
+            user_content += f"Texto base:\n\n{source_text}\n\n"
         if reference_text:
-            user_content += f"\n\n---\nEjercicios de referencia (estilo a seguir):\n\n{reference_text}"
+            user_content += f"Ejercicios de referencia (estilo a seguir):\n\n{reference_text}"
 
         messages = [
             {"role": "system", "content": system_prompt},
@@ -505,7 +562,6 @@ No añadas ninguna explicación fuera del JSON.
         if not exercises:
             raise HTTPException(status_code=422, detail="no_exercises_found")
 
-        # Crear un nuevo documento de tipo 'exercise' para guardar estos ejercicios
         new_name = f"Ejercicios generados - {datetime.now().strftime('%d/%m/%Y %H:%M')}"
 
         cur.execute("""
@@ -526,7 +582,7 @@ No añadas ninguna explicación fuera del JSON.
         cur.close()
         conn.close()
 
-        logger.info(f"✅ {len(exercises)} ejercicios generados y guardados en documento {new_doc_id}")
+        logger.info(f"✅ {len(exercises)} ejercicios generados → documento {new_doc_id}")
 
         return {
             "status": "success",
@@ -538,35 +594,32 @@ No añadas ninguna explicación fuera del JSON.
     except HTTPException as e:
         raise e
     except Exception as e:
-        logger.error(f"❌ Error generando ejercicios: {str(e)}")
+        logger.error(f"❌ Error: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.get("/api/exercises/{document_id}")
 async def list_exercises(document_id: int):
-    """Devuelve todos los ejercicios de un documento de tipo exercise"""
     try:
         conn = get_connection()
         cur = conn.cursor()
-
         cur.execute("""
             SELECT id, exercise_number, statement
             FROM exercises
             WHERE document_id = %s
             ORDER BY exercise_number ASC;
         """, (document_id,))
-
         rows = cur.fetchall()
         cur.close()
         conn.close()
 
-        exercises = [{
-            "id": row["id"],
-            "number": row["exercise_number"],
-            "statement": row["statement"]
-        } for row in rows]
-
-        return {"exercises": exercises}
+        return {
+            "exercises": [{
+                "id": row["id"],
+                "number": row["exercise_number"],
+                "statement": row["statement"]
+            } for row in rows]
+        }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -576,13 +629,11 @@ async def get_exercise(document_id: int, exercise_number: int):
     try:
         conn = get_connection()
         cur = conn.cursor()
-
         cur.execute("""
             SELECT id, exercise_number, statement
             FROM exercises
             WHERE document_id = %s AND exercise_number = %s;
         """, (document_id, exercise_number))
-
         row = cur.fetchone()
         cur.close()
         conn.close()
@@ -601,8 +652,7 @@ async def get_exercise(document_id: int, exercise_number: int):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-# ====================== TTS y CHAT (se mantienen) ======================
-
+# ====================== TTS ======================
 @app.post("/api/tts")
 async def text_to_speech(
     text: str = Form(...),
@@ -629,8 +679,13 @@ async def text_to_speech(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+# ====================== CHAT ======================
 @app.post("/api/chat")
 async def chat_with_grok(request: ChatRequest):
+    """
+    En modo lectura el frontend ya envía solo el contexto de máximo 10 páginas
+    (página actual + 9 anteriores).
+    """
     if not GROK_API_KEY:
         raise HTTPException(status_code=500, detail="GROK_API_KEY no configurada")
 
@@ -640,7 +695,7 @@ async def chat_with_grok(request: ChatRequest):
                 "role": "system",
                 "content": (
                     "Eres un profesor experto, claro y paciente. "
-                    "Responde de forma didáctica basándote en el contenido proporcionado.\n\n"
+                    "Responde de forma didáctica basándote únicamente en el contenido proporcionado.\n\n"
                     "=== CONTENIDO ===\n"
                     f"{request.full_text}\n"
                     "=== FIN ==="

@@ -528,67 +528,102 @@ async def process_exercise_document(document_id: int = Form(...)):
             raise HTTPException(status_code=422, detail="no_exercises_found")
 
         system_prompt = """
-Eres un experto en educación. Tu ÚNICA tarea es extraer SOLO enunciados completos y reales de ejercicios.
+Eres un experto en educación y extracción de ejercicios. Tu tarea es identificar y extraer TODOS los enunciados de ejercicios, problemas y preguntas que un alumno tenga que resolver.
 
-REGLAS MUY ESTRICTAS:
-1. Un enunciado válido debe ser un problema o pregunta completa que el alumno tenga que resolver.
-2. IGNORA completamente títulos, introducciones, teoría, definiciones e instrucciones generales.
-3. Analiza siempre el contexto amplio para decidir si algo es realmente un enunciado completo.
-4. Si no hay ningún ejercicio claro → responde EXACTAMENTE:
-   {"error": "no_exercises_found"}
-5. Si el contenido no es educativo → responde EXACTAMENTE:
-   {"error": "invalid_content"}
-6. Si hay ejercicios válidos, responde SOLO con este JSON (sin texto adicional):
+QUÉ SÍ DEBES EXTRAER (considera estos como ejercicios válidos):
+- Problemas numerados (1., 2., 3..., Ejercicio 1, Problema 1, etc.)
+- Preguntas con letras (a), b), c)...) cuando son independientes
+- Problemas de física, matemáticas, química, etc. aunque no estén numerados
+- Enunciados que empiecen con "Calcula", "Determina", "Resuelve", "Demuestra", "Halla", "Encuentra", "Explica", "Indica", etc.
+- Cualquier texto que plantee una tarea concreta al alumno
+
+QUÉ DEBES IGNORAR:
+- Títulos de temas o capítulos
+- Texto teórico puro (definiciones, explicaciones largas sin pregunta)
+- Instrucciones generales del examen ("Contesta las siguientes preguntas")
+- Soluciones o respuestas ya dadas
+
+REGLAS IMPORTANTES:
+1. Extrae el enunciado COMPLETO de cada ejercicio (incluyendo datos, condiciones y la pregunta).
+2. Si un ejercicio tiene varios apartados (a, b, c), puedes agruparlos como un solo ejercicio o separarlos si son independientes. Prefiere agruparlos si forman parte del mismo problema.
+3. Numera los ejercicios de forma secuencial empezando por 1.
+4. Limpia el texto: elimina numeraciones originales si es necesario, pero mantén el contenido intacto.
+5. Si realmente no hay ningún ejercicio → responde exactamente: {"error": "no_exercises_found"}
+6. Si el contenido no es educativo → responde exactamente: {"error": "invalid_content"}
+
+FORMATO DE RESPUESTA (SOLO JSON, sin texto adicional):
 {
   "exercises": [
-    {"number": 1, "statement": "enunciado completo y limpio"},
-    {"number": 2, "statement": "enunciado completo y limpio"}
+    {
+      "number": 1,
+      "statement": "Enunciado completo del primer ejercicio aquí..."
+    },
+    {
+      "number": 2,
+      "statement": "Enunciado completo del segundo ejercicio aquí..."
+    }
   ]
 }
 """
 
         messages = [
             {"role": "system", "content": system_prompt},
-            {"role": "user", "content": f"Analiza el siguiente texto y extrae únicamente los enunciados de ejercicios reales y completos:\n\n{full_text}"}
+            {"role": "user", "content": f"Extrae todos los ejercicios del siguiente texto:\n\n{full_text}"}
         ]
 
-        # Timeout más alto para documentos de 10 páginas
-        response_text = await call_grok(messages, temperature=0.1, timeout=180.0)
+        response_text = await call_grok(messages, temperature=0.15, timeout=180.0)
 
         try:
             data = extract_json_from_response(response_text)
         except Exception as parse_err:
             logger.warning(f"No se pudo parsear JSON de Grok: {parse_err}")
-            logger.warning(f"Respuesta recibida (primeros 500 chars): {response_text[:500]}")
+            logger.warning(f"Respuesta recibida (primeros 600 chars): {response_text[:600]}")
             raise HTTPException(status_code=422, detail="no_exercises_found")
 
         if "error" in data:
             raise HTTPException(status_code=422, detail=data["error"])
 
         exercises = data.get("exercises", [])
-        if not exercises:
+        if not exercises or not isinstance(exercises, list):
+            raise HTTPException(status_code=422, detail="no_exercises_found")
+
+        # Limpieza y validación de cada ejercicio
+        clean_exercises = []
+        for i, ex in enumerate(exercises):
+            statement = (ex.get("statement") or "").strip()
+            if len(statement) < 15:  # Muy corto, probablemente basura
+                continue
+            clean_exercises.append({
+                "number": i + 1,
+                "statement": statement
+            })
+
+        if not clean_exercises:
             raise HTTPException(status_code=422, detail="no_exercises_found")
 
         def _save_exercises():
             with get_db_connection() as conn:
                 cur = conn.cursor()
                 cur.execute("DELETE FROM exercises WHERE document_id = %s", (document_id,))
-                for ex in exercises:
+                for ex in clean_exercises:
                     cur.execute("""
                         INSERT INTO exercises (document_id, exercise_number, statement)
                         VALUES (%s, %s, %s)
-                    """, (document_id, ex.get("number", 0), ex.get("statement", "")))
+                    """, (document_id, ex["number"], ex["statement"]))
                 cur.close()
 
         await run_in_threadpool(_save_exercises)
 
-        logger.info(f"✅ {len(exercises)} ejercicios reales guardados")
-        return {"status": "success", "count": len(exercises), "exercises": exercises}
+        logger.info(f"✅ {len(clean_exercises)} ejercicios extraídos y guardados")
+        return {
+            "status": "success",
+            "count": len(clean_exercises),
+            "exercises": clean_exercises
+        }
 
     except HTTPException:
         raise
     except Exception as e:
-        # Logging completo con traceback
         logger.error(f"❌ Error procesando ejercicios (doc {document_id}): {type(e).__name__}: {str(e)}")
         logger.error(traceback.format_exc())
         raise HTTPException(status_code=500, detail="Error al procesar los ejercicios")

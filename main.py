@@ -17,6 +17,32 @@ import psycopg2
 from psycopg2.extras import RealDictCursor
 import edge_tts
 import httpx
+import traceback  # ← añade esto arriba
+
+async def call_grok(messages: list, temperature: float = 0.3, timeout: float = 180.0) -> str:
+    if not GROK_API_KEY:
+        raise HTTPException(status_code=500, detail="Error de configuración del servidor")
+
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        response = await client.post(
+            GROK_API_URL,
+            headers={
+                "Authorization": f"Bearer {GROK_API_KEY}",
+                "Content-Type": "application/json"
+            },
+            json={
+                "model": GROK_MODEL,
+                "messages": messages,
+                "temperature": temperature
+            }
+        )
+
+    if response.status_code != 200:
+        logger.error(f"Error Grok: {response.status_code} - {response.text[:800]}")
+        raise HTTPException(status_code=500, detail="Error al contactar con el asistente")
+
+    data = response.json()
+    return data["choices"][0]["message"]["content"]
 
 # ====================== LOGGING ======================
 logging.basicConfig(
@@ -498,6 +524,9 @@ async def process_exercise_document(document_id: int = Form(...)):
 
         full_text = sanitize_text_for_prompt(truncate_text(doc["full_text"] or ""))
 
+        if not full_text.strip():
+            raise HTTPException(status_code=422, detail="no_exercises_found")
+
         system_prompt = """
 Eres un experto en educación. Tu ÚNICA tarea es extraer SOLO enunciados completos y reales de ejercicios.
 
@@ -523,11 +552,14 @@ REGLAS MUY ESTRICTAS:
             {"role": "user", "content": f"Analiza el siguiente texto y extrae únicamente los enunciados de ejercicios reales y completos:\n\n{full_text}"}
         ]
 
-        response_text = await call_grok(messages, temperature=0.1)
+        # Timeout más alto para documentos de 10 páginas
+        response_text = await call_grok(messages, temperature=0.1, timeout=180.0)
 
         try:
             data = extract_json_from_response(response_text)
-        except Exception:
+        except Exception as parse_err:
+            logger.warning(f"No se pudo parsear JSON de Grok: {parse_err}")
+            logger.warning(f"Respuesta recibida (primeros 500 chars): {response_text[:500]}")
             raise HTTPException(status_code=422, detail="no_exercises_found")
 
         if "error" in data:
@@ -545,7 +577,7 @@ REGLAS MUY ESTRICTAS:
                     cur.execute("""
                         INSERT INTO exercises (document_id, exercise_number, statement)
                         VALUES (%s, %s, %s)
-                    """, (document_id, ex["number"], ex["statement"]))
+                    """, (document_id, ex.get("number", 0), ex.get("statement", "")))
                 cur.close()
 
         await run_in_threadpool(_save_exercises)
@@ -556,7 +588,9 @@ REGLAS MUY ESTRICTAS:
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"❌ Error procesando ejercicios: {str(e)}")
+        # Logging completo con traceback
+        logger.error(f"❌ Error procesando ejercicios (doc {document_id}): {type(e).__name__}: {str(e)}")
+        logger.error(traceback.format_exc())
         raise HTTPException(status_code=500, detail="Error al procesar los ejercicios")
 
 

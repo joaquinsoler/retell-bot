@@ -234,11 +234,11 @@ def extract_json_from_response(text: str) -> dict:
     raise ValueError("No se pudo extraer un JSON válido de la respuesta de Grok")
 
 
-async def call_grok(messages: list, temperature: float = 0.3) -> str:
+async def call_grok(messages: list, temperature: float = 0.3, timeout: float = 180.0) -> str:
     if not GROK_API_KEY:
         raise HTTPException(status_code=500, detail="Error de configuración del servidor")
 
-    async with httpx.AsyncClient(timeout=120.0) as client:
+    async with httpx.AsyncClient(timeout=timeout) as client:
         response = await client.post(
             GROK_API_URL,
             headers={
@@ -253,7 +253,7 @@ async def call_grok(messages: list, temperature: float = 0.3) -> str:
         )
 
     if response.status_code != 200:
-        logger.error(f"Error Grok: {response.status_code} - {response.text[:500]}")
+        logger.error(f"Error Grok: {response.status_code} - {response.text[:800]}")
         raise HTTPException(status_code=500, detail="Error al contactar con el asistente")
 
     data = response.json()

@@ -1,6 +1,5 @@
 import os
 import io
-import json
 import logging
 from datetime import datetime
 
@@ -90,13 +89,16 @@ def startup():
 
 # ====================== MODELOS ======================
 class ChatMessage(BaseModel):
-    role: str          # "user" o "assistant"
+    role: str
     content: str
 
 class ChatRequest(BaseModel):
     question: str
     full_text: str
     history: Optional[List[ChatMessage]] = []
+
+class RenameRequest(BaseModel):
+    name: str
 
 
 # ====================== ENDPOINTS DOCUMENTOS ======================
@@ -233,6 +235,7 @@ async def delete_document(doc_id: int):
         if not deleted:
             raise HTTPException(status_code=404, detail="Documento no encontrado")
 
+        logger.info(f"🗑️ Documento eliminado: {deleted['filename']} (ID {doc_id})")
         return {"status": "success", "message": "Documento eliminado"}
     except HTTPException as e:
         raise e
@@ -240,8 +243,54 @@ async def delete_document(doc_id: int):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-# ====================== TEXT-TO-SPEECH ======================
+# ====================== NUEVO: RENOMBRAR DOCUMENTO ======================
+@app.put("/api/documents/{doc_id}/rename")
+async def rename_document(doc_id: int, request: RenameRequest):
+    """
+    Cambia el nombre de un documento.
+    """
+    new_name = request.name.strip()
 
+    if not new_name:
+        raise HTTPException(status_code=400, detail="El nombre no puede estar vacío")
+
+    try:
+        conn = get_connection()
+        cur = conn.cursor()
+
+        cur.execute("""
+            UPDATE documents
+            SET filename = %s
+            WHERE id = %s
+            RETURNING id, filename;
+        """, (new_name, doc_id))
+
+        updated = cur.fetchone()
+        conn.commit()
+        cur.close()
+        conn.close()
+
+        if not updated:
+            raise HTTPException(status_code=404, detail="Documento no encontrado")
+
+        logger.info(f"✏️ Documento renombrado → ID {doc_id}: {updated['filename']}")
+
+        return {
+            "status": "success",
+            "document": {
+                "id": updated["id"],
+                "title": updated["filename"]
+            }
+        }
+
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        logger.error(f"❌ Error al renombrar: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ====================== TEXT-TO-SPEECH ======================
 @app.post("/api/tts")
 async def text_to_speech(
     text: str = Form(...),
@@ -273,12 +322,8 @@ async def text_to_speech(
 
 
 # ====================== CHAT CON GROK ======================
-
 @app.post("/api/chat")
 async def chat_with_grok(request: ChatRequest):
-    """
-    Envía la pregunta + texto completo del documento + historial completo a Grok.
-    """
     if not GROK_API_KEY:
         raise HTTPException(status_code=500, detail="GROK_API_KEY no configurada")
 
@@ -286,7 +331,6 @@ async def chat_with_grok(request: ChatRequest):
     logger.info(f"   Pregunta: {request.question[:80]}...")
 
     try:
-        # Construir los mensajes
         messages = [
             {
                 "role": "system",
@@ -301,20 +345,17 @@ async def chat_with_grok(request: ChatRequest):
             }
         ]
 
-        # Añadir todo el historial de la conversación
         for msg in request.history:
             messages.append({
                 "role": msg.role,
                 "content": msg.content
             })
 
-        # Añadir la nueva pregunta
         messages.append({
             "role": "user",
             "content": request.question
         })
 
-        # Llamada a la API de Grok
         async with httpx.AsyncClient(timeout=60.0) as client:
             response = await client.post(
                 GROK_API_URL,

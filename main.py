@@ -5,7 +5,7 @@ import logging
 from datetime import datetime
 from typing import List, Optional
 
-from fastapi import FastAPI, File, UploadFile, Form, HTTPException, Body
+from fastapi import FastAPI, File, UploadFile, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
@@ -24,7 +24,6 @@ logger = logging.getLogger(__name__)
 
 app = FastAPI(title="lucsi API")
 
-# CORS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -39,8 +38,7 @@ GROK_API_KEY = os.getenv("GROK_API_KEY")
 GROK_API_URL = "https://api.x.ai/v1/chat/completions"
 GROK_MODEL = "grok-4.6"
 
-MAX_PAGES_EXERCISES = 10          # Límite duro modo ejercicios
-MAX_CONTEXT_PAGES_READING = 10    # Página actual + 9 anteriores
+MAX_PAGES_EXERCISES = 10
 
 # ====================== BASE DE DATOS ======================
 def get_connection():
@@ -68,7 +66,6 @@ def init_db():
         );
     """)
 
-    # Añadir columnas si no existen
     for col, definition in [
         ("doc_type", "TEXT DEFAULT 'text'"),
         ("start_page", "INTEGER DEFAULT 1"),
@@ -117,9 +114,9 @@ class ChatMessage(BaseModel):
 
 class ChatRequest(BaseModel):
     question: str
-    full_text: str                          # En lectura vendrá ya limitado a 10 páginas
+    full_text: str
     history: Optional[List[ChatMessage]] = []
-    current_page: Optional[int] = None      # Para modo lectura
+    mode: Optional[str] = "doubt"          # "doubt" | "step" | "solution"
 
 class RenameRequest(BaseModel):
     name: str
@@ -156,34 +153,26 @@ async def call_grok(messages: list, temperature: float = 0.3) -> str:
     return data["choices"][0]["message"]["content"]
 
 
-def extract_text_from_pdf_range(contents: bytes, start_page: int, end_page: int) -> tuple[str, int]:
-    """
-    Extrae texto solo del rango de páginas indicado (1-indexed).
-    Devuelve (texto, número real de páginas extraídas)
-    """
+def extract_text_from_pdf(contents: bytes, start_page: int = 1, end_page: int = None) -> tuple[str, int]:
     pdf_file = io.BytesIO(contents)
     reader = PdfReader(pdf_file)
     total_pages = len(reader.pages)
 
-    # Validar rango
     start_page = max(1, start_page)
+    if end_page is None:
+        end_page = total_pages
     end_page = min(total_pages, end_page)
 
     if start_page > end_page:
         raise HTTPException(status_code=400, detail="La página de inicio no puede ser mayor que la final")
 
-    pages_to_extract = end_page - start_page + 1
-    if pages_to_extract > MAX_PAGES_EXERCISES:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Máximo {MAX_PAGES_EXERCISES} páginas permitidas. Has seleccionado {pages_to_extract}."
-        )
+    pages_count = end_page - start_page + 1
 
     parts = []
     for i in range(start_page - 1, end_page):
         parts.append(reader.pages[i].extract_text() or "")
 
-    return "\n\n".join(parts).strip(), pages_to_extract
+    return "\n\n".join(parts).strip(), pages_count
 
 
 # ====================== ENDPOINTS DOCUMENTOS ======================
@@ -196,7 +185,6 @@ async def upload_document(
     start_page: int = Form(1),
     end_page: int = Form(None)
 ):
-    logger.info("=" * 70)
     logger.info(f"🚀 SUBIDA → tipo={doc_type} | páginas {start_page}-{end_page}")
 
     if doc_type not in ("text", "exercise"):
@@ -213,22 +201,26 @@ async def upload_document(
         contents = await file.read()
         size_bytes = len(contents)
 
-        # Si no se indica end_page, usamos todas las páginas (pero luego limitamos)
         pdf_reader = PdfReader(io.BytesIO(contents))
         total_pages = len(pdf_reader.pages)
 
         if end_page is None:
             end_page = total_pages
 
-        # Extraer solo el rango
-        full_text, extracted_pages = extract_text_from_pdf_range(contents, start_page, end_page)
-
-        # En modo ejercicios forzamos el límite de 10
-        if doc_type == "exercise" and extracted_pages > MAX_PAGES_EXERCISES:
-            raise HTTPException(
-                status_code=400,
-                detail=f"En modo ejercicios el máximo es {MAX_PAGES_EXERCISES} páginas"
-            )
+        # Solo limitamos páginas en modo exercise
+        if doc_type == "exercise":
+            pages_requested = end_page - start_page + 1
+            if pages_requested > MAX_PAGES_EXERCISES:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"En modo ejercicios el máximo es {MAX_PAGES_EXERCISES} páginas"
+                )
+            full_text, extracted_pages = extract_text_from_pdf(contents, start_page, end_page)
+        else:
+            # Modo lectura → documento completo
+            full_text, extracted_pages = extract_text_from_pdf(contents, 1, total_pages)
+            start_page = 1
+            end_page = total_pages
 
         conn = get_connection()
         cur = conn.cursor()
@@ -277,15 +269,12 @@ async def list_documents(doc_type: Optional[str] = None):
         if doc_type:
             cur.execute("""
                 SELECT id, filename, size_bytes, pages, doc_type, start_page, end_page, uploaded_at
-                FROM documents
-                WHERE doc_type = %s
-                ORDER BY uploaded_at DESC;
+                FROM documents WHERE doc_type = %s ORDER BY uploaded_at DESC;
             """, (doc_type,))
         else:
             cur.execute("""
                 SELECT id, filename, size_bytes, pages, doc_type, start_page, end_page, uploaded_at
-                FROM documents
-                ORDER BY uploaded_at DESC;
+                FROM documents ORDER BY uploaded_at DESC;
             """)
 
         rows = cur.fetchall()
@@ -374,8 +363,7 @@ async def rename_document(doc_id: int, request: RenameRequest):
         conn = get_connection()
         cur = conn.cursor()
         cur.execute("""
-            UPDATE documents SET filename = %s
-            WHERE id = %s
+            UPDATE documents SET filename = %s WHERE id = %s
             RETURNING id, filename;
         """, (new_name, doc_id))
         updated = cur.fetchone()
@@ -413,25 +401,30 @@ async def process_exercise_document(document_id: int = Form(...)):
             raise HTTPException(status_code=404, detail="Documento no encontrado")
         if doc["doc_type"] != "exercise":
             raise HTTPException(status_code=400, detail="El documento no es de tipo exercise")
-        if doc["pages"] > MAX_PAGES_EXERCISES:
-            raise HTTPException(status_code=400, detail=f"Máximo {MAX_PAGES_EXERCISES} páginas")
 
         full_text = doc["full_text"] or ""
 
         system_prompt = """
-Eres un experto en educación. Tu ÚNICA tarea es extraer y formatear ejercicios educativos.
+Eres un experto en educación. Tu ÚNICA tarea es extraer SOLO ejercicios reales y bien formados.
 
-REGLAS ESTRICTAS:
-1. Solo procesas contenido educativo legítimo.
-2. Si el texto NO contiene ejercicios claros → responde EXACTAMENTE:
+REGLAS MUY ESTRICTAS:
+1. Solo extrae enunciados que sean claramente ejercicios o problemas para resolver (preguntas, cálculos, demostraciones, etc.).
+2. IGNORA completamente:
+   - Títulos de temas
+   - Introducciones
+   - Explicaciones teóricas
+   - Definiciones
+   - Texto de relleno
+   - Instrucciones generales
+3. Si no hay ningún ejercicio claro → responde EXACTAMENTE:
    {"error": "no_exercises_found"}
-3. Si el contenido es inapropiado o no relacionado con enseñanza → responde EXACTAMENTE:
+4. Si el contenido no es educativo → responde EXACTAMENTE:
    {"error": "invalid_content"}
-4. Si hay ejercicios válidos, responde SOLO con JSON:
+5. Si hay ejercicios válidos, responde SOLO con este JSON:
 {
   "exercises": [
-    {"number": 1, "statement": "enunciado completo"},
-    {"number": 2, "statement": "enunciado completo"}
+    {"number": 1, "statement": "enunciado completo y limpio del ejercicio"},
+    {"number": 2, "statement": "enunciado completo y limpio del ejercicio"}
   ]
 }
 No añadas ninguna explicación fuera del JSON.
@@ -439,10 +432,10 @@ No añadas ninguna explicación fuera del JSON.
 
         messages = [
             {"role": "system", "content": system_prompt},
-            {"role": "user", "content": f"Extrae los ejercicios de este documento:\n\n{full_text}"}
+            {"role": "user", "content": f"Extrae únicamente los ejercicios reales de este texto:\n\n{full_text}"}
         ]
 
-        response_text = await call_grok(messages, temperature=0.2)
+        response_text = await call_grok(messages, temperature=0.15)
 
         try:
             data = json.loads(response_text.strip())
@@ -468,7 +461,7 @@ No añadas ninguna explicación fuera del JSON.
         cur.close()
         conn.close()
 
-        logger.info(f"✅ {len(exercises)} ejercicios guardados")
+        logger.info(f"✅ {len(exercises)} ejercicios reales guardados")
 
         return {
             "status": "success",
@@ -487,7 +480,6 @@ No añadas ninguna explicación fuera del JSON.
 async def generate_exercises(request: GenerateExercisesRequest):
     logger.info("🧠 Generando nuevos ejercicios")
 
-    # Debe haber al menos uno de los dos
     if not request.source_document_id and not request.reference_document_id:
         raise HTTPException(
             status_code=400,
@@ -506,8 +498,6 @@ async def generate_exercises(request: GenerateExercisesRequest):
             source = cur.fetchone()
             if not source or source["doc_type"] != "text":
                 raise HTTPException(status_code=400, detail="El documento fuente debe ser de tipo text")
-            if source["pages"] > MAX_PAGES_EXERCISES:
-                raise HTTPException(status_code=400, detail=f"Máximo {MAX_PAGES_EXERCISES} páginas en el texto base")
             source_text = source["full_text"] or ""
 
         if request.reference_document_id:
@@ -515,7 +505,7 @@ async def generate_exercises(request: GenerateExercisesRequest):
             ref = cur.fetchone()
             if not ref or ref["doc_type"] != "exercise":
                 raise HTTPException(status_code=400, detail="El documento de referencia debe ser de tipo exercise")
-            if ref["pages"] > MAX_PAGES_EXERCISES:
+            if ref["pages"] and ref["pages"] > MAX_PAGES_EXERCISES:
                 raise HTTPException(status_code=400, detail=f"Máximo {MAX_PAGES_EXERCISES} páginas en la referencia")
             reference_text = ref["full_text"] or ""
 
@@ -523,17 +513,17 @@ async def generate_exercises(request: GenerateExercisesRequest):
 Eres un profesor experto. Genera ejercicios educativos de calidad.
 
 REGLAS ESTRICTAS:
-1. Solo generas ejercicios educativos legítimos.
+1. Solo generas ejercicios reales y bien formulados.
 2. Si el contenido no es adecuado → responde EXACTAMENTE:
    {"error": "invalid_content"}
-3. Responde SOLO con JSON válido:
+3. Responde SOLO con este JSON:
 {
   "exercises": [
-    {"number": 1, "statement": "enunciado"},
-    {"number": 2, "statement": "enunciado"}
+    {"number": 1, "statement": "enunciado claro y completo"},
+    {"number": 2, "statement": "enunciado claro y completo"}
   ]
 }
-Genera entre 4 y 8 ejercicios.
+Genera entre 4 y 8 ejercicios de dificultad progresiva.
 No añadas ninguna explicación fuera del JSON.
 """
 
@@ -682,26 +672,49 @@ async def text_to_speech(
 # ====================== CHAT ======================
 @app.post("/api/chat")
 async def chat_with_grok(request: ChatRequest):
-    """
-    En modo lectura el frontend ya envía solo el contexto de máximo 10 páginas
-    (página actual + 9 anteriores).
-    """
     if not GROK_API_KEY:
         raise HTTPException(status_code=500, detail="GROK_API_KEY no configurada")
 
     try:
-        messages = [
-            {
-                "role": "system",
-                "content": (
-                    "Eres un profesor experto, claro y paciente. "
-                    "Responde de forma didáctica basándote únicamente en el contenido proporcionado.\n\n"
-                    "=== CONTENIDO ===\n"
-                    f"{request.full_text}\n"
-                    "=== FIN ==="
-                )
-            }
-        ]
+        mode = request.mode or "doubt"
+
+        if mode == "step":
+            system_content = (
+                "Eres un profesor paciente y claro. Estás resolviendo un ejercicio paso a paso.\n\n"
+                "REGLAS IMPORTANTES:\n"
+                "1. Da SOLO un paso cada vez.\n"
+                "2. Después de cada paso pregunta exactamente: "
+                "\"¿Tienes alguna duda sobre este paso o quieres que pase al siguiente?\"\n"
+                "3. Cuando hayas terminado toda la resolución di claramente: "
+                "\"He terminado la resolución del ejercicio.\"\n"
+                "4. Sé didáctico y claro.\n\n"
+                "=== EJERCICIO ===\n"
+                f"{request.full_text}\n"
+                "=== FIN ==="
+            )
+        elif mode == "solution":
+            system_content = (
+                "Eres un profesor que corrige la solución de un alumno.\n"
+                "Explica los errores y aciertos paso a paso.\n"
+                "Después de cada observación pregunta si quiere continuar.\n\n"
+                "=== EJERCICIO ===\n"
+                f"{request.full_text}\n"
+                "=== FIN ==="
+            )
+        else:  # doubt
+            system_content = (
+                "Eres un profesor experto, claro y paciente.\n"
+                "El alumno tiene una duda relacionada con el ejercicio.\n"
+                "Puedes explicar conceptos, métodos, fórmulas o cualquier duda "
+                "relacionada con el contenido del problema, aunque no esté "
+                "literalmente escrita en el enunciado.\n"
+                "Sé didáctico y no te limites solo a repetir el enunciado.\n\n"
+                "=== EJERCICIO ===\n"
+                f"{request.full_text}\n"
+                "=== FIN ==="
+            )
+
+        messages = [{"role": "system", "content": system_content}]
 
         for msg in request.history:
             messages.append({"role": msg.role, "content": msg.content})

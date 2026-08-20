@@ -357,17 +357,15 @@ async def list_documents(doc_type: Optional[str] = None):
     def _list():
         with get_db_connection() as conn:
             cur = conn.cursor()
+            # Añadimos full_text a la consulta
+            sql = """
+                SELECT id, filename, size_bytes, pages, doc_type, uploaded_at, full_text
+                FROM documents 
+            """
             if doc_type:
-                cur.execute("""
-                    SELECT id, filename, size_bytes, pages, doc_type, uploaded_at
-                    FROM documents WHERE doc_type = %s
-                    ORDER BY uploaded_at DESC;
-                """, (doc_type,))
+                cur.execute(sql + " WHERE doc_type = %s ORDER BY uploaded_at DESC;", (doc_type,))
             else:
-                cur.execute("""
-                    SELECT id, filename, size_bytes, pages, doc_type, uploaded_at
-                    FROM documents ORDER BY uploaded_at DESC;
-                """)
+                cur.execute(sql + " ORDER BY uploaded_at DESC;")
             return cur.fetchall()
 
     try:
@@ -378,7 +376,8 @@ async def list_documents(doc_type: Optional[str] = None):
                 "title": r["filename"],
                 "date": r["uploaded_at"].strftime("%d/%m/%Y") if r["uploaded_at"] else "",
                 "pages": r["pages"],
-                "doc_type": r["doc_type"]
+                "doc_type": r["doc_type"],
+                "full_text": r["full_text"]  # Importante para que el frontend lo reciba
             } for r in rows]
         }
     except Exception as e:
@@ -391,8 +390,9 @@ async def get_document(doc_id: int):
     def _get():
         with get_db_connection() as conn:
             cur = conn.cursor()
+            # Añadimos full_text aquí también
             cur.execute("""
-                SELECT id, filename, pages, doc_type, uploaded_at
+                SELECT id, filename, pages, doc_type, uploaded_at, full_text
                 FROM documents WHERE id = %s;
             """, (doc_id,))
             return cur.fetchone()
@@ -405,7 +405,8 @@ async def get_document(doc_id: int):
         "title": row["filename"],
         "pages": row["pages"],
         "doc_type": row["doc_type"],
-        "uploaded_at": str(row["uploaded_at"])
+        "uploaded_at": str(row["uploaded_at"]),
+        "full_text": row["full_text"]  # Vital para el modo lectura
     }
 
 

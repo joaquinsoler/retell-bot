@@ -9,24 +9,22 @@ from datetime import datetime
 from typing import List, Optional
 from contextlib import contextmanager
 
-from fastapi import FastAPI, File, UploadFile, Form, HTTPException, Body
+from fastapi import FastAPI, File, UploadFile, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel
-from pypdf import PdfReader
 import psycopg2
 from psycopg2.extras import RealDictCursor
 import edge_tts
 import httpx
+from PIL import Image
 
-# Para renderizar y recortar PDF
+# PyMuPDF para renderizar PDF
 try:
-    import fitz  # PyMuPDF
+    import fitz
 except ImportError:
     fitz = None
-
-from PIL import Image
 
 # ====================== LOGGING ======================
 logging.basicConfig(
@@ -58,7 +56,7 @@ MAX_TEXT_CHARS = 120000
 @contextmanager
 def get_db_connection():
     if not DATABASE_URL:
-        raise Exception("No se encontró la variable de entorno DATABASE_URL")
+        raise Exception("No se encontró DATABASE_URL")
     conn = None
     try:
         conn = psycopg2.connect(DATABASE_URL, cursor_factory=RealDictCursor)
@@ -77,7 +75,6 @@ def init_db():
     with get_db_connection() as conn:
         cur = conn.cursor()
 
-        # Tabla documents (ya existía)
         cur.execute("""
             CREATE TABLE IF NOT EXISTS documents (
                 id SERIAL PRIMARY KEY,
@@ -112,7 +109,6 @@ def init_db():
 
         cur.execute("CREATE INDEX IF NOT EXISTS idx_documents_doc_type ON documents(doc_type);")
 
-        # Tabla de selecciones
         cur.execute("""
             CREATE TABLE IF NOT EXISTS selections (
                 id SERIAL PRIMARY KEY,
@@ -122,7 +118,6 @@ def init_db():
             );
         """)
 
-        # Ejercicios dentro de una selección (ahora son imágenes)
         cur.execute("""
             CREATE TABLE IF NOT EXISTS selection_exercises (
                 id SERIAL PRIMARY KEY,
@@ -138,7 +133,7 @@ def init_db():
         cur.execute("CREATE INDEX IF NOT EXISTS idx_selections_document ON selections(document_id);")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_selection_exercises_selection ON selection_exercises(selection_id);")
 
-        # Tabla antigua de exercises (la mantenemos por compatibilidad con generación)
+        # Tabla antigua (compatibilidad con generación)
         cur.execute("""
             CREATE TABLE IF NOT EXISTS exercises (
                 id SERIAL PRIMARY KEY,
@@ -150,7 +145,7 @@ def init_db():
         """)
 
         cur.close()
-        logger.info("✅ Tablas e índices listos")
+        logger.info("✅ Base de datos lista")
 
 
 @app.on_event("startup")
@@ -158,7 +153,7 @@ def startup():
     try:
         init_db()
     except Exception as e:
-        logger.error(f"❌ Error al inicializar DB: {e}")
+        logger.error(f"❌ Error init DB: {e}")
 
 
 # ====================== MODELOS ======================
@@ -171,9 +166,9 @@ class ChatRequest(BaseModel):
     full_text: Optional[str] = ""
     history: Optional[List[ChatMessage]] = []
     mode: Optional[str] = "doubt"
-    image_base64: Optional[str] = None          # imagen del enunciado
+    image_base64: Optional[str] = None
     image_mime: Optional[str] = None
-    solution_image_base64: Optional[str] = None # foto de la solución del alumno
+    solution_image_base64: Optional[str] = None
     solution_image_mime: Optional[str] = None
 
 class RenameRequest(BaseModel):
@@ -191,10 +186,6 @@ class CreateSelectionRequest(BaseModel):
     document_id: int
     name: str
     crops: List[CropItem]
-
-class GenerateExercisesRequest(BaseModel):
-    source_document_id: Optional[int] = None
-    reference_document_id: Optional[int] = None
 
 
 # ====================== UTILIDADES ======================
@@ -233,11 +224,11 @@ def extract_json_from_response(text: str) -> dict:
             return json.loads(text[start:end+1])
         except Exception:
             pass
-    raise ValueError("No se pudo extraer JSON")
+    raise ValueError("No se pudo extraer JSON válido")
 
 async def call_grok(messages: list, temperature: float = 0.3, timeout: float = 180.0) -> str:
     if not GROK_API_KEY:
-        raise HTTPException(status_code=500, detail="Error de configuración del servidor")
+        raise HTTPException(status_code=500, detail="Falta GROK_API_KEY")
 
     async with httpx.AsyncClient(timeout=timeout) as client:
         response = await client.post(
@@ -254,40 +245,34 @@ async def call_grok(messages: list, temperature: float = 0.3, timeout: float = 1
         )
 
     if response.status_code != 200:
-        logger.error(f"Error Grok: {response.status_code} - {response.text[:800]}")
-        raise HTTPException(status_code=500, detail="Error al contactar con el asistente")
+        logger.error(f"Error Grok {response.status_code}: {response.text[:600]}")
+        raise HTTPException(status_code=500, detail="Error al contactar con Grok")
 
     data = response.json()
     return data["choices"][0]["message"]["content"]
 
 
 def render_pdf_page_to_image(pdf_bytes: bytes, page_number: int, dpi: int = 150) -> Image.Image:
-    """Renderiza una página del PDF a imagen PIL"""
     if fitz is None:
-        raise HTTPException(status_code=500, detail="PyMuPDF no está instalado")
+        raise HTTPException(status_code=500, detail="PyMuPDF (fitz) no está instalado")
 
     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
-    if page_number < 1 or page_number > len(doc):
+    try:
+        if page_number < 1 or page_number > len(doc):
+            raise HTTPException(status_code=400, detail="Número de página inválido")
+        page = doc.load_page(page_number - 1)
+        zoom = dpi / 72.0
+        mat = fitz.Matrix(zoom, zoom)
+        pix = page.get_pixmap(matrix=mat, alpha=False)
+        img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+        return img
+    finally:
         doc.close()
-        raise HTTPException(status_code=400, detail="Número de página inválido")
-
-    page = doc.load_page(page_number - 1)
-    zoom = dpi / 72
-    mat = fitz.Matrix(zoom, zoom)
-    pix = page.get_pixmap(matrix=mat, alpha=False)
-    img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
-    doc.close()
-    return img
 
 
-def tight_crop(image: Image.Image, padding: int = 12) -> Image.Image:
-    """
-    Ajuste clásico del recorte:
-    elimina el máximo de espacio en blanco alrededor del contenido.
-    """
-    # Convertir a escala de grises para detectar contenido
+def tight_crop(image: Image.Image, padding: int = 14) -> Image.Image:
+    """Elimina espacios en blanco excesivos alrededor del contenido."""
     gray = image.convert("L")
-    # Umbral: todo lo que no sea casi blanco se considera contenido
     bw = gray.point(lambda x: 0 if x < 245 else 255, "1")
     bbox = bw.getbbox()
     if not bbox:
@@ -298,17 +283,12 @@ def tight_crop(image: Image.Image, padding: int = 12) -> Image.Image:
     top = max(0, top - padding)
     right = min(image.width, right + padding)
     bottom = min(image.height, bottom + padding)
-
     return image.crop((left, top, right, bottom))
 
 
-def image_to_bytes(img: Image.Image, fmt: str = "JPEG", quality: int = 85) -> bytes:
+def image_to_jpeg_bytes(img: Image.Image, quality: int = 86) -> bytes:
     buffer = io.BytesIO()
-    if fmt.upper() == "JPEG":
-        img = img.convert("RGB")
-        img.save(buffer, format="JPEG", quality=quality, optimize=True)
-    else:
-        img.save(buffer, format=fmt)
+    img.convert("RGB").save(buffer, format="JPEG", quality=quality, optimize=True)
     return buffer.getvalue()
 
 
@@ -327,37 +307,55 @@ async def upload_document(
     start_page: int = Form(1),
     end_page: Optional[int] = Form(None)
 ):
-    logger.info(f"🚀 SUBIDA → tipo={doc_type}")
+    logger.info(f"🚀 SUBIDA → tipo={doc_type} | nombre={name}")
 
     if doc_type not in ("text", "exercise"):
         raise HTTPException(status_code=400, detail="Tipo de documento no válido")
 
+    final_name = (name or "").strip()
+    if not final_name:
+        raise HTTPException(status_code=400, detail="El nombre no puede estar vacío")
+
     try:
         contents = await file.read()
+        if not contents:
+            raise HTTPException(status_code=400, detail="El archivo está vacío")
+
         size_bytes = len(contents)
 
-        if fitz:
-            doc = fitz.open(stream=contents, filetype="pdf")
-            total_pages = len(doc)
-            doc.close()
-        else:
-            reader = PdfReader(io.BytesIO(contents))
-            total_pages = len(reader.pages)
+        # Contar páginas
+        if fitz is None:
+            raise HTTPException(status_code=500, detail="PyMuPDF no disponible")
 
+        doc = fitz.open(stream=contents, filetype="pdf")
+        total_pages = len(doc)
+        doc.close()
+
+        if total_pages == 0:
+            raise HTTPException(status_code=400, detail="El PDF no tiene páginas")
+
+        # Normalizar rango de páginas
+        start_page = max(1, start_page)
         if end_page is None:
             end_page = total_pages
+        end_page = min(total_pages, end_page)
 
-        # Para el modo ejercicio limitamos páginas
+        if start_page > end_page:
+            raise HTTPException(status_code=400, detail="La página de inicio no puede ser mayor que la final")
+
         if doc_type == "exercise" and (end_page - start_page + 1) > MAX_PAGES_EXERCISES:
-            raise HTTPException(status_code=400, detail=f"Máximo {MAX_PAGES_EXERCISES} páginas")
+            raise HTTPException(
+                status_code=400,
+                detail=f"Máximo {MAX_PAGES_EXERCISES} páginas en modo ejercicios"
+            )
 
-        # Extraemos texto solo para compatibilidad
+        # Extraemos texto básico (opcional, para compatibilidad)
         full_text = ""
         try:
-            from pypdf import PdfReader as PR
-            reader = PR(io.BytesIO(contents))
+            from pypdf import PdfReader
+            reader = PdfReader(io.BytesIO(contents))
             parts = []
-            for i in range(max(0, start_page-1), min(total_pages, end_page)):
+            for i in range(start_page - 1, end_page):
                 parts.append(reader.pages[i].extract_text() or "")
             full_text = "\n\n".join(parts)
         except Exception:
@@ -371,11 +369,14 @@ async def upload_document(
                         (filename, content, full_text, size_bytes, pages, doc_type, start_page, end_page)
                     VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
                     RETURNING id, filename, size_bytes, pages, doc_type, uploaded_at;
-                """, (name.strip(), contents, full_text, size_bytes, total_pages, doc_type, start_page, end_page))
+                """, (
+                    final_name, contents, full_text, size_bytes,
+                    total_pages, doc_type, start_page, end_page
+                ))
                 return cur.fetchone()
 
         saved = await run_in_threadpool(_save)
-        logger.info(f"✅ Documento guardado ID {saved['id']}")
+        logger.info(f"✅ Guardado: {saved['filename']} (ID {saved['id']})")
 
         return {
             "status": "success",
@@ -387,11 +388,13 @@ async def upload_document(
                 "uploaded_at": str(saved["uploaded_at"])
             }
         }
+
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Error upload: {e}")
-        raise HTTPException(status_code=500, detail="Error al subir el documento")
+        logger.error(f"❌ Error en upload: {type(e).__name__}: {e}")
+        logger.error(traceback.format_exc())
+        raise HTTPException(status_code=500, detail="Error al procesar el documento")
 
 
 @app.get("/api/documents")
@@ -402,7 +405,8 @@ async def list_documents(doc_type: Optional[str] = None):
             if doc_type:
                 cur.execute("""
                     SELECT id, filename, size_bytes, pages, doc_type, uploaded_at
-                    FROM documents WHERE doc_type = %s ORDER BY uploaded_at DESC;
+                    FROM documents WHERE doc_type = %s
+                    ORDER BY uploaded_at DESC;
                 """, (doc_type,))
             else:
                 cur.execute("""
@@ -411,16 +415,20 @@ async def list_documents(doc_type: Optional[str] = None):
                 """)
             return cur.fetchall()
 
-    rows = await run_in_threadpool(_list)
-    return {
-        "documents": [{
-            "id": r["id"],
-            "title": r["filename"],
-            "date": r["uploaded_at"].strftime("%d/%m/%Y") if r["uploaded_at"] else "",
-            "pages": r["pages"],
-            "doc_type": r["doc_type"]
-        } for r in rows]
-    }
+    try:
+        rows = await run_in_threadpool(_list)
+        return {
+            "documents": [{
+                "id": r["id"],
+                "title": r["filename"],
+                "date": r["uploaded_at"].strftime("%d/%m/%Y") if r["uploaded_at"] else "",
+                "pages": r["pages"],
+                "doc_type": r["doc_type"]
+            } for r in rows]
+        }
+    except Exception as e:
+        logger.error(f"Error listando documentos: {e}")
+        raise HTTPException(status_code=500, detail="Error al obtener documentos")
 
 
 @app.get("/api/documents/{doc_id}")
@@ -428,7 +436,10 @@ async def get_document(doc_id: int):
     def _get():
         with get_db_connection() as conn:
             cur = conn.cursor()
-            cur.execute("SELECT id, filename, pages, doc_type, uploaded_at FROM documents WHERE id = %s", (doc_id,))
+            cur.execute("""
+                SELECT id, filename, pages, doc_type, uploaded_at
+                FROM documents WHERE id = %s;
+            """, (doc_id,))
             return cur.fetchone()
 
     row = await run_in_threadpool(_get)
@@ -448,7 +459,7 @@ async def delete_document(doc_id: int):
     def _delete():
         with get_db_connection() as conn:
             cur = conn.cursor()
-            cur.execute("DELETE FROM documents WHERE id = %s RETURNING id", (doc_id,))
+            cur.execute("DELETE FROM documents WHERE id = %s RETURNING id;", (doc_id,))
             return cur.fetchone()
 
     deleted = await run_in_threadpool(_delete)
@@ -459,11 +470,17 @@ async def delete_document(doc_id: int):
 
 @app.put("/api/documents/{doc_id}/rename")
 async def rename_document(doc_id: int, request: RenameRequest):
+    new_name = request.name.strip()
+    if not new_name:
+        raise HTTPException(status_code=400, detail="El nombre no puede estar vacío")
+
     def _rename():
         with get_db_connection() as conn:
             cur = conn.cursor()
-            cur.execute("UPDATE documents SET filename = %s WHERE id = %s RETURNING id, filename",
-                        (request.name.strip(), doc_id))
+            cur.execute("""
+                UPDATE documents SET filename = %s WHERE id = %s
+                RETURNING id, filename;
+            """, (new_name, doc_id))
             return cur.fetchone()
 
     updated = await run_in_threadpool(_rename)
@@ -472,26 +489,25 @@ async def rename_document(doc_id: int, request: RenameRequest):
     return {"status": "success", "document": {"id": updated["id"], "title": updated["filename"]}}
 
 
-# ====================== RENDERIZAR PÁGINA DEL PDF ======================
+# ====================== RENDER PÁGINA PDF ======================
 @app.get("/api/documents/{doc_id}/page/{page_number}")
 async def get_pdf_page_image(doc_id: int, page_number: int, dpi: int = 140):
-    """Devuelve una página del PDF como imagen JPEG (base64)"""
     def _get_pdf():
         with get_db_connection() as conn:
             cur = conn.cursor()
-            cur.execute("SELECT content, pages FROM documents WHERE id = %s", (doc_id,))
+            cur.execute("SELECT content, pages FROM documents WHERE id = %s;", (doc_id,))
             return cur.fetchone()
 
     row = await run_in_threadpool(_get_pdf)
     if not row:
         raise HTTPException(status_code=404, detail="Documento no encontrado")
 
-    if page_number < 1 or page_number > row["pages"]:
+    if page_number < 1 or page_number > (row["pages"] or 1):
         raise HTTPException(status_code=400, detail="Página fuera de rango")
 
     try:
         img = render_pdf_page_to_image(row["content"], page_number, dpi=dpi)
-        img_bytes = image_to_bytes(img, "JPEG", quality=82)
+        img_bytes = image_to_jpeg_bytes(img, quality=82)
         b64 = base64.b64encode(img_bytes).decode("utf-8")
         return {
             "page": page_number,
@@ -500,6 +516,8 @@ async def get_pdf_page_image(doc_id: int, page_number: int, dpi: int = 140):
             "image_base64": b64,
             "mime": "image/jpeg"
         }
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error renderizando página: {e}")
         raise HTTPException(status_code=500, detail="Error al renderizar la página")
@@ -513,10 +531,10 @@ async def list_selections(doc_id: int):
             cur = conn.cursor()
             cur.execute("""
                 SELECT s.id, s.name, s.created_at,
-                       (SELECT COUNT(*) FROM selection_exercises se WHERE se.selection_id = s.id) as count
+                       (SELECT COUNT(*) FROM selection_exercises se WHERE se.selection_id = s.id) AS count
                 FROM selections s
                 WHERE s.document_id = %s
-                ORDER BY s.created_at DESC
+                ORDER BY s.created_at DESC;
             """, (doc_id,))
             return cur.fetchall()
 
@@ -533,17 +551,17 @@ async def list_selections(doc_id: int):
 
 @app.post("/api/selections")
 async def create_selection(request: CreateSelectionRequest):
-    """
-    Crea una selección a partir de los recuadros que dibujó el alumno.
-    Aplica el ajuste clásico de recorte (tight_crop).
-    """
     if not request.crops:
         raise HTTPException(status_code=400, detail="No hay ejercicios seleccionados")
+
+    name = request.name.strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="El nombre de la selección no puede estar vacío")
 
     def _get_pdf():
         with get_db_connection() as conn:
             cur = conn.cursor()
-            cur.execute("SELECT content, pages FROM documents WHERE id = %s", (request.document_id,))
+            cur.execute("SELECT content, pages FROM documents WHERE id = %s;", (request.document_id,))
             return cur.fetchone()
 
     row = await run_in_threadpool(_get_pdf)
@@ -551,35 +569,28 @@ async def create_selection(request: CreateSelectionRequest):
         raise HTTPException(status_code=404, detail="Documento no encontrado")
 
     pdf_bytes = row["content"]
-    processed_exercises = []
+    processed = []
 
     for i, crop in enumerate(request.crops):
         try:
-            # Renderizar la página
             page_img = render_pdf_page_to_image(pdf_bytes, crop.page, dpi=160)
-
-            # Convertir coordenadas relativas (0-1) o absolutas a píxeles
-            # El frontend enviará coordenadas en píxeles de la imagen mostrada
             img_w, img_h = page_img.size
+
             x1 = max(0, int(crop.x))
             y1 = max(0, int(crop.y))
             x2 = min(img_w, int(crop.x + crop.width))
             y2 = min(img_h, int(crop.y + crop.height))
 
-            if x2 <= x1 or y2 <= y1:
+            if x2 - x1 < 10 or y2 - y1 < 10:
                 continue
 
             cropped = page_img.crop((x1, y1, x2, y2))
+            cropped = tight_crop(cropped, padding=14)
+            img_bytes = image_to_jpeg_bytes(cropped, quality=88)
 
-            # === AJUSTE CLÁSICO DEL RECUADRO ===
-            cropped = tight_crop(cropped, padding=15)
-
-            img_bytes = image_to_bytes(cropped, "JPEG", quality=88)
-            title = crop.title or f"Ejercicio {i+1}"
-
-            processed_exercises.append({
+            processed.append({
                 "order_num": i + 1,
-                "title": title,
+                "title": crop.title or f"Ejercicio {i + 1}",
                 "image": img_bytes,
                 "page_number": crop.page
             })
@@ -587,7 +598,7 @@ async def create_selection(request: CreateSelectionRequest):
             logger.warning(f"Error procesando crop {i}: {e}")
             continue
 
-    if not processed_exercises:
+    if not processed:
         raise HTTPException(status_code=400, detail="No se pudo procesar ningún ejercicio")
 
     def _save():
@@ -595,25 +606,25 @@ async def create_selection(request: CreateSelectionRequest):
             cur = conn.cursor()
             cur.execute("""
                 INSERT INTO selections (document_id, name)
-                VALUES (%s, %s) RETURNING id
-            """, (request.document_id, request.name.strip()))
+                VALUES (%s, %s) RETURNING id;
+            """, (request.document_id, name))
             selection_id = cur.fetchone()["id"]
 
-            for ex in processed_exercises:
+            for ex in processed:
                 cur.execute("""
                     INSERT INTO selection_exercises
                         (selection_id, order_num, title, image, page_number)
-                    VALUES (%s, %s, %s, %s, %s)
+                    VALUES (%s, %s, %s, %s, %s);
                 """, (selection_id, ex["order_num"], ex["title"], ex["image"], ex["page_number"]))
             return selection_id
 
     selection_id = await run_in_threadpool(_save)
-    logger.info(f"✅ Selección {selection_id} creada con {len(processed_exercises)} ejercicios")
+    logger.info(f"✅ Selección {selection_id} creada con {len(processed)} ejercicios")
 
     return {
         "status": "success",
         "selection_id": selection_id,
-        "count": len(processed_exercises)
+        "count": len(processed)
     }
 
 
@@ -626,7 +637,7 @@ async def get_selection_exercises(selection_id: int):
                 SELECT id, order_num, title, image, page_number
                 FROM selection_exercises
                 WHERE selection_id = %s
-                ORDER BY order_num ASC
+                ORDER BY order_num ASC;
             """, (selection_id,))
             return cur.fetchall()
 
@@ -645,17 +656,19 @@ async def get_selection_exercises(selection_id: int):
             "mime": "image/jpeg",
             "page": r["page_number"]
         })
-
     return {"exercises": exercises}
 
 
 @app.put("/api/selections/{selection_id}/rename")
 async def rename_selection(selection_id: int, request: RenameRequest):
+    new_name = request.name.strip()
+    if not new_name:
+        raise HTTPException(status_code=400, detail="El nombre no puede estar vacío")
+
     def _rename():
         with get_db_connection() as conn:
             cur = conn.cursor()
-            cur.execute("UPDATE selections SET name = %s WHERE id = %s RETURNING id",
-                        (request.name.strip(), selection_id))
+            cur.execute("UPDATE selections SET name = %s WHERE id = %s RETURNING id;", (new_name, selection_id))
             return cur.fetchone()
 
     updated = await run_in_threadpool(_rename)
@@ -669,7 +682,7 @@ async def delete_selection(selection_id: int):
     def _delete():
         with get_db_connection() as conn:
             cur = conn.cursor()
-            cur.execute("DELETE FROM selections WHERE id = %s RETURNING id", (selection_id,))
+            cur.execute("DELETE FROM selections WHERE id = %s RETURNING id;", (selection_id,))
             return cur.fetchone()
 
     deleted = await run_in_threadpool(_delete)
@@ -678,16 +691,15 @@ async def delete_selection(selection_id: int):
     return {"status": "success"}
 
 
-# ====================== CHAT (con soporte de imagen de enunciado) ======================
+# ====================== CHAT ======================
 @app.post("/api/chat")
 async def chat_with_grok(request: ChatRequest):
     if not GROK_API_KEY:
-        raise HTTPException(status_code=500, detail="Error de configuración del servidor")
+        raise HTTPException(status_code=500, detail="Falta GROK_API_KEY")
 
     try:
         mode = request.mode or "doubt"
 
-        system_content = ""
         if mode == "step":
             system_content = (
                 "Eres un profesor paciente y didáctico. Estás resolviendo un ejercicio paso a paso.\n"
@@ -703,7 +715,7 @@ async def chat_with_grok(request: ChatRequest):
             system_content = (
                 "Eres un profesor que corrige la solución de un alumno.\n"
                 "Analiza la imagen de la solución si la recibes.\n"
-                "Explica errores y aciertos de forma clara.\n"
+                "Explica errores y aciertos de forma clara y constructiva.\n"
                 "Después de cada observación pregunta si quiere continuar.\n"
             )
         else:
@@ -719,10 +731,9 @@ async def chat_with_grok(request: ChatRequest):
         for msg in (request.history or []):
             messages.append({"role": msg.role, "content": msg.content})
 
-        # Construir el mensaje del usuario (posible multimodal)
         user_content = []
 
-        # Imagen del enunciado (ejercicio seleccionado)
+        # Imagen del enunciado
         if request.image_base64 and request.image_mime:
             user_content.append({
                 "type": "image_url",
@@ -732,7 +743,7 @@ async def chat_with_grok(request: ChatRequest):
                 }
             })
 
-        # Imagen de la solución del alumno (modo solution)
+        # Imagen de la solución del alumno
         if mode == "solution" and request.solution_image_base64 and request.solution_image_mime:
             user_content.append({
                 "type": "image_url",
@@ -742,11 +753,7 @@ async def chat_with_grok(request: ChatRequest):
                 }
             })
 
-        user_content.append({
-            "type": "text",
-            "text": request.question
-        })
-
+        user_content.append({"type": "text", "text": request.question})
         messages.append({"role": "user", "content": user_content})
 
         answer = await call_grok(messages, temperature=0.45)
@@ -755,7 +762,7 @@ async def chat_with_grok(request: ChatRequest):
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"❌ Error en chat: {str(e)}")
+        logger.error(f"❌ Error en chat: {e}")
         logger.error(traceback.format_exc())
         raise HTTPException(status_code=500, detail="Error al procesar la consulta")
 
@@ -764,7 +771,7 @@ async def chat_with_grok(request: ChatRequest):
 @app.post("/api/tts")
 async def text_to_speech(text: str = Form(...), voice: str = Form("es-ES-AlvaroNeural")):
     if not text.strip():
-        raise HTTPException(status_code=400, detail="Texto vacío")
+        raise HTTPException(status_code=400, detail="El texto no puede estar vacío")
     try:
         communicate = edge_tts.Communicate(text=text.strip(), voice=voice)
         audio_buffer = io.BytesIO()
@@ -775,4 +782,4 @@ async def text_to_speech(text: str = Form(...), voice: str = Form("es-ES-AlvaroN
         return StreamingResponse(audio_buffer, media_type="audio/mpeg")
     except Exception as e:
         logger.error(f"Error TTS: {e}")
-        raise HTTPException(status_code=500, detail="Error al generar audio")
+        raise HTTPException(status_code=500, detail="Error al generar el audio")

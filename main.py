@@ -20,7 +20,6 @@ import edge_tts
 import httpx
 from PIL import Image
 
-# PyMuPDF para renderizar PDF
 try:
     import fitz
 except ImportError:
@@ -48,7 +47,6 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 GROK_API_KEY = os.getenv("GROK_API_KEY")
 GROK_API_URL = "https://api.x.ai/v1/chat/completions"
 GROK_MODEL = "grok-4.6"
-MAX_PAGES_EXERCISES = 15
 MAX_TEXT_CHARS = 120000
 
 
@@ -133,7 +131,6 @@ def init_db():
         cur.execute("CREATE INDEX IF NOT EXISTS idx_selections_document ON selections(document_id);")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_selection_exercises_selection ON selection_exercises(selection_id);")
 
-        # Tabla antigua (compatibilidad con generación)
         cur.execute("""
             CREATE TABLE IF NOT EXISTS exercises (
                 id SERIAL PRIMARY KEY,
@@ -271,13 +268,11 @@ def render_pdf_page_to_image(pdf_bytes: bytes, page_number: int, dpi: int = 150)
 
 
 def tight_crop(image: Image.Image, padding: int = 14) -> Image.Image:
-    """Elimina espacios en blanco excesivos alrededor del contenido."""
     gray = image.convert("L")
     bw = gray.point(lambda x: 0 if x < 245 else 255, "1")
     bbox = bw.getbbox()
     if not bbox:
         return image
-
     left, top, right, bottom = bbox
     left = max(0, left - padding)
     top = max(0, top - padding)
@@ -323,7 +318,6 @@ async def upload_document(
 
         size_bytes = len(contents)
 
-        # Contar páginas
         if fitz is None:
             raise HTTPException(status_code=500, detail="PyMuPDF no disponible")
 
@@ -334,7 +328,6 @@ async def upload_document(
         if total_pages == 0:
             raise HTTPException(status_code=400, detail="El PDF no tiene páginas")
 
-        # Normalizar rango de páginas
         start_page = max(1, start_page)
         if end_page is None:
             end_page = total_pages
@@ -343,13 +336,8 @@ async def upload_document(
         if start_page > end_page:
             raise HTTPException(status_code=400, detail="La página de inicio no puede ser mayor que la final")
 
-        if doc_type == "exercise" and (end_page - start_page + 1) > MAX_PAGES_EXERCISES:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Máximo {MAX_PAGES_EXERCISES} páginas en modo ejercicios"
-            )
+        # Ya no hay límite de páginas
 
-        # Extraemos texto básico (opcional, para compatibilidad)
         full_text = ""
         try:
             from pypdf import PdfReader
@@ -733,7 +721,6 @@ async def chat_with_grok(request: ChatRequest):
 
         user_content = []
 
-        # Imagen del enunciado
         if request.image_base64 and request.image_mime:
             user_content.append({
                 "type": "image_url",
@@ -743,7 +730,6 @@ async def chat_with_grok(request: ChatRequest):
                 }
             })
 
-        # Imagen de la solución del alumno
         if mode == "solution" and request.solution_image_base64 and request.solution_image_mime:
             user_content.append({
                 "type": "image_url",

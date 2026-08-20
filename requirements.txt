@@ -1,7 +1,9 @@
 fastapi
-uvicorn[standard]
+uvicorn
 python-multipart
-pypdf
 psycopg2-binary
-edge-tts
 httpx
+pypdf
+edge-tts
+Pillow
+PyMuPDF

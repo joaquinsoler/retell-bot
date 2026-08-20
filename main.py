@@ -5,7 +5,6 @@ import logging
 import re
 import base64
 import traceback
-from datetime import datetime
 from typing import List, Optional
 from contextlib import contextmanager
 
@@ -21,7 +20,7 @@ import httpx
 from PIL import Image
 
 try:
-    import fitz
+    import fitz  # PyMuPDF
 except ImportError:
     fitz = None
 
@@ -47,7 +46,9 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 GROK_API_KEY = os.getenv("GROK_API_KEY")
 GROK_API_URL = "https://api.x.ai/v1/chat/completions"
 GROK_MODEL = "grok-4.6"
-MAX_TEXT_CHARS = 120000
+
+# DPI fijo y consistente para visualización y recorte
+RENDER_DPI = 150
 
 
 # ====================== BASE DE DATOS ======================
@@ -131,6 +132,7 @@ def init_db():
         cur.execute("CREATE INDEX IF NOT EXISTS idx_selections_document ON selections(document_id);")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_selection_exercises_selection ON selection_exercises(selection_id);")
 
+        # Tabla antigua (compatibilidad)
         cur.execute("""
             CREATE TABLE IF NOT EXISTS exercises (
                 id SERIAL PRIMARY KEY,
@@ -186,43 +188,6 @@ class CreateSelectionRequest(BaseModel):
 
 
 # ====================== UTILIDADES ======================
-def sanitize_text_for_prompt(text: str) -> str:
-    if not text:
-        return ""
-    text = re.sub(r"={3,}.*?={3,}", "[contenido eliminado]", text, flags=re.DOTALL)
-    return text.strip()
-
-def truncate_text(text: str, max_chars: int = MAX_TEXT_CHARS) -> str:
-    if not text or len(text) <= max_chars:
-        return text or ""
-    return text[:max_chars] + "\n\n[... texto truncado ...]"
-
-def extract_json_from_response(text: str) -> dict:
-    text = text.strip()
-    try:
-        return json.loads(text)
-    except Exception:
-        pass
-    match = re.search(r'\{.*\}', text, re.DOTALL)
-    if match:
-        try:
-            return json.loads(match.group(0))
-        except Exception:
-            pass
-    cleaned = re.sub(r'```json|```', '', text).strip()
-    try:
-        return json.loads(cleaned)
-    except Exception:
-        pass
-    start = text.find('{')
-    end = text.rfind('}')
-    if start != -1 and end != -1 and end > start:
-        try:
-            return json.loads(text[start:end+1])
-        except Exception:
-            pass
-    raise ValueError("No se pudo extraer JSON válido")
-
 async def call_grok(messages: list, temperature: float = 0.3, timeout: float = 180.0) -> str:
     if not GROK_API_KEY:
         raise HTTPException(status_code=500, detail="Falta GROK_API_KEY")
@@ -249,7 +214,8 @@ async def call_grok(messages: list, temperature: float = 0.3, timeout: float = 1
     return data["choices"][0]["message"]["content"]
 
 
-def render_pdf_page_to_image(pdf_bytes: bytes, page_number: int, dpi: int = 150) -> Image.Image:
+def render_pdf_page_to_image(pdf_bytes: bytes, page_number: int, dpi: int = RENDER_DPI) -> Image.Image:
+    """Renderiza una página del PDF a imagen PIL con el DPI fijo"""
     if fitz is None:
         raise HTTPException(status_code=500, detail="PyMuPDF (fitz) no está instalado")
 
@@ -268,6 +234,7 @@ def render_pdf_page_to_image(pdf_bytes: bytes, page_number: int, dpi: int = 150)
 
 
 def tight_crop(image: Image.Image, padding: int = 14) -> Image.Image:
+    """Elimina espacios en blanco excesivos alrededor del contenido"""
     gray = image.convert("L")
     bw = gray.point(lambda x: 0 if x < 245 else 255, "1")
     bbox = bw.getbbox()
@@ -290,7 +257,7 @@ def image_to_jpeg_bytes(img: Image.Image, quality: int = 86) -> bytes:
 # ====================== HEALTH ======================
 @app.get("/health")
 async def health():
-    return {"status": "ok", "service": "lucsi"}
+    return {"status": "ok", "service": "lucsi", "render_dpi": RENDER_DPI}
 
 
 # ====================== DOCUMENTOS ======================
@@ -336,7 +303,7 @@ async def upload_document(
         if start_page > end_page:
             raise HTTPException(status_code=400, detail="La página de inicio no puede ser mayor que la final")
 
-        # Ya no hay límite de páginas
+        # Sin límite de páginas
 
         full_text = ""
         try:
@@ -477,9 +444,13 @@ async def rename_document(doc_id: int, request: RenameRequest):
     return {"status": "success", "document": {"id": updated["id"], "title": updated["filename"]}}
 
 
-# ====================== RENDER PÁGINA PDF ======================
+# ====================== RENDER PÁGINA → IMAGEN ======================
 @app.get("/api/documents/{doc_id}/page/{page_number}")
-async def get_pdf_page_image(doc_id: int, page_number: int, dpi: int = 140):
+async def get_pdf_page_image(doc_id: int, page_number: int):
+    """
+    Convierte una página del PDF en imagen.
+    Usa siempre RENDER_DPI para que las coordenadas coincidan con el recorte.
+    """
     def _get_pdf():
         with get_db_connection() as conn:
             cur = conn.cursor()
@@ -494,7 +465,7 @@ async def get_pdf_page_image(doc_id: int, page_number: int, dpi: int = 140):
         raise HTTPException(status_code=400, detail="Página fuera de rango")
 
     try:
-        img = render_pdf_page_to_image(row["content"], page_number, dpi=dpi)
+        img = render_pdf_page_to_image(row["content"], page_number, dpi=RENDER_DPI)
         img_bytes = image_to_jpeg_bytes(img, quality=82)
         b64 = base64.b64encode(img_bytes).decode("utf-8")
         return {
@@ -502,7 +473,8 @@ async def get_pdf_page_image(doc_id: int, page_number: int, dpi: int = 140):
             "width": img.width,
             "height": img.height,
             "image_base64": b64,
-            "mime": "image/jpeg"
+            "mime": "image/jpeg",
+            "dpi": RENDER_DPI
         }
     except HTTPException:
         raise
@@ -539,6 +511,10 @@ async def list_selections(doc_id: int):
 
 @app.post("/api/selections")
 async def create_selection(request: CreateSelectionRequest):
+    """
+    Recibe las coordenadas (en el mismo DPI que se mostró la imagen)
+    y genera los recortes finales con tight_crop.
+    """
     if not request.crops:
         raise HTTPException(status_code=400, detail="No hay ejercicios seleccionados")
 
@@ -561,13 +537,14 @@ async def create_selection(request: CreateSelectionRequest):
 
     for i, crop in enumerate(request.crops):
         try:
-            page_img = render_pdf_page_to_image(pdf_bytes, crop.page, dpi=160)
+            # Importante: mismo DPI que el frontend
+            page_img = render_pdf_page_to_image(pdf_bytes, crop.page, dpi=RENDER_DPI)
             img_w, img_h = page_img.size
 
-            x1 = max(0, int(crop.x))
-            y1 = max(0, int(crop.y))
-            x2 = min(img_w, int(crop.x + crop.width))
-            y2 = min(img_h, int(crop.y + crop.height))
+            x1 = max(0, int(round(crop.x)))
+            y1 = max(0, int(round(crop.y)))
+            x2 = min(img_w, int(round(crop.x + crop.width)))
+            y2 = min(img_h, int(round(crop.y + crop.height)))
 
             if x2 - x1 < 10 or y2 - y1 < 10:
                 continue

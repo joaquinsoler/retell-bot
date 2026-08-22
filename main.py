@@ -45,7 +45,8 @@ app.add_middleware(
 DATABASE_URL = os.getenv("DATABASE_URL")
 GROK_API_KEY = os.getenv("GROK_API_KEY")
 GROK_API_URL = "https://api.x.ai/v1/chat/completions"
-GROK_MODEL = "grok-4.6"
+GROK_MODEL = "grok-4.3"   # ← más rápido (menor latencia)
+
 
 # DPI fijo y consistente para visualización y recorte
 RENDER_DPI = 150
@@ -188,7 +189,7 @@ class CreateSelectionRequest(BaseModel):
 
 
 # ====================== UTILIDADES ======================
-async def call_grok(messages: list, temperature: float = 0.3, timeout: float = 180.0) -> str:
+async def call_grok(messages: list, temperature: float = 0.3, timeout: float = 90.0) -> str:
     if not GROK_API_KEY:
         raise HTTPException(status_code=500, detail="Falta GROK_API_KEY")
 
@@ -254,10 +255,33 @@ def image_to_jpeg_bytes(img: Image.Image, quality: int = 86) -> bytes:
     return buffer.getvalue()
 
 
+def optimize_image_for_grok(image_base64: str, max_width: int = 1024, quality: int = 70) -> str:
+    """
+    Reduce el tamaño de la imagen para bajar latencia y coste de visión.
+    """
+    try:
+        img_data = base64.b64decode(image_base64)
+        img = Image.open(io.BytesIO(img_data)).convert("RGB")
+
+        # Redimensionar si es demasiado grande
+        if img.width > max_width:
+            ratio = max_width / img.width
+            new_height = int(img.height * ratio)
+            img = img.resize((max_width, new_height), Image.LANCZOS)
+
+        # Comprimir
+        buffer = io.BytesIO()
+        img.save(buffer, format="JPEG", quality=quality, optimize=True)
+        return base64.b64encode(buffer.getvalue()).decode("utf-8")
+    except Exception as e:
+        logger.warning(f"No se pudo optimizar la imagen: {e}")
+        return image_base64  # Si falla, devolvemos la original
+
+
 # ====================== HEALTH ======================
 @app.get("/health")
 async def health():
-    return {"status": "ok", "service": "lucsi", "render_dpi": RENDER_DPI}
+    return {"status": "ok", "service": "lucsi", "render_dpi": RENDER_DPI, "model": GROK_MODEL}
 
 
 # ====================== DOCUMENTOS ======================
@@ -357,7 +381,6 @@ async def list_documents(doc_type: Optional[str] = None):
     def _list():
         with get_db_connection() as conn:
             cur = conn.cursor()
-            # Añadimos full_text a la consulta
             sql = """
                 SELECT id, filename, size_bytes, pages, doc_type, uploaded_at, full_text
                 FROM documents 
@@ -377,7 +400,7 @@ async def list_documents(doc_type: Optional[str] = None):
                 "date": r["uploaded_at"].strftime("%d/%m/%Y") if r["uploaded_at"] else "",
                 "pages": r["pages"],
                 "doc_type": r["doc_type"],
-                "full_text": r["full_text"]  # Importante para que el frontend lo reciba
+                "full_text": r["full_text"]
             } for r in rows]
         }
     except Exception as e:
@@ -390,7 +413,6 @@ async def get_document(doc_id: int):
     def _get():
         with get_db_connection() as conn:
             cur = conn.cursor()
-            # Añadimos full_text aquí también
             cur.execute("""
                 SELECT id, filename, pages, doc_type, uploaded_at, full_text
                 FROM documents WHERE id = %s;
@@ -406,7 +428,7 @@ async def get_document(doc_id: int):
         "pages": row["pages"],
         "doc_type": row["doc_type"],
         "uploaded_at": str(row["uploaded_at"]),
-        "full_text": row["full_text"]  # Vital para el modo lectura
+        "full_text": row["full_text"]
     }
 
 
@@ -657,7 +679,7 @@ async def delete_selection(selection_id: int):
     return {"status": "success"}
 
 
-# ====================== CHAT ======================
+# ====================== CHAT (optimizado para baja latencia) ======================
 @app.post("/api/chat")
 async def chat_with_grok(request: ChatRequest):
     if not GROK_API_KEY:
@@ -673,9 +695,9 @@ async def chat_with_grok(request: ChatRequest):
                 "1. Nunca empieces con 'Lee el enunciado'.\n"
                 "2. Empieza con una idea intuitiva clara.\n"
                 "3. Da solo un paso cada vez.\n"
-                "4. Después de cada paso pregunta si tiene dudas o quiere continuar.\n"
-                "5. Cuando termines di: 'He terminado la resolución del ejercicio.'\n"
-                "6. Usa texto limpio, sin markdown innecesario.\n"
+                "4. Después de cada paso pregunta si tiene dudas o quiere continuar la explicación.\n"
+                "5. Cuando termines di claramente: 'He terminado la resolución del ejercicio.'\n"
+                "6. Usa texto limpio, sin markdown innecesario (**negrita**, guiones excesivos, etc.).\n"
             )
         elif mode == "solution":
             system_content = (
@@ -688,8 +710,8 @@ async def chat_with_grok(request: ChatRequest):
             system_content = (
                 "Eres un profesor experto, claro y paciente.\n"
                 "El alumno tiene una duda sobre el ejercicio.\n"
-                "Puedes explicar conceptos, métodos o cualquier duda relacionada.\n"
-                "Empieza con ideas intuitivas.\n"
+                "Puedes explicar conceptos, métodos o cualquier duda relacionada con el contenido.\n"
+                "Empieza con ideas intuitivas y después profundiza si es necesario.\n"
             )
 
         messages = [{"role": "system", "content": system_content}]
@@ -699,28 +721,32 @@ async def chat_with_grok(request: ChatRequest):
 
         user_content = []
 
+        # Optimizamos la imagen del enunciado
         if request.image_base64 and request.image_mime:
+            optimized = optimize_image_for_grok(request.image_base64)
             user_content.append({
                 "type": "image_url",
                 "image_url": {
-                    "url": f"data:{request.image_mime};base64,{request.image_base64}",
-                    "detail": "high"
+                    "url": f"data:image/jpeg;base64,{optimized}",
+                    "detail": "low"          # ← antes era "high"
                 }
             })
 
-        if mode == "solution" and request.solution_image_base64 and request.solution_image_mime:
+        # Optimizamos la imagen de la solución del alumno
+        if mode == "solution" and request.solution_image_base64:
+            optimized_sol = optimize_image_for_grok(request.solution_image_base64)
             user_content.append({
                 "type": "image_url",
                 "image_url": {
-                    "url": f"data:{request.solution_image_mime};base64,{request.solution_image_base64}",
-                    "detail": "high"
+                    "url": f"data:image/jpeg;base64,{optimized_sol}",
+                    "detail": "low"
                 }
             })
 
         user_content.append({"type": "text", "text": request.question})
         messages.append({"role": "user", "content": user_content})
 
-        answer = await call_grok(messages, temperature=0.45)
+        answer = await call_grok(messages, temperature=0.4, timeout=90.0)
         return {"answer": answer}
 
     except HTTPException:

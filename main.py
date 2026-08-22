@@ -45,10 +45,8 @@ app.add_middleware(
 DATABASE_URL = os.getenv("DATABASE_URL")
 GROK_API_KEY = os.getenv("GROK_API_KEY")
 GROK_API_URL = "https://api.x.ai/v1/chat/completions"
-GROK_MODEL = "grok-4.3"   # ← más rápido (menor latencia)
+GROK_MODEL = "grok-4.3"
 
-
-# DPI fijo y consistente para visualización y recorte
 RENDER_DPI = 150
 
 
@@ -133,7 +131,6 @@ def init_db():
         cur.execute("CREATE INDEX IF NOT EXISTS idx_selections_document ON selections(document_id);")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_selection_exercises_selection ON selection_exercises(selection_id);")
 
-        # Tabla antigua (compatibilidad)
         cur.execute("""
             CREATE TABLE IF NOT EXISTS exercises (
                 id SERIAL PRIMARY KEY,
@@ -216,7 +213,6 @@ async def call_grok(messages: list, temperature: float = 0.3, timeout: float = 9
 
 
 def render_pdf_page_to_image(pdf_bytes: bytes, page_number: int, dpi: int = RENDER_DPI) -> Image.Image:
-    """Renderiza una página del PDF a imagen PIL con el DPI fijo"""
     if fitz is None:
         raise HTTPException(status_code=500, detail="PyMuPDF (fitz) no está instalado")
 
@@ -235,7 +231,6 @@ def render_pdf_page_to_image(pdf_bytes: bytes, page_number: int, dpi: int = REND
 
 
 def tight_crop(image: Image.Image, padding: int = 14) -> Image.Image:
-    """Elimina espacios en blanco excesivos alrededor del contenido"""
     gray = image.convert("L")
     bw = gray.point(lambda x: 0 if x < 245 else 255, "1")
     bbox = bw.getbbox()
@@ -256,26 +251,21 @@ def image_to_jpeg_bytes(img: Image.Image, quality: int = 86) -> bytes:
 
 
 def optimize_image_for_grok(image_base64: str, max_width: int = 1024, quality: int = 70) -> str:
-    """
-    Reduce el tamaño de la imagen para bajar latencia y coste de visión.
-    """
     try:
         img_data = base64.b64decode(image_base64)
         img = Image.open(io.BytesIO(img_data)).convert("RGB")
 
-        # Redimensionar si es demasiado grande
         if img.width > max_width:
             ratio = max_width / img.width
             new_height = int(img.height * ratio)
             img = img.resize((max_width, new_height), Image.LANCZOS)
 
-        # Comprimir
         buffer = io.BytesIO()
         img.save(buffer, format="JPEG", quality=quality, optimize=True)
         return base64.b64encode(buffer.getvalue()).decode("utf-8")
     except Exception as e:
         logger.warning(f"No se pudo optimizar la imagen: {e}")
-        return image_base64  # Si falla, devolvemos la original
+        return image_base64
 
 
 # ====================== HEALTH ======================
@@ -326,8 +316,6 @@ async def upload_document(
 
         if start_page > end_page:
             raise HTTPException(status_code=400, detail="La página de inicio no puede ser mayor que la final")
-
-        # Sin límite de páginas
 
         full_text = ""
         try:
@@ -470,10 +458,6 @@ async def rename_document(doc_id: int, request: RenameRequest):
 # ====================== RENDER PÁGINA → IMAGEN ======================
 @app.get("/api/documents/{doc_id}/page/{page_number}")
 async def get_pdf_page_image(doc_id: int, page_number: int):
-    """
-    Convierte una página del PDF en imagen.
-    Usa siempre RENDER_DPI para que las coordenadas coincidan con el recorte.
-    """
     def _get_pdf():
         with get_db_connection() as conn:
             cur = conn.cursor()
@@ -534,10 +518,6 @@ async def list_selections(doc_id: int):
 
 @app.post("/api/selections")
 async def create_selection(request: CreateSelectionRequest):
-    """
-    Recibe las coordenadas (en el mismo DPI que se mostró la imagen)
-    y genera los recortes finales con tight_crop.
-    """
     if not request.crops:
         raise HTTPException(status_code=400, detail="No hay ejercicios seleccionados")
 
@@ -560,7 +540,6 @@ async def create_selection(request: CreateSelectionRequest):
 
     for i, crop in enumerate(request.crops):
         try:
-            # Importante: mismo DPI que el frontend
             page_img = render_pdf_page_to_image(pdf_bytes, crop.page, dpi=RENDER_DPI)
             img_w, img_h = page_img.size
 
@@ -679,7 +658,7 @@ async def delete_selection(selection_id: int):
     return {"status": "success"}
 
 
-# ====================== CHAT (optimizado para baja latencia) ======================
+# ====================== CHAT (prompts mejorados) ======================
 @app.post("/api/chat")
 async def chat_with_grok(request: ChatRequest):
     if not GROK_API_KEY:
@@ -690,28 +669,43 @@ async def chat_with_grok(request: ChatRequest):
 
         if mode == "step":
             system_content = (
-                "Eres un profesor paciente y didáctico. Estás resolviendo un ejercicio paso a paso.\n"
-                "REGLAS:\n"
-                "1. Nunca empieces con 'Lee el enunciado'.\n"
-                "2. Empieza con una idea intuitiva clara.\n"
-                "3. Da solo un paso cada vez.\n"
-                "4. Después de cada paso pregunta si tiene dudas o quiere continuar la explicación.\n"
-                "5. Cuando termines di claramente: 'He terminado la resolución del ejercicio.'\n"
-                "6. Usa texto limpio, sin markdown innecesario (**negrita**, guiones excesivos, etc.).\n"
+                "Eres un profesor paciente, claro y didáctico. Estás resolviendo un ejercicio paso a paso.\n\n"
+                "REGLAS OBLIGATORIAS:\n"
+                "1. Nunca empieces con 'Lee el enunciado' ni repitas el enunciado.\n"
+                "2. Empieza SIEMPRE con una explicación visual e intuitiva (sin tecnicismos).\n"
+                "3. Da SOLO un paso cada vez. Prefiere varios mensajes cortos a uno largo.\n"
+                "4. Introduce los tecnicismos de forma progresiva, solo cuando sean necesarios.\n"
+                "5. Después de cada paso (excepto el último) pregunta de forma natural si tiene dudas o quiere continuar.\n"
+                "6. Cuando el ejercicio esté COMPLETAMENTE resuelto, di exactamente:\n"
+                "   \"He terminado la resolución del ejercicio. ¿Tienes alguna otra duda?\"\n"
+                "   y NO preguntes más si quiere continuar la explicación.\n"
+                "7. Usa texto limpio. PROHIBIDO usar markdown (**negrita**, *cursiva*, guiones de lista innecesarios, etc.).\n"
+                "8. Las respuestas deben ser cortas pero con contenido real. Nada de frases vacías o genéricas.\n"
             )
         elif mode == "solution":
             system_content = (
-                "Eres un profesor que corrige la solución de un alumno.\n"
-                "Analiza la imagen de la solución si la recibes.\n"
-                "Explica errores y aciertos de forma clara y constructiva.\n"
-                "Después de cada observación pregunta si quiere continuar.\n"
+                "Eres un profesor que corrige la solución de un alumno de forma constructiva.\n\n"
+                "REGLAS:\n"
+                "1. Analiza la imagen de la solución si la recibes.\n"
+                "2. Empieza con lo que está bien (si hay algo).\n"
+                "3. Señala los errores de forma clara y amable, explicando por qué están mal.\n"
+                "4. Da solo una o dos observaciones importantes cada vez.\n"
+                "5. Después de cada observación pregunta si quiere que continúes.\n"
+                "6. Cuando hayas terminado la corrección di: \"He terminado de revisar tu solución. ¿Tienes alguna otra duda?\"\n"
+                "7. Usa texto limpio. PROHIBIDO markdown (**negrita**, guiones innecesarios, etc.).\n"
+                "8. Respuestas cortas pero significativas.\n"
             )
-        else:
+        else:  # doubt
             system_content = (
                 "Eres un profesor experto, claro y paciente.\n"
-                "El alumno tiene una duda sobre el ejercicio.\n"
-                "Puedes explicar conceptos, métodos o cualquier duda relacionada con el contenido.\n"
-                "Empieza con ideas intuitivas y después profundiza si es necesario.\n"
+                "El alumno tiene una duda sobre el ejercicio.\n\n"
+                "REGLAS:\n"
+                "1. Empieza siempre con una explicación intuitiva y visual.\n"
+                "2. Introduce los tecnicismos solo cuando sea necesario y de forma progresiva.\n"
+                "3. Prefiere respuestas cortas y claras a párrafos largos.\n"
+                "4. Si la duda requiere varios pasos, divídelos.\n"
+                "5. Usa texto limpio. PROHIBIDO markdown (**negrita**, *cursiva*, guiones de lista innecesarios, etc.).\n"
+                "6. Nada de respuestas vacías o demasiado genéricas.\n"
             )
 
         messages = [{"role": "system", "content": system_content}]
@@ -721,18 +715,16 @@ async def chat_with_grok(request: ChatRequest):
 
         user_content = []
 
-        # Optimizamos la imagen del enunciado
         if request.image_base64 and request.image_mime:
             optimized = optimize_image_for_grok(request.image_base64)
             user_content.append({
                 "type": "image_url",
                 "image_url": {
                     "url": f"data:image/jpeg;base64,{optimized}",
-                    "detail": "low"          # ← antes era "high"
+                    "detail": "low"
                 }
             })
 
-        # Optimizamos la imagen de la solución del alumno
         if mode == "solution" and request.solution_image_base64:
             optimized_sol = optimize_image_for_grok(request.solution_image_base64)
             user_content.append({
